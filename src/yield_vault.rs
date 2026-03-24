@@ -27,6 +27,20 @@ pub struct UserPosition {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApyHistory {
+    pub data: Vec<u64>,
+    pub head: u32,
+    pub last_update: u64,
+    pub cached_twap_7d: u32,
+    pub cached_twap_30d: u32,
+    pub cached_twap_90d: u32,
+    pub ema_projected: u32,
+    pub volatility: u32,
+    pub is_frozen: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultMetrics {
     pub total_shares: i128,
     pub total_amount_a: i128,
@@ -79,6 +93,20 @@ impl YieldVault {
             last_harvest: env.ledger().timestamp(),
         };
         env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+
+        // Initialize APY History
+        let apy_history = ApyHistory {
+            data: Vec::new(&env),
+            head: 0,
+            last_update: env.ledger().timestamp(),
+            cached_twap_7d: 0,
+            cached_twap_30d: 0,
+            cached_twap_90d: 0,
+            ema_projected: 0,
+            volatility: 0,
+            is_frozen: false,
+        };
+        env.storage().instance().set(&Symbol::new(&env, "apy_history"), &apy_history);
     }
 
     /// Deposit tokens into the vault
@@ -259,6 +287,124 @@ impl YieldVault {
     pub fn get_apy(env: Env) -> u32 {
         let metrics = Self::get_metrics(env);
         metrics.apy
+    }
+
+    /// Get projected annual yield using EMA
+    pub fn get_projected_annual_yield(env: Env) -> u32 {
+        let history: ApyHistory = env.storage().instance().get(&Symbol::new(&env, "apy_history")).unwrap_optimized();
+        history.ema_projected
+    }
+
+    /// Update APY history (can be called by keeper or admin)
+    pub fn update_apy(env: Env, new_apy_bps: u32, volume: u16) {
+        let mut history: ApyHistory = env.storage().instance().get(&Symbol::new(&env, "apy_history")).unwrap_optimized();
+        if history.is_frozen {
+            panic!("oracle is frozen due to manipulation detection");
+        }
+
+        let timestamp = env.ledger().timestamp() as u32;
+        
+        // Oracle manipulation detection: >50% spike in 1 hour
+        let last_apy = history.ema_projected; 
+        if last_apy > 0 {
+            let max_allowed = last_apy + (last_apy / 2);
+            if new_apy_bps > max_allowed {
+                history.is_frozen = true;
+                env.storage().instance().set(&Symbol::new(&env, "apy_history"), &history);
+                panic!("emergency freeze: APY spike > 50%");
+            }
+        }
+
+        // Pack data
+        let timestamp_u64 = (timestamp as u64) << 32;
+        let apy_u64 = (new_apy_bps as u64) << 16;
+        let volume_u64 = volume as u64;
+        let packed = timestamp_u64 | apy_u64 | volume_u64;
+
+        let len = history.data.len();
+        if len < 2160 {
+            history.data.push_back(packed);
+            history.head = history.data.len();
+        } else {
+            history.data.set(history.head % 2160, packed);
+            history.head = (history.head + 1) % 2160;
+        }
+
+        history.last_update = timestamp as u64;
+        
+        Self::recalculate_metrics(&env, &mut history, new_apy_bps);
+
+        env.storage().instance().set(&Symbol::new(&env, "apy_history"), &history);
+        
+        let mut metrics = Self::get_metrics(env.clone());
+        metrics.apy = history.ema_projected;
+        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+    }
+
+    fn recalculate_metrics(_env: &Env, history: &mut ApyHistory, current_apy: u32) {
+        let len = history.data.len();
+        if len == 0 { return; }
+
+        let mut sum_7d: u128 = 0;
+        let mut count_7d: u32 = 0;
+        let mut sum_30d: u128 = 0;
+        let mut count_30d: u32 = 0;
+        let mut sum_90d: u128 = 0;
+        let mut count_90d: u32 = 0;
+
+        for i in 0..len {
+            let idx = if history.head > i {
+                history.head - 1 - i
+            } else {
+                len - 1 - (i - history.head)
+            };
+            let val = history.data.get(idx).unwrap();
+            let apy = ((val >> 16) & 0xFFFF) as u32;
+
+            if i < 168 { sum_7d += apy as u128; count_7d += 1; }
+            if i < 720 { sum_30d += apy as u128; count_30d += 1; }
+            if i < 2160 { sum_90d += apy as u128; count_90d += 1; }
+        }
+
+        history.cached_twap_7d = if count_7d > 0 { (sum_7d / count_7d as u128) as u32 } else { 0 };
+        history.cached_twap_30d = if count_30d > 0 { (sum_30d / count_30d as u128) as u32 } else { 0 };
+        history.cached_twap_90d = if count_90d > 0 { (sum_90d / count_90d as u128) as u32 } else { 0 };
+
+        if history.ema_projected == 0 {
+            history.ema_projected = current_apy;
+        } else {
+            let alpha = 200; // 0.02 * 10000 -> N ~ 99 hours
+            let new_ema = (current_apy as u128 * alpha + history.ema_projected as u128 * (10000 - alpha)) / 10000;
+            history.ema_projected = new_ema as u32;
+        }
+
+        let mean = history.cached_twap_7d;
+        let mut variance_sum: u128 = 0;
+        for i in 0..count_7d {
+            let idx = if history.head > i { history.head - 1 - i } else { len - 1 - (i - history.head) };
+            let val = history.data.get(idx).unwrap();
+            let apy = ((val >> 16) & 0xFFFF) as u32;
+            let diff = if apy > mean { apy - mean } else { mean - apy };
+            variance_sum += (diff as u128) * (diff as u128);
+        }
+        
+        let variance = if count_7d > 0 { variance_sum / count_7d as u128 } else { 0 };
+        history.volatility = Self::integer_sqrt(variance) as u32;
+    }
+
+    fn integer_sqrt(mut n: u128) -> u128 {
+        if n == 0 { return 0; }
+        let mut x0 = n / 2;
+        if x0 != 0 {
+            let mut x1 = (x0 + n / x0) / 2;
+            while x1 < x0 {
+                x0 = x1;
+                x1 = (x0 + n / x0) / 2;
+            }
+            x0
+        } else {
+            n
+        }
     }
 
     /// Get TVL for the vault

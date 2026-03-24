@@ -7,6 +7,7 @@ mod reward_distributor;
 mod strategy_registry;
 mod swap_router;
 mod risk_engine;
+pub mod fee_collector;
 
 pub use yield_vault::*;
 pub use rebalance_engine::*;

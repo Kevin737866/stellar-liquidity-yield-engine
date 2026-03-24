@@ -1,0 +1,44 @@
+{
+    "compilerOptions": {
+        // --- Type Checking ---
+        "strict": true,
+        "noImplicitAny": true,
+        "strictNullChecks": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        // --- Modules ---
+        "module": "esnext",
+        "moduleResolution": "node",
+        "resolveJsonModule": true,
+        "esModuleInterop": true,
+        "allowSyntheticDefaultImports": true,
+        // --- React & Browser ---
+        "target": "es5",
+        "lib": [
+            "dom",
+            "dom.iterable",
+            "esnext"
+        ],
+        "jsx": "react-jsx",
+        "allowJs": true,
+        "isolatedModules": true,
+        "noEmit": true, // Critical for frameworks that do their own transpiling (Next.js, Vite, CRA)
+        // --- Path Aliases (Optional but recommended) ---
+        "baseUrl": "src",
+        "paths": {
+            "@/components/*": [
+                "components/*"
+            ],
+            "@/lib/*": [
+                "lib/*"
+            ],
+            // etc.
+        }
+    },
+    "include": [
+        "src" // Only check files inside the 'src' directory of the UI project
+    ],
+    "exclude": [
+        "node_modules"
+    ]
+}
