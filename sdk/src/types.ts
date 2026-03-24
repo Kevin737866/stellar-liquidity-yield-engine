@@ -209,6 +209,47 @@ export interface FeeRevenue {
   totalFees: bigint;
 }
 
+// Arbitrage Strategy Types
+export interface ArbitrageThresholds {
+  minApyDelta: number; // Minimum APY difference to trigger rebalance (basis points)
+  maxIlTolerance: number; // Maximum acceptable IL (basis points)
+  cooldownPeriod: number; // Seconds between rebalances per vault
+  lastRebalanceTime: number; // Timestamp of last rebalance
+}
+
+export interface RiskAssessment {
+  poolId: Address;
+  impermanentLossRisk: number; // Basis points
+  estimatedSlippage: number; // Basis points
+  volatilityScore: number; // 0-100
+  circuitBreakerTriggered: boolean;
+  timestamp: number;
+}
+
+export interface VolatilityMetrics {
+  priceCorrelation: number; // -10000 to 10000 (percentage)
+  volatility24h: number; // Basis points
+  volatility7d: number; // Basis points
+}
+
+export interface ArbitrageOpportunity {
+  poolId: Address;
+  currentApy: number; // Basis points
+  projectedApy: number; // Basis points after rebalance
+  ilRisk: number; // Basis points
+  netProfit: bigint; // In native token units
+  apyDelta: number; // Difference in basis points
+  recommended: boolean;
+}
+
+export interface RebalanceResult {
+  timestamp: number;
+  success: boolean;
+  opportunity?: ArbitrageOpportunity;
+  profit?: bigint;
+  message: string;
+}
+
 // Transaction Types
 export interface TransactionOptions {
   gasLimit?: number;

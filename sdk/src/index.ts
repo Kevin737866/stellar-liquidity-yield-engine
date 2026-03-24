@@ -4,6 +4,8 @@ export * from './types';
 export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
+export { ArbitrageScanner, ArbitrageExecutor, ArbitrageOptimizer } from './arbitrage';
+export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
 // Re-export commonly used types and classes for convenience
 export {
@@ -13,6 +15,12 @@ export {
 export {
   RebalancerClient as Rebalancer
 } from './rebalancer';
+
+export {
+  ArbitrageScanner,
+  ArbitrageExecutor,
+  ArbitrageOptimizer,
+} from './arbitrage';
 
 // Network configurations
 export const TESTNET_CONFIG = {
