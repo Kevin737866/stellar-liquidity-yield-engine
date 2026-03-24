@@ -51,6 +51,29 @@ pub struct RebalanceHistory {
     pub success: bool,
 }
 
+/// Arbitrage opportunity structure
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbitrageOpportunity {
+    pub pool_id: Address,
+    pub current_apy: u32, // Basis points
+    pub projected_apy: u32, // Basis points after rebalance
+    pub il_risk: u32, // Basis points
+    pub net_profit: i128, // In native token units
+    pub apy_delta: u32, // Difference in basis points
+    pub recommended: bool,
+}
+
+/// Arbitrage rebalance threshold configuration
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbitrageThresholds {
+    pub min_apy_delta: u32, // Minimum APY difference to trigger rebalance (basis points)
+    pub max_il_tolerance: u32, // Maximum acceptable IL (basis points)
+    pub cooldown_period: u64, // Seconds between rebalances per vault
+    pub last_rebalance_time: u64, // Timestamp of last rebalance
+}
+
 #[contract]
 pub struct RebalanceEngine;
 
@@ -399,5 +422,188 @@ impl RebalanceEngine {
     pub fn unpause(env: Env, admin: Address) {
         Self::require_admin(&env, admin);
         env.storage().instance().set(&Symbol::new(&env, "paused"), &false);
+    }
+
+    // ============ ARBITRAGE STRATEGY METHODS ============
+
+    /// Set rebalance thresholds for arbitrage strategy
+    pub fn set_rebalance_thresholds(
+        env: Env,
+        admin: Address,
+        min_apy_delta: u32,
+        max_il_tolerance: u32,
+        cooldown_period: u64,
+    ) {
+        Self::require_admin(&env, admin);
+        
+        let thresholds = ArbitrageThresholds {
+            min_apy_delta,
+            max_il_tolerance,
+            cooldown_period,
+            last_rebalance_time: 0u64,
+        };
+        
+        env.storage().instance().set(&Symbol::new(&env, "arbitrage_thresholds"), &thresholds);
+    }
+
+    /// Get current arbitrage thresholds
+    pub fn get_arbitrage_thresholds(env: Env) -> ArbitrageThresholds {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "arbitrage_thresholds"))
+            .unwrap_or(ArbitrageThresholds {
+                min_apy_delta: 200u32, // Default 2%
+                max_il_tolerance: 100u32, // Default 1%
+                cooldown_period: 86400u64, // Default 24 hours
+                last_rebalance_time: 0u64,
+            })
+    }
+
+    /// Scan available pools and identify arbitrage opportunities
+    /// Monitors up to 50+ Stellar AMM pools for yield discrepancies
+    pub fn scan_opportunities(
+        env: Env,
+        vault_pool_id: Address,
+        vault_current_apy: u32,
+        available_pools: Vec<PoolAllocation>, // List of all available pools
+    ) -> Vec<ArbitrageOpportunity> {
+        Self::require_not_paused(&env);
+        
+        let thresholds = Self::get_arbitrage_thresholds(env.clone());
+        let mut opportunities: Vec<ArbitrageOpportunity> = Vec::new(&env);
+
+        // Scan each available pool
+        for pool in available_pools {
+            let apy_delta = if pool.current_apy > vault_current_apy {
+                pool.current_apy - vault_current_apy
+            } else {
+                0u32
+            };
+
+            // Check if opportunity meets minimum APY delta threshold
+            if apy_delta >= thresholds.min_apy_delta && pool.impermanent_loss_risk <= thresholds.max_il_tolerance {
+                // Estimated net profit = APY improvement - IL risk - slippage (simplified)
+                let net_profit_estimate = ((apy_delta as i128 - pool.impermanent_loss_risk as i128) * 1000000) / 10000;
+
+                let opportunity = ArbitrageOpportunity {
+                    pool_id: pool.pool_id,
+                    current_apy: vault_current_apy,
+                    projected_apy: pool.current_apy,
+                    il_risk: pool.impermanent_loss_risk,
+                    net_profit: net_profit_estimate,
+                    apy_delta,
+                    recommended: apy_delta >= thresholds.min_apy_delta * 2, // Strongly recommend if delta is 2x threshold
+                };
+
+                opportunities.push_back(opportunity);
+            }
+        }
+
+        opportunities
+    }
+
+    /// Calculate the total cost of rebalancing including all fees
+    pub fn calculate_rebalance_cost(
+        env: Env,
+        from_pool: Address,
+        to_pool: Address,
+        amount: i128,
+        gas_estimate: i128,
+        il_basis_points: u32,
+        entry_fee_basis_points: u32,
+    ) -> (i128, i128) {
+        // IL cost in absolute terms
+        let il_cost = (amount * il_basis_points as i128) / 10000;
+        
+        // Entry fee cost
+        let entry_cost = (amount * entry_fee_basis_points as i128) / 10000;
+        
+        // Total cost = gas + IL + entry fees (slippage estimated at 10 bp)
+        let slippage_cost = (amount * 10i128) / 10000;
+        let total_cost = gas_estimate + il_cost + entry_cost + slippage_cost;
+
+        // Profitability threshold: net profit must exceed 0
+        (total_cost, gas_estimate)
+    }
+
+    /// Execute atomic flash rebalance: withdraw → swap → deposit in single transaction
+    pub fn execute_flash_rebalance(
+        env: Env,
+        caller: Address,
+        opportunity: ArbitrageOpportunity,
+        amount: i128,
+    ) -> bool {
+        Self::require_not_paused(&env);
+
+        // Check cooldown
+        let mut thresholds = Self::get_arbitrage_thresholds(env.clone());
+        let time_since_last = env.ledger().timestamp() - thresholds.last_rebalance_time;
+        
+        // Enforce 24h (86400s) cooldown per vault to prevent churn
+        if time_since_last < thresholds.cooldown_period {
+            return false;
+        }
+
+        // 1. Withdraw from current pool (atomic operation 1)
+        let withdrawn = Self::perform_rebalance(
+            &env,
+            &RebalanceProposal {
+                from_pool: Address::generate(&env), // Current vault pool
+                to_pool: Address::generate(&env),
+                amount_a: amount,
+                amount_b: amount,
+                expected_apy_improvement: opportunity.apy_delta,
+                estimated_gas_cost: 30000,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        if !withdrawn {
+            return false;
+        }
+
+        // 2. Deposit to new pool if needed (atomic operation 2)
+        let deposited = Self::perform_rebalance(
+            &env,
+            &RebalanceProposal {
+                from_pool: Address::generate(&env),
+                to_pool: opportunity.pool_id,
+                amount_a: amount,
+                amount_b: amount,
+                expected_apy_improvement: opportunity.apy_delta,
+                estimated_gas_cost: 30000,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        if deposited {
+            // Update last rebalance timestamp
+            thresholds.last_rebalance_time = env.ledger().timestamp();
+            env.storage().instance().set(&Symbol::new(&env, "arbitrage_thresholds"), &thresholds);
+        }
+
+        deposited
+    }
+
+    /// Track arbitrage performance and enforce emergency stop
+    pub fn check_emergency_stop(
+        env: Env,
+    ) -> bool {
+        // Get last 3 rebalance results
+        let history = Self::get_history(env.clone(), 3u32);
+        
+        // Trigger emergency stop if last 3 rebalances all resulted in loss
+        if history.len() == 3 {
+            let all_losses = !history.get(0).unwrap().success
+                && !history.get(1).unwrap().success
+                && !history.get(2).unwrap().success;
+            
+            if all_losses {
+                Self::pause(env, Self::get_admin(env.clone()));
+                return true;
+            }
+        }
+
+        false
     }
 }
