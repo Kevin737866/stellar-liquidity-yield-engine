@@ -8,7 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
-soroban-token-contract = { version = "22.0.0", features = ["testutils"] }
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
