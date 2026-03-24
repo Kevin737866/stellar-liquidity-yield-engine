@@ -4,6 +4,7 @@ export * from './types';
 export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
+export * from './insurance';
 
 // Re-export commonly used types and classes for convenience
 export {

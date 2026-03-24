@@ -310,4 +310,109 @@ impl YieldVault {
         require!(admin == current_admin, "unauthorized");
         env.storage().instance().set(&Symbol::new(&env, "paused"), &false);
     }
+
+    // ─── Insurance Integration ────────────────────────────────────────────────
+
+    /// One-click deposit + insurance purchase.
+    ///
+    /// Deposits tokens into the vault and simultaneously purchases an insurance
+    /// policy covering the deposit against impermanent loss.
+    /// Returns (shares_minted, policy_id).
+    pub fn deposit_with_insurance(
+        env: Env,
+        user: Address,
+        amount_a: i128,
+        amount_b: i128,
+        min_shares: i128,
+        coverage_period: u64,
+        current_price_ratio_scaled: i128,
+        historical_volatility_bps: u32,
+        pool_correlation_bps: u32,
+        auto_renew: bool,
+        insurance_contract: Address,
+        reserve_token: Address,
+    ) -> (i128, u64) {
+        Self::require_not_paused(&env);
+
+        // Step 1: Standard deposit
+        let shares = Self::deposit(
+            env.clone(),
+            user.clone(),
+            amount_a,
+            amount_b,
+            min_shares,
+        );
+
+        // Step 2: Purchase insurance covering deposit amount_a as proxy for coverage
+        // The coverage amount is the value of token_a deposited (simplified)
+        use crate::il_insurance::ILInsurance;
+        let policy_id = ILInsurance::purchase_insurance(
+            env.clone(),
+            user.clone(),
+            amount_a,
+            coverage_period,
+            current_price_ratio_scaled,
+            historical_volatility_bps,
+            pool_correlation_bps,
+            auto_renew,
+            reserve_token,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "insured_deposit"), user),
+            (shares, policy_id, amount_a, coverage_period),
+        );
+
+        (shares, policy_id)
+    }
+
+    /// Returns the effective APY net of insurance premium cost.
+    ///
+    /// insured_apy = vault_apy - annualised_premium_cost_bps
+    /// where annualised_premium_cost = (premium_bps / coverage_days) * 365
+    pub fn get_insured_apy(
+        env: Env,
+        coverage_period_days: u32,
+        premium_bps: u32,
+    ) -> i32 {
+        let metrics = Self::get_metrics(env);
+        let vault_apy = metrics.apy as i32;
+
+        if coverage_period_days == 0 {
+            return vault_apy;
+        }
+
+        // Annualise the premium: (premium_bps / coverage_days) * 365
+        let annualised_premium_bps = (premium_bps as i32 * 365) / coverage_period_days as i32;
+
+        vault_apy - annualised_premium_bps
+    }
+
+    /// Check if a policy is eligible for auto-renewal and return the renewal premium.
+    /// Auto-renewal extends coverage using harvested yield from the user's position.
+    /// Returns (eligible, estimated_premium) – both zero if not eligible.
+    pub fn check_auto_renewal_eligibility(
+        env: Env,
+        user: Address,
+        min_yield_threshold: i128,
+    ) -> (bool, i128) {
+        let position = Self::get_user_position(env.clone(), user.clone());
+        let metrics = Self::get_metrics(env);
+
+        // Estimate accrued yield for the user's share of the vault
+        if metrics.total_shares == 0 {
+            return (false, 0);
+        }
+        let user_share_of_total = position.shares * 10000 / metrics.total_shares;
+        let estimated_yield_a =
+            metrics.total_amount_a * user_share_of_total / 10000 - position.deposited_amount_a;
+
+        if estimated_yield_a >= min_yield_threshold {
+            // Estimated premium for 30-day renewal at base rate (0.5%)
+            let renewal_premium = position.deposited_amount_a * 50 / 10000;
+            (true, renewal_premium)
+        } else {
+            (false, 0)
+        }
+    }
 }
