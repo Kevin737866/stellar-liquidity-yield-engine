@@ -7,20 +7,24 @@ export { YieldCalculator } from './yieldCalculator';
 export { ArbitrageScanner, ArbitrageExecutor, ArbitrageOptimizer } from './arbitrage';
 export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
-// Re-export commonly used types and classes for convenience
+// Governance SDK exports
 export {
-  VaultClient as Vault
-} from './vaultClient';
-
-export {
-  RebalancerClient as Rebalancer
-} from './rebalancer';
-
-export {
-  ArbitrageScanner,
-  ArbitrageExecutor,
-  ArbitrageOptimizer,
-} from './arbitrage';
+  GovernanceSDK,
+  ProposalState,
+  type GovernanceProposal,
+  type CallData,
+  type LockInfo,
+  type FeeDistribution,
+  type ProtocolParameters,
+  calculateVotingPower,
+  calculateBoostMultiplier,
+  formatVotingPower,
+  formatBasisPoints,
+  formatDuration,
+  hasProposalPassed,
+  getTimeUntilExpiry,
+  GOVERNANCE_CONSTANTS
+} from './governance';
 
 // Network configurations
 export const TESTNET_CONFIG = {
@@ -31,7 +35,11 @@ export const TESTNET_CONFIG = {
     yieldEngine: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
     rewardDistributor: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
     rebalanceEngine: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
-    strategyRegistry: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q'
+    strategyRegistry: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
+    governanceToken: 'GOV_TOKEN_CONTRACT_ADDRESS',
+    votingEscrow: 'VE_TOKEN_CONTRACT_ADDRESS',
+    stakingContract: 'STAKING_CONTRACT_ADDRESS',
+    feeDistributor: 'FEE_DISTRIBUTOR_ADDRESS'
   }
 };
 
@@ -43,7 +51,11 @@ export const MAINNET_CONFIG = {
     yieldEngine: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
     rewardDistributor: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
     rebalanceEngine: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
-    strategyRegistry: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q'
+    strategyRegistry: 'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
+    governanceToken: 'GOV_TOKEN_CONTRACT_ADDRESS',
+    votingEscrow: 'VE_TOKEN_CONTRACT_ADDRESS',
+    stakingContract: 'STAKING_CONTRACT_ADDRESS',
+    feeDistributor: 'FEE_DISTRIBUTOR_ADDRESS'
   }
 };
 
@@ -58,5 +70,12 @@ export function createRebalancerClient(network: 'testnet' | 'mainnet' = 'testnet
   return new RebalancerClient(config);
 }
 
+export function createGovernanceClient(network: 'testnet' | 'mainnet' = 'testnet') {
+  const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
+  // Note: GovernanceSDK constructor takes server, networkPassphrase, and optional keypair
+  // This is a placeholder - actual implementation would need proper initialization
+  return config;
+}
+
 // Version
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
