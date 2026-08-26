@@ -59,12 +59,22 @@ export class VaultClient {
 
       const signedTx = userKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0, // Soroban doesn't provide gas usage in the same way
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Deposit failed: ${error.message}`, 'DEPOSIT_ERROR');
@@ -97,28 +107,43 @@ export class VaultClient {
 
       const signedTx = userKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
-      if (result.status === 'SUCCESS') {
-        const txResult = await this.server.getTransaction(result.hash);
-        const returnValue = this.parseWithdrawResult(txResult.result!.returnValue);
-        
-        return {
-          hash: result.hash,
-          success: true,
-          gasUsed: 0,
-          amountA: returnValue.amountA,
-          amountB: returnValue.amountB
-        };
-      } else {
+
+      if (result.status === 'ERROR') {
         return {
           hash: result.hash,
           success: false,
           gasUsed: 0,
-          error: result.errorResult,
+          error: result.errorResult?.toXDR('base64'),
           amountA: 0n,
           amountB: 0n
         };
       }
+
+      const txResult = await this.confirmTransaction(result.hash);
+
+      if (
+        txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS &&
+        txResult.returnValue
+      ) {
+        const returnValue = this.parseWithdrawResult(txResult.returnValue);
+
+        return {
+          hash: result.hash,
+          success: true,
+          gasUsed: this.parseGasUsed(txResult),
+          amountA: returnValue.amountA,
+          amountB: returnValue.amountB
+        };
+      }
+
+      return {
+        hash: result.hash,
+        success: false,
+        gasUsed: 0,
+        error: txResult.status,
+        amountA: 0n,
+        amountB: 0n
+      };
     } catch (error) {
       throw new VaultError(`Withdraw failed: ${error.message}`, 'WITHDRAW_ERROR');
     }
@@ -144,12 +169,22 @@ export class VaultClient {
 
       const signedTx = userKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0,
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Harvest failed: ${error.message}`, 'HARVEST_ERROR');
@@ -335,12 +370,22 @@ export class VaultClient {
 
       const signedTx = adminKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0,
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Pause failed: ${error.message}`, 'PAUSE_ERROR');
@@ -364,12 +409,22 @@ export class VaultClient {
 
       const signedTx = adminKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0,
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Unpause failed: ${error.message}`, 'UNPAUSE_ERROR');
@@ -377,6 +432,54 @@ export class VaultClient {
   }
 
   // Helper methods
+
+  /**
+   * Poll `getTransaction` until the transaction reaches a terminal state
+   * (SUCCESS or FAILED). Soroban RPC's `sendTransaction` only reports that
+   * a transaction was accepted (PENDING) — the final outcome requires
+   * polling `getTransaction`.
+   */
+  private async confirmTransaction(
+    hash: string,
+    timeoutMs: number = 30_000
+  ): Promise<SorobanRpc.GetTransactionResponse> {
+    const deadline = Date.now() + timeoutMs;
+    let txResult = await this.server.getTransaction(hash);
+
+    while (
+      (txResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND ||
+        (txResult.status as string) === 'PENDING') &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      txResult = await this.server.getTransaction(hash);
+    }
+
+    return txResult;
+  }
+
+  /**
+   * Parse the Soroban resource usage (instructions) from a confirmed
+   * transaction result. Soroban transactions report their resource usage
+   * via `getTransaction`; fall back to 0 if the data is unavailable.
+   */
+  private parseGasUsed(txResult: SorobanRpc.GetTransactionResponse): number {
+    if (txResult.status !== SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+      return 0;
+    }
+    try {
+      const envelope =
+        txResult.envelopeXdr.v1()?.tx() ?? txResult.envelopeXdr.v0()?.tx();
+      const sorobanData = envelope?.ext().sorobanData();
+      if (sorobanData) {
+        return sorobanData.resources().instructions();
+      }
+    } catch {
+      // Malformed metadata — fall back to 0 below.
+    }
+    return 0;
+  }
+
   private getNetworkPassphrase(): string {
     switch (this.networkConfig.network) {
       case 'mainnet':
