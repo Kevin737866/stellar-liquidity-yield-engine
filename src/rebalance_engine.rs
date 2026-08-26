@@ -264,6 +264,11 @@ impl RebalanceEngine {
 
     /// Get rebalance history
     pub fn get_history(env: Env, limit: u32) -> Vec<RebalanceHistory> {
+        // A limit of 0 means no results should be returned
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+
         let history: Vec<RebalanceHistory> = env.storage()
             .instance()
             .get(&Symbol::new(&env, "history"))

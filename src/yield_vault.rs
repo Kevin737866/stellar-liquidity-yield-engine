@@ -103,8 +103,19 @@ impl YieldVault {
 
         // Calculate shares based on current ratio
         let shares = if metrics.total_shares == 0 {
-            // First deposit - 1:1 ratio
-            amount_a.min(amount_b)
+            // First deposit: compute a geometric mean so both tokens are valued.
+            // If either side is zero the depositor still earns shares proportional
+            // to what they contributed, preventing over/under-pricing.
+            if amount_a > 0 && amount_b > 0 {
+                // Geometric mean – values both tokens equally regardless of
+                // the absolute amounts deposited.
+                let product = (amount_a as u128) * (amount_b as u128);
+                let sqrt_val = Self::isqrt(product);
+                sqrt_val as i128
+            } else {
+                // Single-sided deposit: use the non-zero amount directly.
+                amount_a + amount_b
+            }
         } else {
             // Calculate proportional shares
             let share_ratio = amount_a * metrics.total_shares / metrics.total_amount_a;
@@ -267,11 +278,33 @@ impl YieldVault {
         metrics.tvl
     }
 
-    /// Calculate pending rewards (placeholder)
-    fn calculate_pending_rewards(env: &Env, pool_id: &Address) -> i128 {
-        // This would integrate with Stellar AMM to calculate actual rewards
-        // For now, return a simulated value
-        1000i128
+    /// Calculate pending rewards based on vault TVL and APY
+    fn calculate_pending_rewards(env: &Env, _pool_id: &Address) -> i128 {
+        let metrics = Self::get_metrics(env);
+
+        if metrics.total_shares == 0 {
+            return 0;
+        }
+
+        // Calculate rewards proportionally based on TVL and APY
+        // APY is in basis points (e.g. 1500 = 15%)
+        // Rewards accrue over the time elapsed since last harvest
+        let time_since_last_harvest = env.ledger().timestamp() - metrics.last_harvest;
+
+        // Compute a combined TVL estimate (simplified: total_amount_a + total_amount_b)
+        let tvl = metrics.total_amount_a + metrics.total_amount_b;
+
+        // Annualised reward = tvl * apy / 10000
+        // Per-second reward  = annualised / (365 * 24 * 3600)
+        let seconds_per_year: u64 = 365 * 24 * 3600;
+        let annual_reward = tvl * metrics.apy as i128 / 10000;
+        let reward = annual_reward * time_since_last_harvest as i128 / seconds_per_year as i128;
+
+        if reward > 0 {
+            reward
+        } else {
+            0
+        }
     }
 
     /// Get admin address
@@ -280,6 +313,20 @@ impl YieldVault {
             .instance()
             .get(&Symbol::new(&env, "admin"))
             .unwrap_optimized()
+    }
+
+    /// Integer square root (Babylonian method) for share calculations
+    fn isqrt(n: u128) -> u128 {
+        if n == 0 {
+            return 0;
+        }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
     }
 
     /// Check if vault is paused
