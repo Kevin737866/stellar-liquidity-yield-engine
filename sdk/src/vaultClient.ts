@@ -407,51 +407,46 @@ export class VaultClient {
   }
 
   private parseVaultInfo(returnValue: xdr.ScVal): VaultInfo {
-    // Parse the ScVal into VaultInfo structure
-    // This is a simplified implementation
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      name: data[0]?.toString() || '',
-      tokenA: new Address(data[1]?.toString() || ''),
-      tokenB: new Address(data[2]?.toString() || ''),
-      poolId: new Address(data[3]?.toString() || ''),
-      strategyId: Number(data[4] || 0),
-      feeRate: Number(data[5] || 0),
-      harvestFee: Number(data[6] || 0),
-      withdrawalFee: Number(data[7] || 0)
+      name: fields[0]?.toString() || '',
+      tokenA: new Address(fields[1]?.toString() || ''),
+      tokenB: new Address(fields[2]?.toString() || ''),
+      poolId: new Address(fields[3]?.toString() || ''),
+      strategyId: Number(fields[4] || 0),
+      feeRate: Number(fields[5] || 0),
+      harvestFee: Number(fields[6] || 0),
+      withdrawalFee: Number(fields[7] || 0)
     };
   }
 
   private parseMetrics(returnValue: xdr.ScVal): VaultMetrics {
-    // Parse the ScVal into VaultMetrics structure
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      totalShares: BigInt(data[0]?.toString() || '0'),
-      totalAmountA: BigInt(data[1]?.toString() || '0'),
-      totalAmountB: BigInt(data[2]?.toString() || '0'),
-      apy: Number(data[3] || 0),
-      tvl: BigInt(data[4]?.toString() || '0'),
-      lastHarvest: Number(data[5] || 0)
+      totalShares: BigInt(fields[0]?.toString() || '0'),
+      totalAmountA: BigInt(fields[1]?.toString() || '0'),
+      totalAmountB: BigInt(fields[2]?.toString() || '0'),
+      apy: Number(fields[3] || 0),
+      tvl: BigInt(fields[4]?.toString() || '0'),
+      lastHarvest: Number(fields[5] || 0)
     };
   }
 
   private parseUserPosition(returnValue: xdr.ScVal): UserPosition {
-    // Parse the ScVal into UserPosition structure
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      shares: BigInt(data[0]?.toString() || '0'),
-      lastHarvest: Number(data[1] || 0),
-      depositedAmountA: BigInt(data[2]?.toString() || '0'),
-      depositedAmountB: BigInt(data[3]?.toString() || '0')
+      shares: BigInt(fields[0]?.toString() || '0'),
+      lastHarvest: Number(fields[1] || 0),
+      depositedAmountA: BigInt(fields[2]?.toString() || '0'),
+      depositedAmountB: BigInt(fields[3]?.toString() || '0')
     };
   }
 
   private parseWithdrawResult(returnValue: xdr.ScVal): { amountA: bigint; amountB: bigint } {
-    // Parse the tuple return value
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      amountA: BigInt(data[0]?.toString() || '0'),
-      amountB: BigInt(data[1]?.toString() || '0')
+      amountA: BigInt(fields[0]?.toString() || '0'),
+      amountB: BigInt(fields[1]?.toString() || '0')
     };
   }
 }

@@ -776,30 +776,24 @@ export class GovernanceSDK {
    * Get all proposals
    */
   async getAllProposals(): Promise<GovernanceProposal[]> {
-    try {
-      const count = await this.simulateCall(
-        GOVERNANCE_CONTRACT_ADDRESS,
-        'get_proposal_count',
-        {}
-      );
+    const proposals: GovernanceProposal[] = [];
+    const MAX_PROPOSALS = 1000;
+    let consecutiveMisses = 0;
 
-      const proposals: GovernanceProposal[] = [];
-      const proposalCount = Number(count);
-
-      for (let i = 1; i <= proposalCount; i++) {
-        try {
-          const proposal = await this.getProposal(i);
-          proposals.push(proposal);
-        } catch (error) {
-          console.error(`Error fetching proposal ${i}:`, error);
+    for (let i = 0; i < MAX_PROPOSALS; i++) {
+      try {
+        const proposal = await this.getProposal(i);
+        proposals.push(proposal);
+        consecutiveMisses = 0;
+      } catch (error) {
+        consecutiveMisses++;
+        if (consecutiveMisses >= 10) {
+          break;
         }
       }
-
-      return proposals;
-    } catch (error) {
-      console.error('Error getting all proposals:', error);
-      throw error;
     }
+
+    return proposals;
   }
 
   /**
