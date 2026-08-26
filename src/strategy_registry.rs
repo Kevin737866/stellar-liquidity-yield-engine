@@ -59,6 +59,15 @@ pub struct StrategyApproval {
     pub comments: Symbol,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PerformanceHistoryTrimmed {
+    pub strategy_id: u32,
+    pub records_trimmed: u32,
+    pub records_kept: u32,
+    pub timestamp: u64,
+}
+
 #[contract]
 pub struct StrategyRegistry;
 
@@ -247,12 +256,26 @@ impl StrategyRegistry {
                 
                 // Keep only last 100 performance records
                 if strategy.performance_history.len() > 100 {
-                    let start = strategy.performance_history.len() - 100;
+                    let total_records = strategy.performance_history.len();
+                    let start = total_records - 100;
+                    let records_trimmed = start as u32;
                     let mut trimmed: Vec<PerformanceRecord> = Vec::new(&env);
-                    for j in start..strategy.performance_history.len() {
+                    for j in start..total_records {
                         trimmed.push_back(strategy.performance_history.get(j).unwrap());
                     }
                     strategy.performance_history = trimmed;
+
+                    // Publish event so off-chain analytics can capture dropped records
+                    let event = PerformanceHistoryTrimmed {
+                        strategy_id,
+                        records_trimmed,
+                        records_kept: 100,
+                        timestamp: env.ledger().timestamp(),
+                    };
+                    env.events().publish(
+                        (Symbol::new(&env, "performance_history_trimmed"), strategy_id),
+                        (event.records_trimmed, event.records_kept, event.timestamp),
+                    );
                 }
                 
                 strategies.set(i, strategy);

@@ -1355,7 +1355,7 @@ mod tests {
     fn test_token_distribution() {
         // Verify total allocations equal 100%
         let total = COMMUNITY_ALLOCATION + TEAM_ALLOCATION + TREASURY_ALLOCATION + LIQUIDITY_MINING_ALLOCATION;
-        assert_eq!(total, 1000); // 100%
+        assert_eq!(total, 1_000_000_000); // 100%
     }
 
     #[test]
