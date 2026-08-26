@@ -65,12 +65,22 @@ export class VaultClient {
 
       const signedTx = userKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0, // Soroban doesn't provide gas usage in the same way
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Deposit failed: ${error.message}`, 'DEPOSIT_ERROR');
@@ -103,28 +113,43 @@ export class VaultClient {
 
       const signedTx = userKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
-      if (result.status === 'SUCCESS') {
-        const txResult = await this.server.getTransaction(result.hash);
-        const returnValue = this.parseWithdrawResult(txResult.result!.returnValue);
-        
-        return {
-          hash: result.hash,
-          success: true,
-          gasUsed: 0,
-          amountA: returnValue.amountA,
-          amountB: returnValue.amountB
-        };
-      } else {
+
+      if (result.status === 'ERROR') {
         return {
           hash: result.hash,
           success: false,
           gasUsed: 0,
-          error: result.errorResult,
+          error: result.errorResult?.toXDR('base64'),
           amountA: 0n,
           amountB: 0n
         };
       }
+
+      const txResult = await this.confirmTransaction(result.hash);
+
+      if (
+        txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS &&
+        txResult.returnValue
+      ) {
+        const returnValue = this.parseWithdrawResult(txResult.returnValue);
+
+        return {
+          hash: result.hash,
+          success: true,
+          gasUsed: this.parseGasUsed(txResult),
+          amountA: returnValue.amountA,
+          amountB: returnValue.amountB
+        };
+      }
+
+      return {
+        hash: result.hash,
+        success: false,
+        gasUsed: 0,
+        error: txResult.status,
+        amountA: 0n,
+        amountB: 0n
+      };
     } catch (error) {
       throw new VaultError(`Withdraw failed: ${error.message}`, 'WITHDRAW_ERROR');
     }
@@ -150,12 +175,22 @@ export class VaultClient {
 
       const signedTx = userKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0,
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Harvest failed: ${error.message}`, 'HARVEST_ERROR');
@@ -341,12 +376,22 @@ export class VaultClient {
 
       const signedTx = adminKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0,
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Pause failed: ${error.message}`, 'PAUSE_ERROR');
@@ -370,12 +415,22 @@ export class VaultClient {
 
       const signedTx = adminKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
-      
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
       return {
         hash: result.hash,
-        success: result.status === 'SUCCESS',
-        gasUsed: 0,
-        error: result.status === 'ERROR' ? result.errorResult : undefined
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: this.parseGasUsed(txResult),
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
       throw new VaultError(`Unpause failed: ${error.message}`, 'UNPAUSE_ERROR');
@@ -429,51 +484,46 @@ export class VaultClient {
   }
 
   private parseVaultInfo(returnValue: xdr.ScVal): VaultInfo {
-    // Parse the ScVal into VaultInfo structure
-    // This is a simplified implementation
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      name: data[0]?.toString() || '',
-      tokenA: new Address(data[1]?.toString() || ''),
-      tokenB: new Address(data[2]?.toString() || ''),
-      poolId: new Address(data[3]?.toString() || ''),
-      strategyId: Number(data[4] || 0),
-      feeRate: Number(data[5] || 0),
-      harvestFee: Number(data[6] || 0),
-      withdrawalFee: Number(data[7] || 0)
+      name: fields[0]?.toString() || '',
+      tokenA: new Address(fields[1]?.toString() || ''),
+      tokenB: new Address(fields[2]?.toString() || ''),
+      poolId: new Address(fields[3]?.toString() || ''),
+      strategyId: Number(fields[4] || 0),
+      feeRate: Number(fields[5] || 0),
+      harvestFee: Number(fields[6] || 0),
+      withdrawalFee: Number(fields[7] || 0)
     };
   }
 
   private parseMetrics(returnValue: xdr.ScVal): VaultMetrics {
-    // Parse the ScVal into VaultMetrics structure
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      totalShares: BigInt(data[0]?.toString() || '0'),
-      totalAmountA: BigInt(data[1]?.toString() || '0'),
-      totalAmountB: BigInt(data[2]?.toString() || '0'),
-      apy: Number(data[3] || 0),
-      tvl: BigInt(data[4]?.toString() || '0'),
-      lastHarvest: Number(data[5] || 0)
+      totalShares: BigInt(fields[0]?.toString() || '0'),
+      totalAmountA: BigInt(fields[1]?.toString() || '0'),
+      totalAmountB: BigInt(fields[2]?.toString() || '0'),
+      apy: Number(fields[3] || 0),
+      tvl: BigInt(fields[4]?.toString() || '0'),
+      lastHarvest: Number(fields[5] || 0)
     };
   }
 
   private parseUserPosition(returnValue: xdr.ScVal): UserPosition {
-    // Parse the ScVal into UserPosition structure
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      shares: BigInt(data[0]?.toString() || '0'),
-      lastHarvest: Number(data[1] || 0),
-      depositedAmountA: BigInt(data[2]?.toString() || '0'),
-      depositedAmountB: BigInt(data[3]?.toString() || '0')
+      shares: BigInt(fields[0]?.toString() || '0'),
+      lastHarvest: Number(fields[1] || 0),
+      depositedAmountA: BigInt(fields[2]?.toString() || '0'),
+      depositedAmountB: BigInt(fields[3]?.toString() || '0')
     };
   }
 
   private parseWithdrawResult(returnValue: xdr.ScVal): { amountA: bigint; amountB: bigint } {
-    // Parse the tuple return value
-    const data = returnValue.object()?.val || [];
+    const fields = returnValue.fields() || [];
     return {
-      amountA: BigInt(data[0]?.toString() || '0'),
-      amountB: BigInt(data[1]?.toString() || '0')
+      amountA: BigInt(fields[0]?.toString() || '0'),
+      amountB: BigInt(fields[1]?.toString() || '0')
     };
   }
 }

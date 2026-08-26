@@ -52,6 +52,7 @@ export class RebalancerClient {
         .addOperation(
           this.contract.call(
             'create_strategy',
+            adminKeyPair.publicKey(),
             name,
             riskLevel.toString(),
             minApyThreshold.toString(),
@@ -114,6 +115,7 @@ export class RebalancerClient {
         .addOperation(
           this.contract.call(
             'update_strategy',
+            adminKeyPair.publicKey(),
             strategyId.toString(),
             name,
             riskLevel.toString(),
@@ -540,7 +542,7 @@ export class RebalancerClient {
         minApyThreshold: Number(strategyData[3] || 0),
         maxIlRisk: Number(strategyData[4] || 0),
         rebalanceFrequency: Number(strategyData[5] || 0),
-        allocations: this.parseAllocations(item)
+        allocations: this.parseAllocations(strategyData[6] || new xdr.ScVal(xdr.ScValType.scvVec([])))
       });
     }
     
@@ -557,7 +559,7 @@ export class RebalancerClient {
       minApyThreshold: Number(data[3] || 0),
       maxIlRisk: Number(data[4] || 0),
       rebalanceFrequency: Number(data[5] || 0),
-      allocations: this.parseAllocations(returnValue)
+      allocations: this.parseAllocations(data[6] || new xdr.ScVal(xdr.ScValType.scvVec([])))
     };
   }
 
