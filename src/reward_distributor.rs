@@ -12,7 +12,7 @@ const BASIS_POINTS_DIVISOR: i128 = 10000;
 /// Treasury fee in basis points (0.25% = 25 bps)
 const TREASURY_FEE_BPS: u32 = 25;
 
-///袁 Maximum slippage in basis points (1% = 100 bps)
+/// Maximum slippage in basis points (1% = 100 bps)
 const MAX_SLIPPAGE_BPS: u32 = 100;
 
 /// Reward stream configuration
@@ -278,37 +278,30 @@ impl MultiRewardDistributor {
             let time_elapsed = current_time - stream.last_update;
             
             if time_elapsed > 0 && vault_info.total_shares > 0 {
-                // Calculate reward per share for this time period
-                // reward_per_share_delta = rate * time_elapsed / total_shares
                 let reward_delta = stream.rate_per_second * time_elapsed as i128;
                 
-                // Normalize to share decimals (assuming 7 or 18 decimals for tokens)
-                let share_multiplier: i128 = 10_i128.pow(stream.decimals.saturating_sub(vault_share_decimals) as u32);
-                let normalized_reward = reward_delta * share_multiplier;
+                // Accumulate reward_per_share once per time window
+                let accumulated_reward_per_share_delta =
+                    reward_delta * 10_i128.pow(vault_share_decimals) / vault_info.total_shares;
+                let mut accumulated_per_share = Self::get_accumulated_reward_per_share(&env, i);
+                accumulated_per_share += accumulated_reward_per_share_delta;
+                Self::set_accumulated_reward_per_share(&env, i, accumulated_per_share);
                 
-                // Update stream's total distributed
-                let user_share_of_pool = (user_shares * normalized_reward) / vault_info.total_shares;
-                stream.total_distributed += user_share_of_pool;
-                
-                // Update user's reward debt
-                let mut reward_debt = Self::get_user_reward_debt(&env, &user, i);
-                let accumulated_delta = (vault_info.total_shares * share_multiplier) / vault_info.total_shares;
-                reward_debt.reward_debt += user_shares * accumulated_delta;
-                reward_debt.last_claim_timestamp = current_time;
-                
-                // Calculate pending rewards
-                let accumulated_per_share = Self::get_accumulated_reward_per_share(&env, i);
-                let user_accumulated = user_shares * accumulated_per_share / 10_i128.pow(stream.decimals);
-                reward_debt.pending_rewards = user_accumulated - reward_debt.reward_debt;
-                
-                Self::set_user_reward_debt(&env, &user, i, &reward_debt);
-                
-                // Update stream
+                // Update stream totals once per time window
+                stream.total_distributed += reward_delta;
                 stream.last_update = current_time;
                 streams.set(i, stream);
-                
-                pending_rewards.set(i, reward_debt.pending_rewards);
             }
+            
+            // Calculate pending rewards for this user (always, even if time_elapsed == 0)
+            let accumulated_per_share = Self::get_accumulated_reward_per_share(&env, i);
+            let mut reward_debt = Self::get_user_reward_debt(&env, &user, i);
+            let user_accumulated = user_shares * accumulated_per_share / 10_i128.pow(vault_share_decimals);
+            reward_debt.pending_rewards = user_accumulated - reward_debt.reward_debt;
+            reward_debt.last_claim_timestamp = current_time;
+            
+            Self::set_user_reward_debt(&env, &user, i, &reward_debt);
+            pending_rewards.set(i, reward_debt.pending_rewards);
         }
         
         env.storage().instance().set(&Symbol::new(&env, "streams"), &streams);
@@ -874,21 +867,24 @@ impl MultiRewardDistributor {
     }
 
     fn get_accumulated_reward_per_share(env: &Env, stream_index: u32) -> i128 {
-        let streams = Self::get_streams(env);
-        if stream_index >= streams.len() {
-            return 0;
-        }
-        
-        let stream = streams.get(stream_index).unwrap();
-        let current_time = env.ledger().timestamp();
-        let time_elapsed = current_time.saturating_sub(stream.last_update);
-        
-        if time_elapsed > 0 && stream.is_active {
-            // Return accumulated amount based on rate
-            stream.rate_per_second * time_elapsed as i128
-        } else {
-            stream.total_distributed
-        }
+        let key = Self::accumulated_key(env, stream_index);
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, &key))
+            .unwrap_or(0)
+    }
+
+    fn set_accumulated_reward_per_share(env: &Env, stream_index: u32, value: i128) {
+        let key = Self::accumulated_key(env, stream_index);
+        env.storage().instance().set(&Symbol::new(env, &key), &value);
+    }
+
+    fn accumulated_key(env: &Env, stream_index: u32) -> Vec<u8> {
+        let mut key = Vec::new(&env.current_contract_address());
+        key.extend_from_slice(b"accumulated_");
+        let idx_bytes: Vec<u8> = stream_index.to_be_bytes().to_vec();
+        key.extend_from_slice(&idx_bytes);
+        key
     }
 
     fn get_auto_compound_config_for_user(
