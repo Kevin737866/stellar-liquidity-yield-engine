@@ -52,6 +52,7 @@ export class RebalancerClient {
         .addOperation(
           this.contract.call(
             'create_strategy',
+            adminKeyPair.publicKey(),
             name,
             riskLevel.toString(),
             minApyThreshold.toString(),
@@ -114,6 +115,7 @@ export class RebalancerClient {
         .addOperation(
           this.contract.call(
             'update_strategy',
+            adminKeyPair.publicKey(),
             strategyId.toString(),
             name,
             riskLevel.toString(),
