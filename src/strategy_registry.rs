@@ -315,7 +315,7 @@ impl StrategyRegistry {
             approved_by: admin,
             approved_at: env.ledger().timestamp(),
             approval_type: 3, // Removal
-            Symbol::new(&env, "Deactivated by admin"),
+            comments: Symbol::new(&env, "Deactivated by admin"),
         };
         
         Self::add_approval(&env, approval);
