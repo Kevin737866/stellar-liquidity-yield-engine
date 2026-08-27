@@ -107,6 +107,7 @@ impl RebalanceEngine {
     ) -> u32 {
         Self::require_admin(&env, admin);
         Self::require_not_paused(&env);
+        Self::validate_allocations(&allocations);
 
         let strategy_id = Self::get_next_strategy_id(&env);
         
@@ -141,6 +142,7 @@ impl RebalanceEngine {
     ) {
         Self::require_admin(&env, admin);
         Self::require_not_paused(&env);
+        Self::validate_allocations(&allocations);
 
         let mut strategies = Self::get_strategies(&env);
         let mut found = false;
@@ -241,6 +243,26 @@ impl RebalanceEngine {
         Self::add_to_history(&env, history_entry);
 
         success
+    }
+
+    /// Validate that allocations are non-empty, each within bounds (<= 10000 bps),
+    /// and that the percentages sum to exactly 10000 bps (100%).
+    fn validate_allocations(allocations: &Vec<PoolAllocation>) {
+        require!(!allocations.is_empty(), "allocations must not be empty");
+
+        let mut total_bps: u32 = 0;
+        for allocation in allocations.iter() {
+            require!(
+                allocation.allocation_percent <= 10000,
+                "allocation_percent must not exceed 10000 bps (100%)"
+            );
+            total_bps += allocation.allocation_percent;
+        }
+
+        require!(
+            total_bps == 10000,
+            "allocations must sum to exactly 10000 bps (100%)"
+        );
     }
 
     /// Get all strategies
