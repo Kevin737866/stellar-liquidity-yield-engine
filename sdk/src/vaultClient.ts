@@ -1,6 +1,8 @@
 import { 
   Address, 
+  Account, 
   Contract, 
+  Keypair, 
   SorobanRpc, 
   TransactionBuilder, 
   Networks,
@@ -16,21 +18,25 @@ import {
   TransactionOptions,
   TransactionResult,
   VaultError,
-  NetworkConfig
+  NetworkConfig,
+  VaultClientOptions
 } from './types';
 
 export class VaultClient {
   private contract: Contract;
   private server: SorobanRpc.Server;
   private networkConfig: NetworkConfig;
+  private simulationSource?: string;
 
   constructor(
     vaultAddress: Address,
-    networkConfig: NetworkConfig
+    networkConfig: NetworkConfig,
+    options: VaultClientOptions = {}
   ) {
     this.contract = new Contract(vaultAddress);
     this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
     this.networkConfig = networkConfig;
+    this.simulationSource = options.simulationSource;
   }
 
   /**
@@ -198,7 +204,7 @@ export class VaultClient {
     try {
       const result = await this.server.simulateTransaction(
         new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+          await this.getSimulationAccount(),
           {
             fee: BASE_FEE,
             networkPassphrase: this.getNetworkPassphrase()
@@ -225,7 +231,7 @@ export class VaultClient {
     try {
       const result = await this.server.simulateTransaction(
         new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+          await this.getSimulationAccount(),
           {
             fee: BASE_FEE,
             networkPassphrase: this.getNetworkPassphrase()
@@ -252,7 +258,7 @@ export class VaultClient {
     try {
       const result = await this.server.simulateTransaction(
         new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+          await this.getSimulationAccount(),
           {
             fee: BASE_FEE,
             networkPassphrase: this.getNetworkPassphrase()
@@ -279,7 +285,7 @@ export class VaultClient {
     try {
       const result = await this.server.simulateTransaction(
         new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+          await this.getSimulationAccount(),
           {
             fee: BASE_FEE,
             networkPassphrase: this.getNetworkPassphrase()
@@ -306,7 +312,7 @@ export class VaultClient {
     try {
       const result = await this.server.simulateTransaction(
         new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+          await this.getSimulationAccount(),
           {
             fee: BASE_FEE,
             networkPassphrase: this.getNetworkPassphrase()
@@ -333,7 +339,7 @@ export class VaultClient {
     try {
       const result = await this.server.simulateTransaction(
         new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+          await this.getSimulationAccount(),
           {
             fee: BASE_FEE,
             networkPassphrase: this.getNetworkPassphrase()
@@ -434,50 +440,18 @@ export class VaultClient {
   // Helper methods
 
   /**
-   * Poll `getTransaction` until the transaction reaches a terminal state
-   * (SUCCESS or FAILED). Soroban RPC's `sendTransaction` only reports that
-   * a transaction was accepted (PENDING) — the final outcome requires
-   * polling `getTransaction`.
+   * Resolve the source account used for read-only `simulateTransaction`
+   * calls. Uses the caller-provided `simulationSource` address when given;
+   * otherwise falls back to a freshly generated test account so queries are
+   * not tied to the hardcoded friendbot address.
    */
-  private async confirmTransaction(
-    hash: string,
-    timeoutMs: number = 30_000
-  ): Promise<SorobanRpc.GetTransactionResponse> {
-    const deadline = Date.now() + timeoutMs;
-    let txResult = await this.server.getTransaction(hash);
-
-    while (
-      (txResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND ||
-        (txResult.status as string) === 'PENDING') &&
-      Date.now() < deadline
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      txResult = await this.server.getTransaction(hash);
+  private async getSimulationAccount(): Promise<Account> {
+    if (this.simulationSource) {
+      return this.server.getAccount(this.simulationSource);
     }
-
-    return txResult;
-  }
-
-  /**
-   * Parse the Soroban resource usage (instructions) from a confirmed
-   * transaction result. Soroban transactions report their resource usage
-   * via `getTransaction`; fall back to 0 if the data is unavailable.
-   */
-  private parseGasUsed(txResult: SorobanRpc.GetTransactionResponse): number {
-    if (txResult.status !== SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-      return 0;
-    }
-    try {
-      const envelope =
-        txResult.envelopeXdr.v1()?.tx() ?? txResult.envelopeXdr.v0()?.tx();
-      const sorobanData = envelope?.ext().sorobanData();
-      if (sorobanData) {
-        return sorobanData.resources().instructions();
-      }
-    } catch {
-      // Malformed metadata — fall back to 0 below.
-    }
-    return 0;
+    // A locally-constructed account is sufficient for read-only simulations;
+    // no network lookup or funded account is required.
+    return new Account(Keypair.random().publicKey(), '0');
   }
 
   private getNetworkPassphrase(): string {

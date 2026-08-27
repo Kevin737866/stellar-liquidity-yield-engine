@@ -258,6 +258,16 @@ export interface TransactionOptions {
   skipConfirmation?: boolean;
 }
 
+// Vault Client Options
+export interface VaultClientOptions {
+  /**
+   * Public key of the account used as the source for read-only
+   * `simulateTransaction` queries (e.g. the caller's own address).
+   * Defaults to a freshly generated test account.
+   */
+  simulationSource?: string;
+}
+
 export interface TransactionResult {
   hash: string;
   success: boolean;
