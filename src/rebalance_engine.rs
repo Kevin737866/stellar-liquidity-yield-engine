@@ -178,7 +178,7 @@ impl RebalanceEngine {
 
         // Analyze each allocation in the strategy
         for allocation in strategy.allocations {
-            let current_apy = Self::get_pool_current_apy(&env, &allocation.pool_id);
+            let current_apy = allocation.current_apy;
             let target_apy = allocation.target_apy;
 
             // Check if rebalancing is needed
@@ -190,8 +190,8 @@ impl RebalanceEngine {
                     let proposal = RebalanceProposal {
                         from_pool: allocation.pool_id.clone(),
                         to_pool: better_pool.pool_id,
-                        amount_a: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
-                        amount_b: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
+                        amount_a: allocation.allocation_percent as i128,
+                        amount_b: allocation.allocation_percent as i128,
                         expected_apy_improvement: better_pool.current_apy - current_apy,
                         estimated_gas_cost: Self::estimate_gas_cost(&env),
                         timestamp: env.ledger().timestamp(),
@@ -324,10 +324,9 @@ impl RebalanceEngine {
         id
     }
 
-    fn get_pool_current_apy(env: &Env, pool_id: &Address) -> u32 {
-        // This would integrate with Stellar AMM to get real APY
-        // For demonstration, return a simulated value
-        1500 // 15% APY
+    fn get_pool_current_apy(_env: &Env, _pool_id: &Address) -> u32 {
+        // APY is supplied by the strategy's on-chain pool allocation.
+        0
     }
 
     fn find_better_pools(
@@ -337,27 +336,22 @@ impl RebalanceEngine {
     ) -> Vec<PoolAllocation> {
         let mut better_pools: Vec<PoolAllocation> = Vec::new(env);
         
-        // In production, this would query all available pools
-        // For demonstration, return a simulated better pool
-        if current_allocation.current_apy < strategy.min_apy_threshold {
-            better_pools.push_back(PoolAllocation {
-                pool_id: Address::generate(env),
-                token_a: current_allocation.token_a.clone(),
-                token_b: current_allocation.token_b.clone(),
-                allocation_percent: current_allocation.allocation_percent,
-                target_apy: current_allocation.target_apy + 500, // 5% higher
-                current_apy: current_allocation.current_apy + 600, // 6% higher
-                impermanent_loss_risk: current_allocation.impermanent_loss_risk,
-            });
+        // Only return pools already registered in the strategy allocations.
+        for candidate in strategy.allocations.iter() {
+            if candidate.pool_id != current_allocation.pool_id
+                && candidate.current_apy > current_allocation.current_apy
+                && candidate.current_apy - current_allocation.current_apy >= strategy.min_apy_threshold
+                && candidate.impermanent_loss_risk <= strategy.max_il_risk
+            {
+                better_pools.push_back(candidate);
+            }
         }
 
         better_pools
     }
 
-    fn estimate_rebalance_amount(env: &Env, pool_id: &Address) -> i128 {
-        // This would calculate the actual amount in the pool
-        // For demonstration, return a simulated value
-        1000000i128
+    fn estimate_rebalance_amount(_env: &Env, _pool_id: &Address) -> i128 {
+        0
     }
 
     fn estimate_gas_cost(env: &Env) -> i128 {
