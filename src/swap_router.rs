@@ -90,6 +90,8 @@ pub enum SwapError {
     TransferFailed = 8,
     Unauthorized = 9,
     InvalidToken = 10,
+    PoolExists = 11,
+    PoolNotFound = 12,
 }
 
 /// SwapRouter contract for Stellar DEX integration
@@ -131,7 +133,10 @@ impl SwapRouter {
         is_stable_swap: bool,
     ) {
         Self::require_admin(&env, admin);
-        
+
+        let mut pools = Self::get_pools(&env);
+        require!(!pools.has(&pool_address), SwapError::PoolExists);
+
         let pool = PoolInfo {
             pool_address: pool_address.clone(),
             token_a: token_a.clone(),
@@ -141,8 +146,7 @@ impl SwapRouter {
             fee_bps,
             is_stable_swap,
         };
-        
-        let mut pools = Self::get_pools(&env);
+
         pools.set(pool_address, pool);
         env.storage().instance().set(&Symbol::new(&env, "pools"), &pools);
         
@@ -172,8 +176,9 @@ impl SwapRouter {
     /// Remove a pool (admin only)
     pub fn remove_pool(env: Env, admin: Address, pool_address: Address) {
         Self::require_admin(&env, admin);
-        
+
         let mut pools = Self::get_pools(&env);
+        require!(pools.has(&pool_address), SwapError::PoolNotFound);
         pools.remove(&pool_address);
         env.storage().instance().set(&Symbol::new(&env, "pools"), &pools);
     }
