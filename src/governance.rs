@@ -10,11 +10,10 @@
 //! - 10% Liquidity Mining
 
 use soroban_sdk::{
-    contract, contractimpl, contractmeta, Address, Env, String, Vec as SorobanVec,
-    BigInt, ConversionError, TryFromVal, IntoVal, Val,
+    contract, contractimpl, contractmeta, Address, Env, Map, String, Vec,
+    BigInt, Val,
 };
-use soroban_sdk::token::{Token, TokenClient};
-use std::collections::BTreeMap;
+use soroban_sdk::token::TokenClient;
 
 // ===== Token Distribution Constants =====
 const TOTAL_SUPPLY: u32 = 1_000_000_000; // 1 billion tokens (10^9 with 7 decimals)
@@ -96,8 +95,8 @@ pub struct GovernanceProposal {
     pub end_time: u64,
     pub snapshot_block: u64,
     pub state: ProposalState,
-    pub for_voters: BTreeMap<Address, BigInt>,
-    pub against_voters: BTreeMap<Address, BigInt>,
+    pub for_voters: Map<Address, BigInt>,
+    pub against_voters: Map<Address, BigInt>,
     pub canceled: bool,
     pub queued: bool,
     pub executed: bool,
@@ -123,8 +122,8 @@ impl GovernanceProposal {
             end_time: start_time + duration,
             snapshot_block,
             state: ProposalState::Pending,
-            for_voters: BTreeMap::new(),
-            against_voters: BTreeMap::new(),
+            for_voters: Map::new(&proposer.get_env()),
+            against_voters: Map::new(&proposer.get_env()),
             canceled: false,
             queued: false,
             executed: false,
