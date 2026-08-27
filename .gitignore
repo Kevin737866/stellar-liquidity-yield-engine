@@ -132,3 +132,16 @@ docs/_build/
 /test_snapshots/
 **/test_snapshots/
 
+
+# Additional entries (issues #141-144)
+# Catch build artifacts regardless of path prefix
+target/
+dist/
+build/
+
+# Wildcard env files
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
