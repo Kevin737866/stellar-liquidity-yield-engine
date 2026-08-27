@@ -264,6 +264,11 @@ impl RebalanceEngine {
 
     /// Get rebalance history
     pub fn get_history(env: Env, limit: u32) -> Vec<RebalanceHistory> {
+        // A limit of 0 means no results should be returned
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+
         let history: Vec<RebalanceHistory> = env.storage()
             .instance()
             .get(&Symbol::new(&env, "history"))
@@ -527,19 +532,28 @@ impl RebalanceEngine {
     }
 
     /// Execute atomic flash rebalance: withdraw → swap → deposit in single transaction
+    /// Cooldown is tracked per vault so one vault's rebalance does not block others.
     pub fn execute_flash_rebalance(
         env: Env,
         caller: Address,
+        vault_id: Address,
         opportunity: ArbitrageOpportunity,
         amount: i128,
     ) -> bool {
         Self::require_not_paused(&env);
 
-        // Check cooldown
-        let mut thresholds = Self::get_arbitrage_thresholds(env.clone());
-        let time_since_last = env.ledger().timestamp() - thresholds.last_rebalance_time;
-        
-        // Enforce 24h (86400s) cooldown per vault to prevent churn
+        // Check per-vault cooldown
+        let thresholds = Self::get_arbitrage_thresholds(env.clone());
+        let last_rebalance_times: Map<Address, u64> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "vault_last_rebalance_times"))
+            .unwrap_or(Map::new(&env));
+
+        let vault_last_time = last_rebalance_times.get(vault_id.clone()).unwrap_or(0u64);
+        let time_since_last = env.ledger().timestamp() - vault_last_time;
+
+        // Enforce cooldown per vault to prevent churn
         if time_since_last < thresholds.cooldown_period {
             return false;
         }
@@ -577,9 +591,10 @@ impl RebalanceEngine {
         );
 
         if deposited {
-            // Update last rebalance timestamp
-            thresholds.last_rebalance_time = env.ledger().timestamp();
-            env.storage().instance().set(&Symbol::new(&env, "arbitrage_thresholds"), &thresholds);
+            // Update per-vault last rebalance timestamp
+            let mut times = last_rebalance_times;
+            times.set(vault_id, env.ledger().timestamp());
+            env.storage().instance().set(&Symbol::new(&env, "vault_last_rebalance_times"), &times);
         }
 
         deposited

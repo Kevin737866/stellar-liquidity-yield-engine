@@ -105,8 +105,19 @@ impl YieldVault {
 
         // Calculate shares based on current ratio
         let shares = if metrics.total_shares == 0 {
-            // First deposit - 1:1 ratio
-            amount_a.min(amount_b)
+            // First deposit: compute a geometric mean so both tokens are valued.
+            // If either side is zero the depositor still earns shares proportional
+            // to what they contributed, preventing over/under-pricing.
+            if amount_a > 0 && amount_b > 0 {
+                // Geometric mean – values both tokens equally regardless of
+                // the absolute amounts deposited.
+                let product = (amount_a as u128) * (amount_b as u128);
+                let sqrt_val = Self::isqrt(product);
+                sqrt_val as i128
+            } else {
+                // Single-sided deposit: use the non-zero amount directly.
+                amount_a + amount_b
+            }
         } else {
             // Calculate proportional shares
             let share_ratio = amount_a * metrics.total_shares / metrics.total_amount_a;
@@ -349,6 +360,20 @@ impl YieldVault {
             .instance()
             .get(&Symbol::new(&env, "admin"))
             .unwrap_optimized()
+    }
+
+    /// Integer square root (Babylonian method) for share calculations
+    fn isqrt(n: u128) -> u128 {
+        if n == 0 {
+            return 0;
+        }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
     }
 
     /// Check if vault is paused
