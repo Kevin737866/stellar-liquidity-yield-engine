@@ -53,6 +53,7 @@ impl YieldVault {
         fee_rate: u32,
         harvest_fee: u32,
         withdrawal_fee: u32,
+        treasury: Address,
     ) {
         let vault_info = VaultInfo {
             name,
@@ -67,6 +68,7 @@ impl YieldVault {
 
         env.storage().instance().set(&Symbol::new(&env, "vault_info"), &vault_info);
         env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
+        env.storage().instance().set(&Symbol::new(&env, "treasury"), &treasury);
         env.storage().instance().set(&Symbol::new(&env, "paused"), &false);
 
         // Initialize metrics
@@ -222,17 +224,17 @@ impl YieldVault {
 
             env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
 
-            // Transfer fees to admin
+            // Transfer fees to treasury
             if fee_a > 0 || fee_b > 0 {
                 let admin = Self::get_admin(env.clone());
                 let token_a_client = TokenClient::new(&env, &vault_info.token_a);
                 let token_b_client = TokenClient::new(&env, &vault_info.token_b);
 
                 if fee_a > 0 {
-                    token_a_client.transfer(&env.current_contract_address(), &admin, &fee_a);
+                    token_a_client.transfer(&env.current_contract_address(), &treasury, &fee_a);
                 }
                 if fee_b > 0 {
-                    token_b_client.transfer(&env.current_contract_address(), &admin, &fee_b);
+                    token_b_client.transfer(&env.current_contract_address(), &treasury, &fee_b);
                 }
             }
         }
@@ -279,6 +281,14 @@ impl YieldVault {
         metrics.tvl
     }
 
+    /// Get treasury address that receives protocol fees
+    pub fn get_treasury(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "treasury"))
+            .unwrap_optimized()
+    }
+
     /// Calculate pending rewards (placeholder)
     fn calculate_pending_rewards(env: &Env, pool_id: &Address) -> i128 {
         // This would integrate with Stellar AMM to calculate actual rewards
@@ -292,6 +302,20 @@ impl YieldVault {
             .instance()
             .get(&Symbol::new(&env, "admin"))
             .unwrap_optimized()
+    }
+
+    /// Integer square root (Babylonian method) for share calculations
+    fn isqrt(n: u128) -> u128 {
+        if n == 0 {
+            return 0;
+        }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
     }
 
     /// Check if vault is paused

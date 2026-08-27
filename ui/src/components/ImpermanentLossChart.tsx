@@ -65,7 +65,7 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
         day,
         priceRatio: ratio,
         impermanentLoss: il.ilPercent,
-        cumulativeLoss: il.ilPercent * (day / 365) // Simplified cumulative effect
+        cumulativeLoss: il.ilPercent // IL is a one-time deviation, not a linear daily accrual
       });
     }
     

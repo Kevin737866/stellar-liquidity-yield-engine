@@ -97,10 +97,8 @@ impl RiskEngine {
         volatility_metrics: VolatilityMetrics,
     ) -> u32 {
         // Adjustment factor: 10000 = full position, scales down with volatility
-        let base_volatility = volatility_metrics.volatility_24h;
-        
-        // Reduce position proportionally to 7-day volatility
-        let volatility_average = (base_volatility as i128 + volatility_metrics.volatility_7d as i128) / 2;
+        // Incorporate both 24h and 7d volatility for a blended adjustment
+        let volatility_average = (volatility_metrics.volatility_24h as i128 + volatility_metrics.volatility_7d as i128) / 2;
         
         // Position multiplier: 10000 * (1 - volatility_avg/50000)
         // If volatility is 50% (5000 bp), reduce position to 50%
