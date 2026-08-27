@@ -250,13 +250,13 @@ impl RebalanceEngine {
     fn validate_allocations(allocations: &Vec<PoolAllocation>) {
         require!(!allocations.is_empty(), "allocations must not be empty");
 
-        let mut total_bps: u32 = 0;
+        let mut total_bps: u64 = 0;
         for allocation in allocations.iter() {
             require!(
                 allocation.allocation_percent <= 10000,
                 "allocation_percent must not exceed 10000 bps (100%)"
             );
-            total_bps += allocation.allocation_percent;
+            total_bps += allocation.allocation_percent as u64;
         }
 
         require!(
