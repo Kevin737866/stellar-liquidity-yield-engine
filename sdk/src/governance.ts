@@ -905,7 +905,7 @@ export class GovernanceSDK {
       fee: '100',
       networkPassphrase: this.networkPassphrase
     })
-      .addOperation(Operation.contractInvoke({
+      .addOperation(Operation.invokeContractFunction({
         contract: contractAddress,
         method: functionName,
         args: Object.entries(args).map(([key, value]) => 
@@ -937,7 +937,7 @@ export class GovernanceSDK {
   ): Promise<Transaction> {
     const account = await this.server.loadAccount(this.keypair!.publicKey());
 
-    const operation = Operation.contractInvoke({
+    const operation = Operation.invokeContractFunction({
       contract: contractAddress,
       method: functionName,
       args: Object.entries(args).map(([key, value]) => 
