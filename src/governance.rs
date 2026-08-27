@@ -105,6 +105,7 @@ pub struct GovernanceProposal {
 
 impl GovernanceProposal {
     pub fn new(
+        env: &Env,
         proposer: Address,
         description: String,
         call_data: Vec<CallData>,
@@ -116,8 +117,8 @@ impl GovernanceProposal {
             proposer,
             description,
             call_data,
-            votes_for: BigInt::zero(&proposer.get_env().clone()),
-            votes_against: BigInt::zero(&proposer.get_env().clone()),
+            votes_for: BigInt::zero(env),
+            votes_against: BigInt::zero(env),
             eta: 0,
             start_time,
             end_time: start_time + duration,
@@ -667,6 +668,7 @@ impl ProtocolGovernor {
         let snapshot_block = e.ledger().sequence();
 
         let proposal = GovernanceProposal::new(
+            &e,
             proposer,
             description,
             call_data,
