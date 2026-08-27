@@ -61,8 +61,7 @@ stellar-liquidity-yield-engine/
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo install soroban-cli
 
-# Build contracts
-cd src/
+# Build contracts (run from the repository root — Cargo.toml lives there)
 cargo build --target wasm32-unknown-unknown --release
 ```
 
@@ -84,20 +83,8 @@ npm run dev
 
 ### 1. Deploy Contracts
 
-```bash
-# Deploy to testnet
-soroban contract deploy --wasm target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm --source YOUR_KEYPAIR --network testnet
-
-# Initialize contracts
-soroban contract invoke \
-  --id CONTRACT_ID \
-  --source YOUR_KEYPAIR \
-  --network testnet \
-  --function initialize \
-  --arg ADMIN_ADDRESS \
-  --arg STRATEGY_REGISTRY_ADDRESS \
-  --arg REWARD_DISTRIBUTOR_ADDRESS
-```
+See the full [Contract Deployment](#contract-deployment) section below for
+the actual build/deploy/initialize commands and current build caveats.
 
 ### 2. Create a Yield Vault
 
@@ -359,6 +346,12 @@ Real-time monitoring of:
 ## 🔧 Configuration
 
 ### Environment Variables
+Copy [`.env.example`](.env.example) to `.env` and fill in real values:
+
+```bash
+cp .env.example .env
+```
+
 ```bash
 # Network configuration
 STELLAR_NETWORK=testnet
@@ -377,24 +370,73 @@ HARVEST_THRESHOLD=1000
 CHECK_INTERVAL=300000
 ```
 
+`.env.example` also lists governance-related addresses
+(`GOVERNANCE_CONTRACT`, `VOTING_ESCROW_CONTRACT`, etc.) read by
+`sdk/src/governance.ts`. There is no working contract to deploy for those
+yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
+
 ### Contract Deployment
+
+There is no `scripts/` directory in this repo — deploy with the `soroban`
+CLI directly. All commands below run from the **repository root** (that's
+where `Cargo.toml` lives; the crate is *not* under `src/`).
+
+> **Known blocker:** `src/lib.rs` unconditionally includes
+> `src/governance.rs` (`mod governance;`), which does not compile — see
+> [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). Until that's fixed,
+> `cargo build` for this crate fails and none of the steps below will
+> produce a wasm file.
+
 ```bash
-# Deploy all contracts
-./scripts/deploy.sh testnet
+# 0. One-time setup: install the wasm target and create/fund a testnet identity
+rustup target add wasm32-unknown-unknown
+soroban keys generate deployer --network testnet
+soroban keys fund deployer --network testnet
 
-# Initialize with admin
-./scripts/init.sh ADMIN_ADDRESS
+# 1. Build the contract wasm
+cargo build --target wasm32-unknown-unknown --release
+# -> target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
 
-# Verify deployment
-./scripts/verify.sh
+# 2. (Optional) Optimize the wasm binary size
+soroban contract optimize \
+  --wasm target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
+
+# 3. Deploy — prints the deployed CONTRACT_ID
+soroban contract deploy \
+  --wasm target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm \
+  --source deployer \
+  --network testnet
+
+# 4. Initialize the deployed contract (use the CONTRACT_ID from step 3)
+soroban contract invoke \
+  --id CONTRACT_ID \
+  --source deployer \
+  --network testnet \
+  -- \
+  initialize \
+  --admin $(soroban keys address deployer) \
+  --strategy_registry STRATEGY_REGISTRY_ADDRESS \
+  --reward_distributor REWARD_DISTRIBUTOR_ADDRESS
+
+# 5. Verify it deployed correctly by reading back a value
+soroban contract invoke \
+  --id CONTRACT_ID \
+  --source deployer \
+  --network testnet \
+  -- \
+  get_admin
 ```
+
+Save the resulting `CONTRACT_ID` into your `.env` file as
+`YIELD_ENGINE_ADDRESS` (and repeat steps 3–4 for any other addresses you
+need, such as `STRATEGY_REGISTRY_ADDRESS` and `REWARD_DISTRIBUTOR_ADDRESS`,
+before running step 4 above).
 
 ## 🧪 Testing
 
 ### Unit Tests
 ```bash
-# Run contract tests
-cd src/
+# Run contract tests (run from the repository root)
 cargo test
 
 # Run SDK tests
@@ -513,7 +555,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [ ] Advanced strategy system
 - [ ] Cross-chain support
 - [ ] Mobile app
-- [ ] Governance features
+- [ ] Governance features (in-progress scaffolding exists in `src/governance.rs` but does not compile or work yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md))
 
 ### Q3 2024
 - [ ] DeFi integrations
