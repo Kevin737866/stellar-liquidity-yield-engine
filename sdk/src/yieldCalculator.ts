@@ -391,4 +391,24 @@ export class YieldCalculator {
       ilDistribution: ilResults
     };
   }
+
+  /**
+   * Compute historical impermanent loss from a series of price ratios.
+   *
+   * Issue #133: replaces simulated projection with actual indexed history
+   * when available.
+   */
+  static computeHistoricalImpermanentLoss(
+    initialPriceRatio: number,
+    priceHistory: Array<{ timestamp: number; priceRatio: number }>
+  ): Array<{ timestamp: number; priceRatio: number; ilPercent: number }> {
+    return priceHistory.map((point) => {
+      const il = this.calculateImpermanentLoss(initialPriceRatio, point.priceRatio, 0);
+      return {
+        timestamp: point.timestamp,
+        priceRatio: point.priceRatio,
+        ilPercent: il.ilPercent,
+      };
+    });
+  }
 }

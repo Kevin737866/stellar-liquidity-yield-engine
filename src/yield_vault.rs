@@ -460,4 +460,86 @@ mod tests {
         assert_eq!(token_a_client.balance(&treasury), 0);
         assert_eq!(token_b_client.balance(&treasury), 0);
     }
+
+    #[test]
+    fn test_first_deposit_balanced_mints_geometric_mean_shares() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+
+        let shares = vault.deposit(&user, &1000, &1000, &0);
+        let expected = ((1000u128 * 1000u128) as u128).isqrt() as i128;
+        assert_eq!(shares, expected);
+    }
+
+    #[test]
+    fn test_first_deposit_unbalanced_uses_nonzero_amount() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &2000);
+        token_b_admin.mint(&user, &500);
+
+        let shares = vault.deposit(&user, &2000, &500, &0);
+        assert_eq!(shares, 2500);
+    }
+
+    #[test]
+    fn test_subsequent_deposit_mints_proportional_shares() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        let first_shares = vault.deposit(&user, &1000, &1000, &0);
+
+        token_a_admin.mint(&user, &500);
+        token_b_admin.mint(&user, &500);
+        let second_shares = vault.deposit(&user, &500, &500, &0);
+
+        assert_eq!(first_shares, 1000);
+        assert_eq!(second_shares, 500);
+    }
+
+    #[test]
+    fn test_withdraw_returns_tokens_and_burns_shares() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        assert_eq!(amount_a, 1000);
+        assert_eq!(amount_b, 1000);
+    }
+
+    #[test]
+    fn test_withdrawal_fee_is_applied() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, treasury) =
+            setup(&env, 0, 0, 100);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        assert_eq!(amount_a, 990);
+        assert_eq!(amount_b, 990);
+        assert_eq!(token_a_client.balance(&treasury), 10);
+        assert_eq!(token_b_client.balance(&treasury), 10);
+    }
 }
