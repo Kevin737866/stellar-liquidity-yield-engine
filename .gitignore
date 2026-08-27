@@ -124,3 +124,6 @@ docs/_build/
 *.bak
 *.backup
 *.old
+
+# Soroban test snapshots
+/test_snapshots/
