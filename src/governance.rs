@@ -446,7 +446,7 @@ impl StakingContract {
         
         // Simplified reward calculation
         let time_elapsed = e.ledger().timestamp() - last_claim;
-        let rewards = stake_balance * BigInt::from_u32(&e, time_elapsed as u32) * reward_per_token;
+        let rewards = stake_balance * BigInt::from_u64(&e, time_elapsed) * reward_per_token;
         
         let accrued = Self::key_accrued_rewards(&user);
         Ok(rewards + accrued)
