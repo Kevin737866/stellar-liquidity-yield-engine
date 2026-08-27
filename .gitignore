@@ -112,10 +112,12 @@ temp/
 soroban/
 .example/
 
-# Test files
+# Test files (except root integration tests)
 test/
-tests/
 __tests__/
+**/__tests__/
+**/__snapshots__/
+*.snap
 
 # Documentation build
 docs/_build/
