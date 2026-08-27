@@ -39,6 +39,9 @@ pub struct VaultMetrics {
 #[contract]
 pub struct YieldVault;
 
+/// Seconds in a common (non-leap) year, used to annualize APY.
+const SECONDS_PER_YEAR: u128 = 31_536_000;
+
 #[contractimpl]
 impl YieldVault {
     /// Initialize a new yield vault
@@ -137,10 +140,11 @@ impl YieldVault {
 
         env.storage().instance().set(&user, &position);
 
-        // Update vault metrics
+        // Update vault metrics and recompute TVL from the new balances.
         metrics.total_shares += shares;
         metrics.total_amount_a += amount_a;
         metrics.total_amount_b += amount_b;
+        metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
         env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
 
         shares
@@ -188,10 +192,11 @@ impl YieldVault {
         position.deposited_amount_b -= withdraw_amount_b;
         env.storage().instance().set(&user, &position);
 
-        // Update vault metrics
+        // Update vault metrics and recompute TVL from the remaining balances.
         metrics.total_shares -= shares;
         metrics.total_amount_a -= withdraw_amount_a;
         metrics.total_amount_b -= withdraw_amount_b;
+        metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
         env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
 
         // Transfer tokens to user
@@ -224,10 +229,28 @@ impl YieldVault {
             let net_rewards_a = rewards_a - fee_a;
             let net_rewards_b = rewards_b - fee_b;
 
+            // Derive an annualized APY from this harvest's yield (net rewards vs the
+            // vault's value before reinvestment) over the elapsed wall-clock time.
+            let elapsed = env.ledger().timestamp().saturating_sub(metrics.last_harvest);
+            let prev_value = metrics.tvl;
+            let reward_value = Self::value_in_usd(&env, net_rewards_a, net_rewards_b);
+            if elapsed > 0 && prev_value > 0 && reward_value > 0 {
+                // yield_bp = reward_value / prev_value * seconds_per_year / elapsed * 10000
+                let apy_bp = reward_value as u128
+                    * SECONDS_PER_YEAR
+                    * 10000u128
+                    / (prev_value as u128 * elapsed as u128);
+                // Cap at 100,000% APY to keep the value sane.
+                metrics.apy = apy_bp.min(1000_0000) as u32;
+            }
+
             // Reinvest rewards
             metrics.total_amount_a += net_rewards_a;
             metrics.total_amount_b += net_rewards_b;
             metrics.last_harvest = env.ledger().timestamp();
+
+            // Recompute TVL from the reinvested balances.
+            metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
 
             env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
 
@@ -255,12 +278,13 @@ impl YieldVault {
             .unwrap_optimized()
     }
 
-    /// Get vault metrics
+    /// Get vault metrics, recomputing TVL on the fly from the current balances
+    /// and the configured token prices so it can never get stuck at 0 once
+    /// prices are provided. APY is derived from harvest history in `harvest`.
     pub fn get_metrics(env: Env) -> VaultMetrics {
-        env.storage()
-            .instance()
-            .get(&Symbol::new(&env, "metrics"))
-            .unwrap_optimized()
+        let mut metrics = Self::stored_metrics(&env);
+        metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
+        metrics
     }
 
     /// Get user position
@@ -276,16 +300,37 @@ impl YieldVault {
             })
     }
 
-    /// Get APY for the vault
+    /// Get APY for the vault (in basis points)
     pub fn get_apy(env: Env) -> u32 {
-        let metrics = Self::get_metrics(env);
-        metrics.apy
+        Self::get_metrics(env).apy
     }
 
-    /// Get TVL for the vault
+    /// Get TVL for the vault (USD, scaled by the configured token price scale)
     pub fn get_tvl(env: Env) -> i128 {
-        let metrics = Self::get_metrics(env);
-        metrics.tvl
+        Self::get_metrics(env).tvl
+    }
+
+    /// Set USD prices (scaled) for token_a and token_b (admin only). TVL is
+    /// recomputed immediately so get_tvl reflects the new prices.
+    pub fn set_prices(env: Env, admin: Address, price_a: i128, price_b: i128) {
+        let current_admin = Self::get_admin(env.clone());
+        if admin != current_admin {
+            panic!("unauthorized");
+        }
+        if price_a < 0 || price_b < 0 {
+            panic!("negative price");
+        }
+
+        env.storage().instance().set(&Symbol::new(&env, "price_a"), &price_a);
+        env.storage().instance().set(&Symbol::new(&env, "price_b"), &price_b);
+
+        let metrics = Self::get_metrics(env.clone());
+        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+    }
+
+    /// Get the currently configured token prices as (price_a, price_b).
+    pub fn get_prices(env: Env) -> (i128, i128) {
+        (Self::get_price_a(&env), Self::get_price_b(&env))
     }
 
     /// Get treasury address that receives protocol fees
@@ -294,6 +339,36 @@ impl YieldVault {
             .instance()
             .get(&Symbol::new(&env, "treasury"))
             .unwrap_optimized()
+    }
+
+    /// Raw stored metrics without any TVL/APY recomputation.
+    fn stored_metrics(env: &Env) -> VaultMetrics {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "metrics"))
+            .unwrap_optimized()
+    }
+
+    /// USD value (scale-agnostic) of the given token amounts using the configured
+    /// per-token prices. Returns 0 while prices have not been set yet.
+    fn value_in_usd(env: &Env, amount_a: i128, amount_b: i128) -> i128 {
+        let value_a = amount_a.saturating_mul(Self::get_price_a(env).max(0));
+        let value_b = amount_b.saturating_mul(Self::get_price_b(env).max(0));
+        value_a.saturating_add(value_b)
+    }
+
+    fn get_price_a(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "price_a"))
+            .unwrap_or(0)
+    }
+
+    fn get_price_b(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "price_b"))
+            .unwrap_or(0)
     }
 
     /// Calculate pending rewards (placeholder)
