@@ -129,3 +129,5 @@ docs/_build/
 
 # Soroban test snapshots
 /test_snapshots/
+**/test_snapshots/
+

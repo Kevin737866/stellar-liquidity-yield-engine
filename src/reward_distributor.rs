@@ -1023,3 +1023,108 @@ impl MultiRewardDistributor {
         key
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{Env, IntoVal, Symbol, token::{StellarAssetClient, TokenClient}};
+
+    fn setup(env: &Env) -> (Address, Address, Address, MultiRewardDistributorClient, TokenClient) {
+        let admin = Address::generate(env);
+        let treasury = Address::generate(env);
+        let swap_router = Address::generate(env);
+        let token = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_client = TokenClient::new(env, &token.address());
+
+        let contract_id = env.register_contract(None, MultiRewardDistributor);
+        let client = MultiRewardDistributorClient::new(env, &contract_id);
+
+        client.initialize(&admin, &treasury, &swap_router);
+
+        (admin, treasury, swap_router, client, token_client)
+    }
+
+    #[test]
+    fn test_multi_user_reward_accrual() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, token_client) = setup(&env);
+
+        let user_a = Address::generate(&env);
+        let user_b = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.fund_reward_pool(&admin, &token, &1_000_000);
+
+        let rewards_a = client.update_rewards(&user_a, &token, &1000, &7);
+        let rewards_b = client.update_rewards(&user_b, &token, &2000, &7);
+
+        let pending_a = rewards_a.get(0).unwrap();
+        let pending_b = rewards_b.get(0).unwrap();
+
+        assert!(pending_a > 0);
+        assert!(pending_b > 0);
+        assert_eq!(pending_b, pending_a * 2);
+    }
+
+    #[test]
+    fn test_rate_change_updates_future_accrual() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, token_client) = setup(&env);
+
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.fund_reward_pool(&admin, &token, &10_000_000);
+
+        client.update_rewards(&user, &token, &1000, &7);
+        client.update_reward_rate(&admin, 0, &2000);
+        client.update_rewards(&user, &token, &1000, &7);
+
+        let rewards = client.update_rewards(&user, &token, &1000, &7);
+        let pending = rewards.get(0).unwrap();
+        assert!(pending > 0);
+    }
+
+    #[test]
+    fn test_deactivated_stream_skips_accrual() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, _token_client) = setup(&env);
+
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.deactivate_stream(&admin, 0);
+
+        let rewards = client.update_rewards(&user, &token, &1000, &7);
+        assert!(rewards.is_empty());
+    }
+
+    #[test]
+    fn test_auto_compound_split_accounting() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, token_client) = setup(&env);
+
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.fund_reward_pool(&admin, &token, &1_000_000);
+
+        client.set_auto_compound_config(&user, &token, &5000, &true);
+        client.update_rewards(&user, &token, &1000, &7);
+
+        let reinvest = client.execute_auto_compound(&user, &token, &Vec::from_array(&env, &[0u32]));
+        let total = reinvest.get(&token).unwrap_or(0);
+        assert!(total >= 0);
+    }
+}

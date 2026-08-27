@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { TrendingUp, TrendingDown, DollarSign, Activity, Lock, Unlock } from 'lucide-react';
-import { VaultClient, VaultInfo, VaultMetrics, UserPosition } from 'stellar-liquidity-yield-engine-sdk';
+import { useYieldVault } from '../hooks/useYieldVault';
 
 interface YieldVaultCardProps {
   vaultAddress: string;
@@ -17,59 +17,40 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   userAddress,
   network = 'testnet'
 }) => {
-  const [vaultInfo, setVaultInfo] = useState<VaultInfo | null>(null);
-  const [vaultMetrics, setVaultMetrics] = useState<VaultMetrics | null>(null);
-  const [userPosition, setUserPosition] = useState<UserPosition | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [depositAmountA, setDepositAmountA] = useState('');
   const [depositAmountB, setDepositAmountB] = useState('');
   const [withdrawShares, setWithdrawShares] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const vaultClient = new VaultClient(vaultAddress, network === 'testnet' ? 'testnet' : 'mainnet');
+  const {
+    vaultInfo,
+    vaultMetrics,
+    userPosition,
+    isPaused,
+    loading,
+    error: hookError,
+    refresh,
+    deposit,
+    withdraw,
+    harvest,
+  } = useYieldVault({
+    vaultAddress,
+    userAddress,
+    network,
+    autoRefresh: true,
+    refreshInterval: 30000,
+  });
 
-  useEffect(() => {
-    loadVaultData();
-  }, [vaultAddress, userAddress]);
-
-  const loadVaultData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const [info, metrics, position, paused] = await Promise.all([
-        vaultClient.getVaultInfo(),
-        vaultClient.getMetrics(),
-        vaultClient.getUserPosition(userAddress),
-        vaultClient.isPaused()
-      ]);
-
-      setVaultInfo(info);
-      setVaultMetrics(metrics);
-      setUserPosition(position);
-      setIsPaused(paused);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  React.useEffect(() => {
+    setError(hookError);
+  }, [hookError]);
 
   const handleDeposit = async () => {
     if (!depositAmountA || !depositAmountB) return;
 
     try {
       setError(null);
-      // This would need user's keypair - simplified for demo
-      // await vaultClient.deposit(userKeyPair, {
-      //   amountA: BigInt(depositAmountA),
-      //   amountB: BigInt(depositAmountB),
-      //   minShares: BigInt(0)
-      // });
-      
-      // Refresh data after successful deposit
-      await loadVaultData();
+      await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
       setDepositAmountA('');
       setDepositAmountB('');
     } catch (err: any) {
@@ -82,15 +63,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
 
     try {
       setError(null);
-      // This would need user's keypair - simplified for demo
-      // await vaultClient.withdraw(userKeyPair, {
-      //   shares: BigInt(withdrawShares),
-      //   minAmountA: BigInt(0),
-      //   minAmountB: BigInt(0)
-      // });
-      
-      // Refresh data after successful withdrawal
-      await loadVaultData();
+      await withdraw(BigInt(withdrawShares), 0n, 0n);
       setWithdrawShares('');
     } catch (err: any) {
       setError(err.message);
@@ -100,11 +73,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   const handleHarvest = async () => {
     try {
       setError(null);
-      // This would need user's keypair - simplified for demo
-      // await vaultClient.harvest(userKeyPair);
-      
-      // Refresh data after successful harvest
-      await loadVaultData();
+      await harvest();
     } catch (err: any) {
       setError(err.message);
     }
@@ -283,7 +252,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
             Harvest Rewards
           </Button>
           <Button 
-            onClick={loadVaultData}
+            onClick={refresh}
             variant="outline"
             className="flex-1"
           >
