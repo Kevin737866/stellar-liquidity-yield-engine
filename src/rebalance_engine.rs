@@ -507,7 +507,12 @@ impl RebalanceEngine {
         opportunities
     }
 
-    /// Calculate the total cost of rebalancing including all fees
+    /// Calculate the total cost of rebalancing including all fees and return a
+    /// clear profitability decision.
+    ///
+    /// Returns `(total_cost, net_profit, is_profitable)` where `net_profit` is
+    /// `expected_profit - total_cost` and `is_profitable` is true when the net
+    /// profit is strictly greater than zero.
     pub fn calculate_rebalance_cost(
         env: Env,
         from_pool: Address,
@@ -516,7 +521,8 @@ impl RebalanceEngine {
         gas_estimate: i128,
         il_basis_points: u32,
         entry_fee_basis_points: u32,
-    ) -> (i128, i128) {
+        expected_profit: i128,
+    ) -> (i128, i128, bool) {
         // IL cost in absolute terms
         let il_cost = (amount * il_basis_points as i128) / 10000;
         
@@ -527,8 +533,11 @@ impl RebalanceEngine {
         let slippage_cost = (amount * 10i128) / 10000;
         let total_cost = gas_estimate + il_cost + entry_cost + slippage_cost;
 
-        // Profitability threshold: net profit must exceed 0
-        (total_cost, gas_estimate)
+        // Profitability threshold: net profit must exceed 0.
+        let net_profit = expected_profit - total_cost;
+        let is_profitable = net_profit > 0;
+
+        (total_cost, net_profit, is_profitable)
     }
 
     /// Execute atomic flash rebalance: withdraw → swap → deposit in single transaction
