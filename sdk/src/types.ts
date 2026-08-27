@@ -1,4 +1,4 @@
-import { Address } from 'stellar-sdk';
+import { Address, Transaction } from 'stellar-sdk';
 
 // Vault Types
 export interface VaultInfo {
@@ -256,6 +256,17 @@ export interface TransactionOptions {
   gasPrice?: number;
   timeout?: number;
   skipConfirmation?: boolean;
+}
+
+/**
+ * A signing abstraction that lets `VaultClient` submit real transactions
+ * through browser wallets such as Freighter, which expose an async
+ * `getPublicKey()` and sign transactions via `signTransaction()` rather than
+ * holding a local `Keypair`.
+ */
+export interface TransactionSigner {
+  getPublicKey(): Promise<string> | string;
+  signTransaction(tx: Transaction, networkPassphrase: string): Promise<Transaction> | Transaction;
 }
 
 export interface TransactionResult {
