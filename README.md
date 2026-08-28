@@ -592,17 +592,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🔍 Audits
 
 ### Security Audits
-- **Smart Contracts**: [Audit Firm] - [Date]
-- **SDK Security**: [Audit Firm] - [Date]
-- **UI Security**: [Audit Firm] - [Date]
+This project has not yet undergone a third-party security audit. Do not use in production
+or with real funds until an audit has been completed. This section will be updated with
+audit firm names, dates, and report links once an audit is performed.
 
-### Bug Bounty Program
-- **Critical**: $10,000 USD
-- **High**: $5,000 USD
-- **Medium**: $1,000 USD
-- **Low**: $500 USD
-
-Submit reports to: security@stellar-yield.com
+### Reporting a Vulnerability
+There is no bug bounty program at this time. If you discover a security issue, please
+open a GitHub issue or contact the maintainers directly rather than disclosing it publicly.
 
 ---
 
