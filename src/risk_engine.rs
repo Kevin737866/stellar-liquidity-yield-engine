@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, i128 as SorobanI128,
+    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
     unwrap::UnwrapOptimized
 };
 

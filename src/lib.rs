@@ -1,6 +1,15 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
 
+/// Panics with the given error's debug representation if `cond` is false.
+macro_rules! require {
+    ($cond:expr, $err:expr) => {
+        if !$cond {
+            panic!("{:?}", $err)
+        }
+    };
+}
+
 mod yield_vault;
 mod rebalance_engine;
 mod reward_distributor;
