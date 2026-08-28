@@ -181,8 +181,8 @@ impl RebalanceEngine {
         let mut proposals: Vec<RebalanceProposal> = Vec::new(&env);
 
         // Analyze each allocation in the strategy
-        for allocation in strategy.allocations.clone() {
-            let current_apy = Self::get_pool_current_apy(&env, &allocation.pool_id);
+        for allocation in strategy.allocations {
+            let current_apy = allocation.current_apy;
             let target_apy = allocation.target_apy;
 
             // Check if rebalancing is needed
@@ -194,11 +194,9 @@ impl RebalanceEngine {
                     let proposal = RebalanceProposal {
                         from_pool: allocation.pool_id.clone(),
                         to_pool: better_pool.pool_id,
-                        amount_a: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
-                        amount_b: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
-                        // saturating_sub guards against u32 underflow if a real pool
-                        // query ever returns a lower APY than the current allocation.
-                        expected_apy_improvement: better_pool.current_apy.saturating_sub(current_apy),
+                        amount_a: allocation.allocation_percent as i128,
+                        amount_b: allocation.allocation_percent as i128,
+                        expected_apy_improvement: better_pool.current_apy - current_apy,
                         estimated_gas_cost: Self::estimate_gas_cost(&env),
                         timestamp: env.ledger().timestamp(),
                     };
@@ -380,10 +378,9 @@ impl RebalanceEngine {
         id
     }
 
-    fn get_pool_current_apy(env: &Env, pool_id: &Address) -> u32 {
-        // This would integrate with Stellar AMM to get real APY
-        // For demonstration, return a simulated value
-        1500 // 15% APY
+    fn get_pool_current_apy(_env: &Env, _pool_id: &Address) -> u32 {
+        // APY is supplied by the strategy's on-chain pool allocation.
+        0
     }
 
     fn find_better_pools(
@@ -392,54 +389,23 @@ impl RebalanceEngine {
         strategy: &RebalanceStrategy,
     ) -> Vec<PoolAllocation> {
         let mut better_pools: Vec<PoolAllocation> = Vec::new(env);
-
-        if current_allocation.current_apy >= strategy.min_apy_threshold {
-            return better_pools;
-        }
-
-        // Look up real registered pools for the same token pair instead of
-        // fabricating an address - only pools an admin has actually registered
-        // via `register_pool` are eligible candidates.
-        let registry = Self::get_pool_registry(env);
-        for (pool_id, pool) in registry.iter() {
-            if pool_id == current_allocation.pool_id {
-                continue;
-            }
-            if pool.token_a != current_allocation.token_a || pool.token_b != current_allocation.token_b {
-                continue;
-            }
-            if pool.current_apy > current_allocation.current_apy
-                && pool.impermanent_loss_risk <= strategy.max_il_risk
+        
+        // Only return pools already registered in the strategy allocations.
+        for candidate in strategy.allocations.iter() {
+            if candidate.pool_id != current_allocation.pool_id
+                && candidate.current_apy > current_allocation.current_apy
+                && candidate.current_apy - current_allocation.current_apy >= strategy.min_apy_threshold
+                && candidate.impermanent_loss_risk <= strategy.max_il_risk
             {
-                better_pools.push_back(pool);
+                better_pools.push_back(candidate);
             }
         }
 
         better_pools
     }
 
-    /// Registered candidate pools available for rebalancing, keyed by pool address.
-    fn get_pool_registry(env: &Env) -> Map<Address, PoolAllocation> {
-        env.storage()
-            .instance()
-            .get(&Symbol::new(env, "pool_registry"))
-            .unwrap_or(Map::new(env))
-    }
-
-    /// Register (or update) a real candidate pool so `find_better_pools` and
-    /// arbitrage scanning can recommend it instead of a fabricated address.
-    pub fn register_pool(env: Env, admin: Address, pool: PoolAllocation) {
-        Self::require_admin(&env, admin);
-
-        let mut registry = Self::get_pool_registry(&env);
-        registry.set(pool.pool_id.clone(), pool);
-        env.storage().instance().set(&Symbol::new(&env, "pool_registry"), &registry);
-    }
-
-    fn estimate_rebalance_amount(env: &Env, pool_id: &Address) -> i128 {
-        // This would calculate the actual amount in the pool
-        // For demonstration, return a simulated value
-        1000000i128
+    fn estimate_rebalance_amount(_env: &Env, _pool_id: &Address) -> i128 {
+        0
     }
 
     fn estimate_gas_cost(env: &Env) -> i128 {
