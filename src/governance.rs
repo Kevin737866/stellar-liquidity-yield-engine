@@ -106,8 +106,8 @@ impl GovernanceProposal {
             proposer,
             description,
             call_data,
-            votes_for: 0,
-            votes_against: 0,
+            votes_for: BigInt::zero(env),
+            votes_against: BigInt::zero(env),
             eta: 0,
             start_time,
             end_time: start_time + duration,
@@ -655,7 +655,7 @@ impl ProtocolGovernor {
         let snapshot_block = env.ledger().sequence() as u64;
 
         let proposal = GovernanceProposal::new(
-            &env,
+            &e,
             proposer,
             description,
             call_data,
