@@ -28,39 +28,50 @@ pub struct RiskEngine;
 
 #[contractimpl]
 impl RiskEngine {
-    /// Calculate impermanent loss given price changes
-    /// Formula: 2 * sqrt(price_ratio) / (1 + price_ratio) - 1
+    /// Calculate impermanent loss given price changes using the standard formula
+    /// `IL = 1 - 2 * sqrt(r) / (1 + r)`, where `r = current / entry`.
+    /// Returns the loss as basis points, capped at 10000 (100%).
+    ///
+    /// The arithmetic is scaled and multiplies-before-dividing so intermediate
+    /// integer division never truncates (previously the result was discontinuous).
     pub fn calculate_impermanent_loss(
         env: Env,
         current_price_ratio: i128, // Scaled by 10000
         entry_price_ratio: i128, // Scaled by 10000
     ) -> u32 {
-        if entry_price_ratio == 0 {
+        if current_price_ratio <= 0 || entry_price_ratio <= 0 {
             return 0;
         }
 
-        // Avoid division by zero and overflow
-        let ratio = if current_price_ratio > 0 {
-            (current_price_ratio as i128 * 10000) / entry_price_ratio as i128
-        } else {
-            0
-        };
+        // r scaled by 10000: (current / entry) * 10000
+        let r_scaled = (current_price_ratio as i128 * 10000) / entry_price_ratio;
 
-        if ratio == 0 {
-            return 0;
+        // sqrt(r) scaled by 10000 = sqrt(r_scaled * 10000)
+        let sqrt_r_scaled = Self::isqrt((r_scaled as u128) * 10000);
+
+        // term = (2 * sqrt(r) / (1 + r)) * 10000
+        let denominator = r_scaled as u128 + 10000;
+        let two_sqrt = sqrt_r_scaled * 2;
+        let term = (two_sqrt * 10000) / denominator;
+
+        // By AM-GM, 1 + r >= 2 * sqrt(r), so term <= 10000 and
+        // `10000 - term` can never underflow. IL rises as price diverges.
+        let il_basis_points = if term >= 10000 { 0 } else { 10000 - term };
+        il_basis_points.min(10000) as u32
+    }
+
+    /// Integer square root (Babylonian), returns floor(sqrt(n)).
+    fn isqrt(n: u128) -> u128 {
+        if n <= 1 {
+            return n;
         }
-
-        // Simplified IL calculation: loss increases with price divergence
-        // IL% ≈ (sqrt(price_ratio) - 1)^2 / price_ratio
-        let ratio_diff = (ratio - 10000).abs();
-        let il_basis_points = (ratio_diff * ratio_diff) / (100 * ratio);
-
-        // Cap at 100% (10000 basis points)
-        if il_basis_points > 10000 {
-            10000
-        } else {
-            il_basis_points as u32
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
         }
+        x
     }
 
     /// Estimate slippage based on pool depth and trade amount

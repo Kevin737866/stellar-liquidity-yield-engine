@@ -194,7 +194,9 @@ impl RebalanceEngine {
                         to_pool: better_pool.pool_id,
                         amount_a: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
                         amount_b: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
-                        expected_apy_improvement: better_pool.current_apy - current_apy,
+                        // saturating_sub guards against u32 underflow if a real pool
+                        // query ever returns a lower APY than the current allocation.
+                        expected_apy_improvement: better_pool.current_apy.saturating_sub(current_apy),
                         estimated_gas_cost: Self::estimate_gas_cost(&env),
                         timestamp: env.ledger().timestamp(),
                     };
@@ -298,24 +300,52 @@ impl RebalanceEngine {
         strategy.allocations
     }
 
-    /// Calculate impermanent loss for a pool
+    /// Calculate impermanent loss for a pool using the standard formula
+    /// `IL = 1 - 2 * sqrt(r) / (1 + r)`, where `r = current_price / entry_price`.
+    /// Returns the loss as basis points, capped at 10000 (100%).
+    ///
+    /// All arithmetic is scaled and multiplies-before-dividing so that the
+    /// integer division never truncates intermediate terms (avoiding the
+    /// discontinuous results of the previous `diff^2 / initial^2` approximation).
     pub fn calculate_impermanent_loss(
         env: Env,
         pool_id: Address,
         price_ratio: i128, // Current price ratio * 10000
         initial_price_ratio: i128, // Initial price ratio * 10000
     ) -> u32 {
-        // IL formula: 2 * sqrt(price_ratio) / (1 + price_ratio) - 1
-        // Simplified calculation for demonstration
-        let ratio_diff = (price_ratio - initial_price_ratio).abs();
-        let il_percent = (ratio_diff * ratio_diff) / (initial_price_ratio * initial_price_ratio / 10000);
-        
-        // Cap at 100% and convert to basis points
-        if il_percent > 10000 {
-            10000
-        } else {
-            il_percent as u32
+        if price_ratio <= 0 || initial_price_ratio <= 0 {
+            return 0;
         }
+
+        // r scaled by 10000: (current / entry) * 10000
+        let r_scaled = (price_ratio as i128 * 10000) / initial_price_ratio;
+
+        // sqrt(r) scaled by 10000 = sqrt(r_scaled * 10000)
+        let sqrt_r_scaled = Self::isqrt((r_scaled as u128) * 10000);
+
+        // term = (2 * sqrt(r) / (1 + r)) * 10000
+        let denominator = r_scaled as u128 + 10000;
+        let two_sqrt = sqrt_r_scaled * 2;
+        let term = (two_sqrt * 10000) / denominator;
+
+        // By AM-GM, 1 + r >= 2 * sqrt(r), so term <= 10000 always and
+        // `10000 - term` can never underflow. IL rises as the price diverges.
+        let il_bp = if term >= 10000 { 0 } else { 10000 - term };
+        il_bp.min(10000) as u32
+    }
+
+    /// Integer square root (Babylonian), returns floor(sqrt(n)).
+    fn isqrt(n: u128) -> u128 {
+        if n <= 1 {
+            return n;
+        }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
     }
 
     /// Helper functions

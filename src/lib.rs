@@ -105,6 +105,50 @@ impl StellarLiquidityYieldEngine {
             .unwrap()
     }
 
+    /// Update the strategy registry contract address (admin only)
+    pub fn update_strategy_registry(
+        env: Env,
+        admin: Address,
+        new_strategy_registry: Address,
+    ) {
+        Self::require_admin(&env, admin.clone());
+        Self::require_not_paused(&env);
+        env.storage().instance().set(
+            &Symbol::new(&env, "strategy_registry"),
+            &new_strategy_registry,
+        );
+
+        env.events().publish(
+            ("strategy_registry_updated",),
+            (
+                admin,
+                new_strategy_registry,
+            ),
+        );
+    }
+
+    /// Update the reward distributor contract address (admin only)
+    pub fn update_reward_distributor(
+        env: Env,
+        admin: Address,
+        new_reward_distributor: Address,
+    ) {
+        Self::require_admin(&env, admin.clone());
+        Self::require_not_paused(&env);
+        env.storage().instance().set(
+            &Symbol::new(&env, "reward_distributor"),
+            &new_reward_distributor,
+        );
+
+        env.events().publish(
+            ("reward_distributor_updated",),
+            (
+                admin,
+                new_reward_distributor,
+            ),
+        );
+    }
+
     /// Require admin authorization
     fn require_admin(env: &Env, caller: Address) {
         let admin = Self::get_admin(env.clone());
