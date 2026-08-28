@@ -112,10 +112,13 @@ temp/
 soroban/
 .example/
 
-# Test files
+# Test files and snapshots
 test/
 tests/
 __tests__/
+**/__snapshots__/
+*.snap
+*.snap.orig
 
 # Documentation build
 docs/_build/
@@ -127,3 +130,18 @@ docs/_build/
 
 # Soroban test snapshots
 /test_snapshots/
+**/test_snapshots/
+
+
+# Additional entries (issues #141-144)
+# Catch build artifacts regardless of path prefix
+target/
+dist/
+build/
+
+# Wildcard env files
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp

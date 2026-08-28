@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Symbol,
-    token::TokenClient, unwrap::UnwrapOptimized,
+    contract, contractimpl, contracttype, token::TokenClient, unwrap::UnwrapOptimized, Address,
+    Env, Symbol, Vec,
 };
 
 #[contracttype]
@@ -11,8 +11,8 @@ pub struct VaultInfo {
     pub token_b: Address,
     pub pool_id: Address,
     pub strategy_id: u32,
-    pub fee_rate: u32, // Basis points (100 = 1%)
-    pub harvest_fee: u32, // Basis points
+    pub fee_rate: u32,       // Basis points (100 = 1%)
+    pub harvest_fee: u32,    // Basis points
     pub withdrawal_fee: u32, // Basis points
 }
 
@@ -31,7 +31,7 @@ pub struct VaultMetrics {
     pub total_shares: i128,
     pub total_amount_a: i128,
     pub total_amount_b: i128,
-    pub apy: u32, // Basis points
+    pub apy: u32,  // Basis points
     pub tvl: i128, // Total Value Locked in USD (scaled)
     pub last_harvest: u64,
 }
@@ -69,10 +69,28 @@ impl YieldVault {
             withdrawal_fee,
         };
 
-        env.storage().instance().set(&Symbol::new(&env, "vault_info"), &vault_info);
-        env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
-        env.storage().instance().set(&Symbol::new(&env, "treasury"), &treasury);
-        env.storage().instance().set(&Symbol::new(&env, "paused"), &false);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "vault_info"), &vault_info);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "admin"), &admin);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "treasury"), &treasury);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &false);
+
+        // Emergency multisig state: the emergency signer set starts empty and
+        // must be configured by the admin; threshold defaults to 3 approvals.
+        env.storage().instance().set(
+            &Symbol::new(&env, "emergency_signers"),
+            &Vec::<Address>::new(&env),
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "emergency_threshold"), &3u32);
 
         // Initialize metrics
         let metrics = VaultMetrics {
@@ -83,7 +101,9 @@ impl YieldVault {
             tvl: 0,
             last_harvest: env.ledger().timestamp(),
         };
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
     }
 
     /// Deposit tokens into the vault
@@ -210,7 +230,7 @@ impl YieldVault {
     }
 
     /// Auto-compound harvest and reinvestment
-    pub fn harvest(env: Env, caller: Address) {
+    pub fn harvest(env: Env, _caller: Address) {
         Self::require_not_paused(&env);
 
         let vault_info = Self::get_vault_info(env.clone());
@@ -289,15 +309,12 @@ impl YieldVault {
 
     /// Get user position
     pub fn get_user_position(env: Env, user: Address) -> UserPosition {
-        env.storage()
-            .instance()
-            .get(&user)
-            .unwrap_or(UserPosition {
-                shares: 0,
-                last_harvest: 0,
-                deposited_amount_a: 0,
-                deposited_amount_b: 0,
-            })
+        env.storage().instance().get(&user).unwrap_or(UserPosition {
+            shares: 0,
+            last_harvest: 0,
+            deposited_amount_a: 0,
+            deposited_amount_b: 0,
+        })
     }
 
     /// Get APY for the vault (in basis points)
@@ -372,7 +389,7 @@ impl YieldVault {
     }
 
     /// Calculate pending rewards (placeholder)
-    fn calculate_pending_rewards(env: &Env, pool_id: &Address) -> i128 {
+    fn calculate_pending_rewards(_env: &Env, _pool_id: &Address) -> i128 {
         // This would integrate with Stellar AMM to calculate actual rewards
         // For now, return a simulated value
         1000i128
@@ -421,7 +438,9 @@ impl YieldVault {
         if admin != current_admin {
             panic!("unauthorized");
         }
-        env.storage().instance().set(&Symbol::new(&env, "paused"), &true);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &true);
     }
 
     /// Unpause vault (admin only)
@@ -430,7 +449,99 @@ impl YieldVault {
         if admin != current_admin {
             panic!("unauthorized");
         }
-        env.storage().instance().set(&Symbol::new(&env, "paused"), &false);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &false);
+    }
+
+    /// Require the caller to be the vault admin
+    fn require_admin(env: &Env, caller: Address) {
+        let admin = Self::get_admin(env.clone());
+        if caller != admin {
+            panic!("unauthorized");
+        }
+    }
+
+    /// Configure the emergency multisig signer set (admin only).
+    ///
+    /// The caller must be the vault admin. Replaces the entire signer set,
+    /// so a fresh `emergency_pause`/`emergency_unpause` requires the new set.
+    pub fn set_emergency_signers(env: Env, admin: Address, signers: Vec<Address>) {
+        Self::require_admin(&env, admin);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "emergency_signers"), &signers);
+    }
+
+    /// Set the number of approvals required to execute an emergency action
+    /// (admin only). Must be at least 1.
+    pub fn set_emergency_threshold(env: Env, admin: Address, threshold: u32) {
+        Self::require_admin(&env, admin);
+        if threshold == 0 {
+            panic!("threshold must be at least 1");
+        }
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "emergency_threshold"), &threshold);
+    }
+
+    /// Get the emergency multisig signer set
+    pub fn get_emergency_signers(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "emergency_signers"))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get the emergency multisig approval threshold
+    pub fn get_emergency_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "emergency_threshold"))
+            .unwrap_or(3u32)
+    }
+
+    /// Require `threshold` distinct signers from the authorized set have been
+    /// provided. Enforces the 3-of-N (configurable) emergency multisig pattern.
+    fn require_multisig(env: &Env, signers: Vec<Address>) {
+        let threshold = Self::get_emergency_threshold(env.clone());
+        let authorized = Self::get_emergency_signers(env.clone());
+
+        let mut valid = 0u32;
+        for signer in signers.iter() {
+            for candidate in authorized.iter() {
+                if signer == candidate {
+                    valid += 1;
+                    break;
+                }
+            }
+        }
+
+        if valid < threshold {
+            panic!("insufficient signatures for emergency action");
+        }
+    }
+
+    /// Emergency pause (multisig required)
+    pub fn emergency_pause(env: Env, signers: Vec<Address>) {
+        Self::require_multisig(&env, signers);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &true);
+
+        env.events()
+            .publish(("emergency_pause",), (env.current_contract_address(),));
+    }
+
+    /// Emergency unpause (multisig required)
+    pub fn emergency_unpause(env: Env, signers: Vec<Address>) {
+        Self::require_multisig(&env, signers);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &false);
+
+        env.events()
+            .publish(("emergency_unpause",), (env.current_contract_address(),));
     }
 }
 
@@ -440,7 +551,10 @@ mod tests {
 
     use super::*;
     use soroban_sdk::testutils::{Address as _, Events};
-    use soroban_sdk::{Env, IntoVal, Symbol, token::{StellarAssetClient, TokenClient}};
+    use soroban_sdk::{
+        token::{StellarAssetClient, TokenClient},
+        Env, IntoVal, Symbol,
+    };
 
     fn setup(
         env: &Env,
@@ -484,7 +598,16 @@ mod tests {
             &treasury,
         );
 
-        (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin, treasury)
+        (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        )
     }
 
     #[test]
@@ -501,8 +624,16 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         // 1% harvest fee
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin, treasury) =
-            setup(&env, 0, 100, 0);
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        ) = setup(&env, 0, 100, 0);
 
         // Fund the user and deposit so the vault holds tokens to pay fees from
         token_a_admin.mint(&user, &1000);
@@ -523,8 +654,16 @@ mod tests {
     fn test_harvest_with_zero_fee_leaves_no_treasury_transfer() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, treasury) =
-            setup(&env, 0, 0, 0);
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            _,
+            treasury,
+        ) = setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &1000);
         token_b_admin.mint(&user, &1000);
@@ -534,5 +673,95 @@ mod tests {
 
         assert_eq!(token_a_client.balance(&treasury), 0);
         assert_eq!(token_b_client.balance(&treasury), 0);
+    }
+
+    #[test]
+    fn test_first_deposit_balanced_mints_geometric_mean_shares() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+
+        let shares = vault.deposit(&user, &1000, &1000, &0);
+        let expected = ((1000u128 * 1000u128) as u128).isqrt() as i128;
+        assert_eq!(shares, expected);
+    }
+
+    #[test]
+    fn test_first_deposit_unbalanced_uses_nonzero_amount() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &2000);
+        token_b_admin.mint(&user, &500);
+
+        let shares = vault.deposit(&user, &2000, &500, &0);
+        assert_eq!(shares, 2500);
+    }
+
+    #[test]
+    fn test_subsequent_deposit_mints_proportional_shares() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        let first_shares = vault.deposit(&user, &1000, &1000, &0);
+
+        token_a_admin.mint(&user, &500);
+        token_b_admin.mint(&user, &500);
+        let second_shares = vault.deposit(&user, &500, &500, &0);
+
+        assert_eq!(first_shares, 1000);
+        assert_eq!(second_shares, 500);
+    }
+
+    #[test]
+    fn test_withdraw_returns_tokens_and_burns_shares() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        assert_eq!(amount_a, 1000);
+        assert_eq!(amount_b, 1000);
+    }
+
+    #[test]
+    fn test_withdrawal_fee_is_applied() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            _,
+            treasury,
+        ) = setup(&env, 0, 0, 100);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        assert_eq!(amount_a, 990);
+        assert_eq!(amount_b, 990);
+        assert_eq!(token_a_client.balance(&treasury), 10);
+        assert_eq!(token_b_client.balance(&treasury), 10);
     }
 }

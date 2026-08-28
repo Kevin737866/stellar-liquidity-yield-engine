@@ -17,6 +17,7 @@ import {
   RebalanceError,
   NetworkConfig
 } from './types';
+import { waitForTransaction } from './utils/transaction';
 
 export class RebalancerClient {
   private contract: Contract;
@@ -68,7 +69,7 @@ export class RebalancerClient {
       const result = await this.server.sendTransaction(signedTx);
       
       if (result.status === 'SUCCESS') {
-        const txResult = await this.server.getTransaction(result.hash);
+        const txResult = await waitForTransaction(this.server, result.hash);
         const strategyId = Number(txResult.result!.returnValue);
         
         return {
@@ -200,7 +201,7 @@ export class RebalancerClient {
       const result = await this.server.sendTransaction(signedTx);
       
       if (result.status === 'SUCCESS') {
-        const txResult = await this.server.getTransaction(result.hash);
+        const txResult = await waitForTransaction(this.server, result.hash);
         const success = Boolean(txResult.result!.returnValue);
         
         return {

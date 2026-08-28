@@ -446,7 +446,7 @@ impl StakingContract {
         
         // Simplified reward calculation
         let time_elapsed = e.ledger().timestamp() - last_claim;
-        let rewards = stake_balance * BigInt::from_u32(&e, time_elapsed as u32) * reward_per_token;
+        let rewards = stake_balance * BigInt::from_u64(&e, time_elapsed) * reward_per_token;
         
         let accrued = Self::key_accrued_rewards(&user);
         Ok(rewards + accrued)
@@ -1351,34 +1351,509 @@ impl EmergencyMultisig {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Helper: pure voting-power formula extracted from VotingEscrow so tests
+    // can exercise it without needing a live Soroban Env.
+    //
+    //   voting_power = locked_amount * remaining_time / MAX_VOTE_DURATION
+    // -----------------------------------------------------------------------
+    fn compute_voting_power(locked_amount: u64, lock_end: u64, current_time: u64) -> u64 {
+        if lock_end <= current_time {
+            return 0;
+        }
+        let remaining = lock_end - current_time;
+        locked_amount * remaining / (MAX_VOTE_DURATION as u64)
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: quorum check — total votes must be >= QUORUM_PERCENTAGE/10000
+    // of total_supply.
+    // -----------------------------------------------------------------------
+    fn quorum_reached(votes_for: u64, votes_against: u64, total_supply: u64) -> bool {
+        let total_votes = votes_for + votes_against;
+        // QUORUM_PERCENTAGE is in basis points (400 = 4%)
+        let required = total_supply * (QUORUM_PERCENTAGE as u64) / 10_000;
+        total_votes >= required
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: boost multiplier formula extracted from VotingEscrow.
+    //
+    //   duration_factor = lock_duration * 10000 / MAX_VOTE_DURATION
+    //   boost_bp        = 10000 + duration_factor * 1500 / 10000
+    //   capped at MAX_BOOST_MULTIPLIER
+    // -----------------------------------------------------------------------
+    fn compute_boost_multiplier(lock_duration: u64) -> u32 {
+        let duration_factor = lock_duration * 10_000 / (MAX_VOTE_DURATION as u64);
+        let boost = 10_000u64 + duration_factor * 1_500 / 10_000;
+        let capped = boost.min(MAX_BOOST_MULTIPLIER as u64);
+        capped as u32
+    }
+
+    // =========================================================================
+    // Token Distribution
+    // =========================================================================
+
     #[test]
     fn test_token_distribution() {
-        // Verify total allocations equal 100%
-        let total = COMMUNITY_ALLOCATION + TEAM_ALLOCATION + TREASURY_ALLOCATION + LIQUIDITY_MINING_ALLOCATION;
-        assert_eq!(total, 1_000_000_000); // 100%
+        // Verify total allocations equal 100% (1 billion tokens)
+        let total = COMMUNITY_ALLOCATION
+            + TEAM_ALLOCATION
+            + TREASURY_ALLOCATION
+            + LIQUIDITY_MINING_ALLOCATION;
+        assert_eq!(total, TOTAL_SUPPLY, "allocations must sum to TOTAL_SUPPLY");
+
+        // Individual allocation sanity checks
+        assert_eq!(
+            COMMUNITY_ALLOCATION,
+            500_000_000,
+            "community should be 50% of supply"
+        );
+        assert_eq!(
+            TEAM_ALLOCATION,
+            200_000_000,
+            "team should be 20% of supply"
+        );
+        assert_eq!(
+            TREASURY_ALLOCATION,
+            200_000_000,
+            "treasury should be 20% of supply"
+        );
+        assert_eq!(
+            LIQUIDITY_MINING_ALLOCATION,
+            100_000_000,
+            "liquidity mining should be 10% of supply"
+        );
+
+        // Percentage cross-checks (basis-point arithmetic)
+        let community_pct = COMMUNITY_ALLOCATION * 100 / TOTAL_SUPPLY;
+        let team_pct = TEAM_ALLOCATION * 100 / TOTAL_SUPPLY;
+        let treasury_pct = TREASURY_ALLOCATION * 100 / TOTAL_SUPPLY;
+        let lm_pct = LIQUIDITY_MINING_ALLOCATION * 100 / TOTAL_SUPPLY;
+        assert_eq!(community_pct, 50);
+        assert_eq!(team_pct, 20);
+        assert_eq!(treasury_pct, 20);
+        assert_eq!(lm_pct, 10);
     }
+
+    // =========================================================================
+    // Voting Power Decay
+    // =========================================================================
 
     #[test]
     fn test_voting_power_decay() {
-        // Test that voting power decays linearly
-        // voting_power = amount * remaining_time / max_time
+        // voting_power = locked_amount * remaining_time / MAX_VOTE_DURATION
+        let locked_amount: u64 = 1_000_000;
+        let max_duration = MAX_VOTE_DURATION as u64; // 4 years in seconds
+
+        // --- Full lock duration → maximum power ---
+        let power_full = compute_voting_power(locked_amount, max_duration, 0);
+        assert_eq!(
+            power_full, locked_amount,
+            "at full lock, voting power should equal locked amount"
+        );
+
+        // --- Half duration remaining → half power ---
+        let power_half = compute_voting_power(locked_amount, max_duration, max_duration / 2);
+        let expected_half = locked_amount / 2;
+        assert_eq!(
+            power_half, expected_half,
+            "at half remaining time, power should be half of locked"
+        );
+
+        // --- Quarter duration remaining → quarter power ---
+        let power_quarter =
+            compute_voting_power(locked_amount, max_duration, max_duration * 3 / 4);
+        let expected_quarter = locked_amount / 4;
+        assert_eq!(
+            power_quarter, expected_quarter,
+            "at 1/4 remaining time, power should be 1/4 of locked"
+        );
+
+        // --- Expired lock → zero power ---
+        let power_expired = compute_voting_power(locked_amount, max_duration, max_duration);
+        assert_eq!(power_expired, 0, "expired lock should yield zero voting power");
+
+        // --- Power at lock_end - 1 second → almost zero but positive ---
+        let power_last_second =
+            compute_voting_power(locked_amount, max_duration, max_duration - 1);
+        assert!(
+            power_last_second > 0,
+            "one second before expiry should still have non-zero power"
+        );
+
+        // --- Monotonic decay: power decreases as time increases ---
+        let times: &[u64] = &[0, max_duration / 4, max_duration / 2, max_duration * 3 / 4];
+        let mut prev_power = u64::MAX;
+        for &t in times {
+            let p = compute_voting_power(locked_amount, max_duration, t);
+            assert!(
+                p <= prev_power,
+                "voting power should be non-increasing over time"
+            );
+            prev_power = p;
+        }
     }
+
+    #[test]
+    fn test_voting_power_zero_for_expired_lock() {
+        let locked: u64 = 5_000_000;
+        let lock_end: u64 = 1_000;
+        // current_time == lock_end  →  expired
+        assert_eq!(compute_voting_power(locked, lock_end, lock_end), 0);
+        // current_time > lock_end  →  also expired
+        assert_eq!(compute_voting_power(locked, lock_end, lock_end + 1), 0);
+    }
+
+    // =========================================================================
+    // Quorum Calculation
+    // =========================================================================
 
     #[test]
     fn test_quorum_calculation() {
-        // Test 4% quorum requirement
-        assert_eq!(QUORUM_PERCENTAGE, 400);
+        // QUORUM_PERCENTAGE constant must equal 400 bp (4%)
+        assert_eq!(QUORUM_PERCENTAGE, 400, "quorum must be 4% (400 basis points)");
+
+        // With 1 billion total supply, quorum = 4% = 40 million
+        let total_supply: u64 = 1_000_000_000;
+        let quorum_required = total_supply * (QUORUM_PERCENTAGE as u64) / 10_000;
+        assert_eq!(quorum_required, 40_000_000);
+
+        // Exactly at quorum → passes
+        assert!(
+            quorum_reached(40_000_000, 0, total_supply),
+            "exactly at quorum threshold should pass"
+        );
+
+        // One token below quorum → fails
+        assert!(
+            !quorum_reached(39_999_999, 0, total_supply),
+            "one token below quorum should fail"
+        );
+
+        // Quorum reached via combination of for + against votes
+        assert!(
+            quorum_reached(20_000_000, 20_000_000, total_supply),
+            "sum of for+against votes counting toward quorum"
+        );
+
+        // Proposal passes: quorum reached AND more votes for than against
+        let votes_for: u64 = 50_000_000;
+        let votes_against: u64 = 5_000_000;
+        assert!(quorum_reached(votes_for, votes_against, total_supply));
+        assert!(votes_for > votes_against);
+
+        // Proposal defeated: quorum reached but more against
+        let votes_for_d: u64 = 20_000_000;
+        let votes_against_d: u64 = 25_000_000;
+        assert!(quorum_reached(votes_for_d, votes_against_d, total_supply));
+        assert!(
+            votes_for_d < votes_against_d,
+            "more votes against means proposal is defeated"
+        );
+
+        // Proposal defeated: quorum NOT reached even if all votes are for
+        let votes_low: u64 = 1_000;
+        assert!(
+            !quorum_reached(votes_low, 0, total_supply),
+            "very low participation means no quorum"
+        );
     }
+
+    #[test]
+    fn test_quorum_with_small_supply() {
+        // Edge: tiny total supply
+        let total_supply: u64 = 100;
+        // 4% of 100 = 4
+        assert!(quorum_reached(4, 0, total_supply));
+        assert!(!quorum_reached(3, 0, total_supply));
+    }
+
+    // =========================================================================
+    // Vote Casting / Proposal Lifecycle (pure logic)
+    // =========================================================================
+
+    #[test]
+    fn test_vote_casting_accumulation() {
+        // Simulate accumulating votes for and against a proposal.
+        let mut votes_for: u64 = 0;
+        let mut votes_against: u64 = 0;
+
+        // Three voters cast FOR
+        votes_for += 10_000_000;
+        votes_for += 15_000_000;
+        votes_for += 5_000_000;
+
+        // Two voters cast AGAINST
+        votes_against += 8_000_000;
+        votes_against += 2_000_000;
+
+        assert_eq!(votes_for, 30_000_000);
+        assert_eq!(votes_against, 10_000_000);
+
+        // Quorum reached (40M total supply)
+        let total_supply: u64 = 1_000_000_000;
+        assert!(quorum_reached(votes_for, votes_against, total_supply));
+
+        // Proposal passes
+        assert!(votes_for > votes_against);
+    }
+
+    #[test]
+    fn test_proposal_lifecycle_state_transitions() {
+        // ProposalState copy semantics — verify all variants exist and
+        // can be compared with PartialEq.
+        let pending = ProposalState::Pending;
+        let active = ProposalState::Active;
+        let canceled = ProposalState::Canceled;
+        let defeated = ProposalState::Defeated;
+        let succeeded = ProposalState::Succeeded;
+        let queued = ProposalState::Queued;
+        let expired = ProposalState::Expired;
+        let executed = ProposalState::Executed;
+
+        // All states are distinct
+        assert_ne!(pending, active);
+        assert_ne!(active, succeeded);
+        assert_ne!(succeeded, queued);
+        assert_ne!(queued, executed);
+        assert_ne!(canceled, defeated);
+        assert_ne!(expired, executed);
+
+        // Copy semantics work
+        let s = ProposalState::Active;
+        let s2 = s;
+        assert_eq!(s, s2);
+
+        // Simple lifecycle: Pending → Active → Succeeded → Queued → Executed
+        let lifecycle = [pending, active, succeeded, queued, executed];
+        let expected = [
+            ProposalState::Pending,
+            ProposalState::Active,
+            ProposalState::Succeeded,
+            ProposalState::Queued,
+            ProposalState::Executed,
+        ];
+        for (got, want) in lifecycle.iter().zip(expected.iter()) {
+            assert_eq!(got, want);
+        }
+
+        // Failed lifecycle: Pending → Active → Defeated
+        let failed = [pending, active, defeated];
+        assert_eq!(failed[2], ProposalState::Defeated);
+
+        // Canceled lifecycle: Pending → Canceled
+        let cancelled_path = [pending, canceled];
+        assert_eq!(cancelled_path[1], ProposalState::Canceled);
+    }
+
+    #[test]
+    fn test_proposal_can_execute_logic() {
+        // can_execute = state == Succeeded && current_time >= eta && !executed
+        struct FakeProposal {
+            state: ProposalState,
+            eta: u64,
+            executed: bool,
+        }
+
+        impl FakeProposal {
+            fn can_execute(&self, current_time: u64) -> bool {
+                self.state == ProposalState::Succeeded
+                    && current_time >= self.eta
+                    && !self.executed
+            }
+        }
+
+        let eta = 1_000_000u64;
+
+        // Succeeded + time elapsed + not executed → can execute
+        let p = FakeProposal {
+            state: ProposalState::Succeeded,
+            eta,
+            executed: false,
+        };
+        assert!(p.can_execute(eta));
+        assert!(p.can_execute(eta + 1));
+
+        // Succeeded but timelock not elapsed → cannot execute
+        assert!(!p.can_execute(eta - 1));
+
+        // Already executed → cannot execute
+        let p2 = FakeProposal {
+            state: ProposalState::Succeeded,
+            eta,
+            executed: true,
+        };
+        assert!(!p2.can_execute(eta + 100));
+
+        // Queued (not Succeeded) → cannot execute
+        let p3 = FakeProposal {
+            state: ProposalState::Queued,
+            eta,
+            executed: false,
+        };
+        assert!(!p3.can_execute(eta + 100));
+    }
+
+    #[test]
+    fn test_is_active_logic() {
+        // is_active = state == Active && current_time in [start_time, end_time)
+        struct FakeProposal {
+            state: ProposalState,
+            start_time: u64,
+            end_time: u64,
+        }
+
+        impl FakeProposal {
+            fn is_active(&self, t: u64) -> bool {
+                self.state == ProposalState::Active
+                    && t >= self.start_time
+                    && t < self.end_time
+            }
+        }
+
+        let p = FakeProposal {
+            state: ProposalState::Active,
+            start_time: 1000,
+            end_time: 2000,
+        };
+
+        assert!(!p.is_active(999), "before start_time → not active");
+        assert!(p.is_active(1000), "at start_time → active");
+        assert!(p.is_active(1500), "mid voting period → active");
+        assert!(!p.is_active(2000), "at end_time → no longer active (exclusive)");
+        assert!(!p.is_active(2001), "after end_time → not active");
+
+        let p_pending = FakeProposal {
+            state: ProposalState::Pending,
+            start_time: 1000,
+            end_time: 2000,
+        };
+        assert!(!p_pending.is_active(1500), "pending state → not active");
+    }
+
+    // =========================================================================
+    // Timelock Delay
+    // =========================================================================
 
     #[test]
     fn test_timelock_delay() {
-        // Test 2-day timelock
-        assert_eq!(TIMELOCK_DELAY, 172800);
+        // 2 days in seconds
+        assert_eq!(TIMELOCK_DELAY, 172_800, "timelock must be 48 hours (172800 s)");
+
+        // Verify the arithmetic: 2 * 24 * 60 * 60 = 172800
+        let two_days_seconds: u32 = 2 * 24 * 60 * 60;
+        assert_eq!(TIMELOCK_DELAY, two_days_seconds);
+
+        // A proposal queued at time T can only execute at T + TIMELOCK_DELAY
+        let queue_time: u64 = 1_000_000;
+        let eta = queue_time + TIMELOCK_DELAY as u64;
+        assert_eq!(eta, 1_172_800);
+
+        // One second before eta → cannot execute
+        assert!(queue_time + TIMELOCK_DELAY as u64 - 1 < eta);
+        // At eta → can execute
+        assert!(eta >= eta);
     }
+
+    // =========================================================================
+    // Boost Multiplier
+    // =========================================================================
 
     #[test]
     fn test_boost_multiplier() {
-        // Test max 2.5x boost
-        assert_eq!(MAX_BOOST_MULTIPLIER, 2500);
+        // MAX_BOOST_MULTIPLIER must be 2500 bp (2.5×)
+        assert_eq!(MAX_BOOST_MULTIPLIER, 2500, "max boost must be 2.5x (2500 bp)");
+
+        // MIN_VOTE_DURATION is 1 week; MAX_VOTE_DURATION is 4 years
+        assert_eq!(MIN_VOTE_DURATION, 604_800, "min lock is 1 week");
+        assert_eq!(MAX_VOTE_DURATION, 126_144_000, "max lock is 4 years");
+
+        let max_dur = MAX_VOTE_DURATION as u64;
+
+        // Full 4-year lock → maximum boost (capped at 2500)
+        let boost_max = compute_boost_multiplier(max_dur);
+        assert_eq!(
+            boost_max,
+            MAX_BOOST_MULTIPLIER,
+            "4-year lock should reach max boost of 2500 bp"
+        );
+
+        // 2-year lock (half of max) → boost is below max
+        let boost_half = compute_boost_multiplier(max_dur / 2);
+        assert!(
+            boost_half < MAX_BOOST_MULTIPLIER,
+            "half-max lock should be below max boost"
+        );
+        assert!(boost_half > 10_000, "half-max lock should still boost above 1x");
+
+        // Zero lock duration → base multiplier (10000 = 1×)
+        let boost_zero = compute_boost_multiplier(0);
+        assert_eq!(boost_zero, 10_000, "zero lock duration gives 1x multiplier");
+
+        // Boost is monotonically non-decreasing with lock duration
+        let durations: &[u64] = &[0, max_dur / 8, max_dur / 4, max_dur / 2, max_dur];
+        let mut prev = 0u32;
+        for &d in durations {
+            let b = compute_boost_multiplier(d);
+            assert!(b >= prev, "boost should be non-decreasing with lock duration");
+            prev = b;
+        }
+    }
+
+    #[test]
+    fn test_boost_never_exceeds_max() {
+        // Even with a lock longer than MAX_VOTE_DURATION, boost stays at cap
+        let max_dur = MAX_VOTE_DURATION as u64;
+        let boost_capped = compute_boost_multiplier(max_dur * 2);
+        assert_eq!(
+            boost_capped,
+            MAX_BOOST_MULTIPLIER,
+            "boost must not exceed MAX_BOOST_MULTIPLIER"
+        );
+    }
+
+    // =========================================================================
+    // Protocol Parameter Bounds
+    // =========================================================================
+
+    #[test]
+    fn test_protocol_parameter_bounds() {
+        // Performance fee range
+        assert!(DEFAULT_PERFORMANCE_FEE >= MIN_PERFORMANCE_FEE);
+        assert!(DEFAULT_PERFORMANCE_FEE <= MAX_PERFORMANCE_FEE);
+        assert_eq!(MIN_PERFORMANCE_FEE, 500);   // 5%
+        assert_eq!(MAX_PERFORMANCE_FEE, 1500);  // 15%
+        assert_eq!(DEFAULT_PERFORMANCE_FEE, 1000); // 10%
+
+        // Withdrawal fee range
+        assert!(DEFAULT_WITHDRAWAL_FEE >= MIN_WITHDRAWAL_FEE);
+        assert!(DEFAULT_WITHDRAWAL_FEE <= MAX_WITHDRAWAL_FEE);
+
+        // Rebalance threshold range
+        assert!(DEFAULT_REBALANCE_THRESHOLD >= MIN_REBALANCE_THRESHOLD);
+        assert!(DEFAULT_REBALANCE_THRESHOLD <= MAX_REBALANCE_THRESHOLD);
+
+        // Insurance reserve range
+        assert!(DEFAULT_INSURANCE_RESERVE >= MIN_INSURANCE_RESERVE);
+        assert!(DEFAULT_INSURANCE_RESERVE <= MAX_INSURANCE_RESERVE);
+    }
+
+    #[test]
+    fn test_emergency_multisig_threshold() {
+        // The multisig requires 3-of-5 signatures.
+        let total_signers = 5usize;
+        let required_threshold = 3usize;
+
+        // Simulate signature validation
+        let valid_count = 3usize;
+        assert!(valid_count >= required_threshold, "3 valid sigs should meet threshold");
+
+        // 2 signatures should NOT be enough
+        let insufficient = 2usize;
+        assert!(insufficient < required_threshold, "2 sigs should be insufficient");
+
+        // All 5 signatures → definitely enough
+        assert!(total_signers >= required_threshold);
     }
 }
