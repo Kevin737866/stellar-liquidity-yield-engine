@@ -18,6 +18,7 @@ import {
   VaultError,
   NetworkConfig
 } from './types';
+import { waitForTransaction } from './utils/transaction';
 
 export class VaultClient {
   private contract: Contract;
@@ -434,28 +435,15 @@ export class VaultClient {
   // Helper methods
 
   /**
-   * Poll `getTransaction` until the transaction reaches a terminal state
-   * (SUCCESS or FAILED). Soroban RPC's `sendTransaction` only reports that
-   * a transaction was accepted (PENDING) — the final outcome requires
-   * polling `getTransaction`.
+   * Poll `getTransaction` until the transaction reaches a terminal state.
+   * Delegates to the shared `waitForTransaction` helper so that all Soroban
+   * RPC clients wait for transaction finality consistently.
    */
   private async confirmTransaction(
     hash: string,
     timeoutMs: number = 30_000
   ): Promise<SorobanRpc.GetTransactionResponse> {
-    const deadline = Date.now() + timeoutMs;
-    let txResult = await this.server.getTransaction(hash);
-
-    while (
-      (txResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND ||
-        (txResult.status as string) === 'PENDING') &&
-      Date.now() < deadline
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      txResult = await this.server.getTransaction(hash);
-    }
-
-    return txResult;
+    return waitForTransaction(this.server, hash, { timeoutMs });
   }
 
   /**
