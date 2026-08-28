@@ -538,9 +538,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🆘 Support
 
-- **Documentation**: [docs.stellar-yield.com](https://docs.stellar-yield.com)
+- **Documentation**: [GitHub Repository](https://github.com/Kevin737866/stellar-liquidity-yield-engine)
 - **Discord**: [Stellar Yield Community](https://discord.gg/stellar-yield)
-- **Issues**: [GitHub Issues](https://github.com/stellar-yield/engine/issues)
+- **Issues**: [GitHub Issues](https://github.com/Kevin737866/stellar-liquidity-yield-engine/issues)
 - **Email**: support@stellar-yield.com
 
 ## 🗺️ Roadmap
