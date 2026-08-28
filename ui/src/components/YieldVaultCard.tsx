@@ -3,8 +3,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { TrendingUp, TrendingDown, DollarSign, Activity, Lock, Unlock } from 'lucide-react';
+import { TrendingUp, TrendingDown, DollarSign, Activity, Lock, Unlock, Wallet } from 'lucide-react';
 import { useYieldVault } from '../hooks/useYieldVault';
+import { shortenAddress } from '../lib/freighter';
 
 interface YieldVaultCardProps {
   vaultAddress: string;
@@ -33,6 +34,11 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
     deposit,
     withdraw,
     harvest,
+    walletAddress,
+    walletConnected,
+    connecting,
+    connect,
+    disconnect,
   } = useYieldVault({
     vaultAddress,
     userAddress,
@@ -129,6 +135,37 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
             )}
           </div>
         </div>
+
+        {/* Freighter wallet connection */}
+        <div className="flex items-center justify-between border-t pt-3">
+          {walletConnected ? (
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="flex items-center gap-1">
+                <Wallet className="h-3 w-3" />
+                {shortenAddress(walletAddress || '')}
+              </Badge>
+              <Button variant="ghost" size="sm" onClick={disconnect}>
+                Disconnect
+              </Button>
+            </div>
+          ) : (
+            <Button
+              onClick={connect}
+              disabled={connecting}
+              variant="outline"
+              size="sm"
+              className="gap-1"
+            >
+              <Wallet className="h-4 w-4" />
+              {connecting ? 'Connecting…' : 'Connect Freighter'}
+            </Button>
+          )}
+          <div className="text-xs text-gray-500">
+            {walletConnected
+              ? 'Transactions signed via Freighter'
+              : 'Connect to deposit, withdraw and harvest'}
+          </div>
+        </div>
       </CardHeader>
       
       <CardContent className="space-y-6">
@@ -208,7 +245,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
             </div>
             <Button 
               onClick={handleDeposit} 
-              disabled={!depositAmountA || !depositAmountB || isPaused}
+              disabled={!depositAmountA || !depositAmountB || isPaused || !walletConnected}
               className="w-full"
             >
               Deposit
@@ -232,7 +269,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
             </div>
             <Button 
               onClick={handleWithdraw} 
-              disabled={!withdrawShares || isPaused || userShares === 0n}
+              disabled={!withdrawShares || isPaused || userShares === 0n || !walletConnected}
               variant="outline"
               className="w-full"
             >
@@ -245,7 +282,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
         <div className="flex gap-3">
           <Button 
             onClick={handleHarvest} 
-            disabled={isPaused}
+            disabled={isPaused || !walletConnected}
             variant="secondary"
             className="flex-1"
           >
