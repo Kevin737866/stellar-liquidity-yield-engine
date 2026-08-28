@@ -76,7 +76,7 @@ export class VaultClient {
       return {
         hash: result.hash,
         success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
-        gasUsed: this.parseGasUsed(txResult),
+        gasUsed: 0,
         error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
@@ -133,7 +133,7 @@ export class VaultClient {
         return {
           hash: result.hash,
           success: true,
-          gasUsed: this.parseGasUsed(txResult),
+          gasUsed: 0,
           amountA: returnValue.amountA,
           amountB: returnValue.amountB
         };
@@ -186,7 +186,7 @@ export class VaultClient {
       return {
         hash: result.hash,
         success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
-        gasUsed: this.parseGasUsed(txResult),
+        gasUsed: 0,
         error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
@@ -387,7 +387,7 @@ export class VaultClient {
       return {
         hash: result.hash,
         success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
-        gasUsed: this.parseGasUsed(txResult),
+        gasUsed: 0,
         error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
@@ -426,7 +426,7 @@ export class VaultClient {
       return {
         hash: result.hash,
         success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
-        gasUsed: this.parseGasUsed(txResult),
+        gasUsed: 0,
         error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
     } catch (error) {
@@ -437,37 +437,17 @@ export class VaultClient {
   // Helper methods
 
   /**
-   * Poll `getTransaction` until the transaction reaches a terminal state.
-   * Delegates to the shared `waitForTransaction` helper so that all Soroban
-   * RPC clients wait for transaction finality consistently.
+   * Poll `getTransaction` until the transaction reaches a terminal state
+   * (SUCCESS or FAILED). Soroban RPC's `sendTransaction` only reports that
+   * a transaction was accepted (PENDING) — the final outcome requires
+   * polling `getTransaction`, so treating the initial status as final is
+   * incorrect.
    */
   private async confirmTransaction(
     hash: string,
     timeoutMs: number = 30_000
   ): Promise<SorobanRpc.GetTransactionResponse> {
     return waitForTransaction(this.server, hash, { timeoutMs });
-  }
-
-  /**
-   * Parse the Soroban resource usage (instructions) from a confirmed
-   * transaction result. Soroban transactions report their resource usage
-   * via `getTransaction`; fall back to 0 if the data is unavailable.
-   */
-  private parseGasUsed(txResult: SorobanRpc.GetTransactionResponse): number {
-    if (txResult.status !== SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-      return 0;
-    }
-    try {
-      const envelope =
-        txResult.envelopeXdr.v1()?.tx() ?? txResult.envelopeXdr.v0()?.tx();
-      const sorobanData = envelope?.ext().sorobanData();
-      if (sorobanData) {
-        return sorobanData.resources().instructions();
-      }
-    } catch {
-      // Malformed metadata — fall back to 0 below.
-    }
-    return 0;
   }
 
   private getNetworkPassphrase(): string {
