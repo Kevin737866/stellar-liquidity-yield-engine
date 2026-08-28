@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
+    contract, contractimpl, contracttype, vec, Address, Env, Map, Symbol, Vec,
     token::TokenClient, unwrap::UnwrapOptimized,
 };
 
@@ -76,6 +76,21 @@ pub struct SwapRecord {
     pub success: bool,
 }
 
+/// A failed swap queued for retry
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSwap {
+    pub swap_id: u64,
+    pub user: Address,
+    pub input_token: Address,
+    pub output_token: Address,
+    pub input_amount: i128,
+    pub min_output: i128,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub timestamp: u64,
+}
+
 /// Swap router error types
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,6 +105,8 @@ pub enum SwapError {
     TransferFailed = 8,
     Unauthorized = 9,
     InvalidToken = 10,
+    PoolExists = 11,
+    PoolNotFound = 12,
 }
 
 /// SwapRouter contract for Stellar DEX integration
@@ -131,7 +148,10 @@ impl SwapRouter {
         is_stable_swap: bool,
     ) {
         Self::require_admin(&env, admin);
-        
+
+        let mut pools = Self::get_pools(&env);
+        require!(!pools.has(&pool_address), SwapError::PoolExists);
+
         let pool = PoolInfo {
             pool_address: pool_address.clone(),
             token_a: token_a.clone(),
@@ -141,8 +161,7 @@ impl SwapRouter {
             fee_bps,
             is_stable_swap,
         };
-        
-        let mut pools = Self::get_pools(&env);
+
         pools.set(pool_address, pool);
         env.storage().instance().set(&Symbol::new(&env, "pools"), &pools);
         
@@ -172,8 +191,9 @@ impl SwapRouter {
     /// Remove a pool (admin only)
     pub fn remove_pool(env: Env, admin: Address, pool_address: Address) {
         Self::require_admin(&env, admin);
-        
+
         let mut pools = Self::get_pools(&env);
+        require!(pools.has(&pool_address), SwapError::PoolNotFound);
         pools.remove(&pool_address);
         env.storage().instance().set(&Symbol::new(&env, "pools"), &pools);
     }
@@ -195,7 +215,9 @@ impl SwapRouter {
         
         // Find best path
         let (path, route_type) = Self::find_best_path(&env, &input_token, &output_token, input_amount);
-        require!(path.tokens.len() >= 2, SwapError::NoPoolFound);
+        // find_best_path falls back to a pool-less path when no route exists;
+        // tokens.len() is always >= 2 even in that case, so check pools instead.
+        require!(!path.pools.is_empty(), SwapError::NoPoolFound);
         
         // Calculate output with price impact
         let expected_output = Self::calculate_output_amount(&env, &path, input_amount);
@@ -469,10 +491,48 @@ impl SwapRouter {
     /// Retry failed swaps (admin only)
     pub fn retry_failed_swaps(env: Env, admin: Address) -> u32 {
         Self::require_admin(&env, admin);
-        
-        // In production, iterate through queued swaps
-        // For now, return 0
-        0
+
+        let key = Symbol::new(&env, "pending_swap");
+        let pending: Map<u64, PendingSwap> = env.storage()
+            .instance()
+            .get(&key)
+            .unwrap_or(Map::new(&env));
+
+        let mut remaining: Map<u64, PendingSwap> = Map::new(&env);
+        let mut retried = 0u32;
+
+        for (swap_id, mut pending_swap) in pending.iter() {
+            match Self::try_swap(
+                &env,
+                &pending_swap.user,
+                &pending_swap.input_token,
+                &pending_swap.output_token,
+                pending_swap.input_amount,
+                pending_swap.min_output,
+            ) {
+                Ok(_) => {
+                    retried += 1;
+                    env.events().publish(
+                        ("swap_retry_succeeded",),
+                        (swap_id, &pending_swap.user),
+                    );
+                }
+                Err(_) => {
+                    pending_swap.retry_count += 1;
+                    if pending_swap.retry_count < pending_swap.max_retries {
+                        remaining.set(swap_id, pending_swap);
+                    } else {
+                        env.events().publish(
+                            ("swap_retry_abandoned",),
+                            (swap_id, &pending_swap.user),
+                        );
+                    }
+                }
+            }
+        }
+
+        env.storage().instance().set(&key, &remaining);
+        retried
     }
 
     // ==================== Internal Helpers ====================
@@ -873,7 +933,15 @@ impl SwapRouter {
     ) -> Result<i128, SwapError> {
         // Find best path
         let (path, _) = Self::find_best_path(env, input_token, output_token, input_amount);
-        
+        if path.pools.is_empty() {
+            return Err(SwapError::NoPoolFound);
+        }
+
+        let expected_output = Self::calculate_path_output(env, &path.tokens, input_amount);
+        if expected_output < min_output {
+            return Err(SwapError::SlippageExceeded);
+        }
+
         // Execute swap
         let output = Self::swap(
             env.clone(),
@@ -900,28 +968,27 @@ impl SwapRouter {
         max_retries: u32,
     ) {
         let swap_id = Self::get_next_swap_id(env);
-        
-        let record = SwapRecord {
+
+        let pending_swap = PendingSwap {
             swap_id,
             user: user.clone(),
             input_token: input_token.clone(),
             output_token: output_token.clone(),
             input_amount,
-            output_amount: 0,
-            path: vec![input_token, output_token],
-            protocol_fee: 0,
+            min_output,
+            retry_count: 0,
+            max_retries,
             timestamp: env.ledger().timestamp(),
-            success: false,
         };
-        
+
         // Store pending swap
         let key = Symbol::new(env, "pending_swap");
-        let mut pending: Map<u64, SwapRecord> = env.storage()
+        let mut pending: Map<u64, PendingSwap> = env.storage()
             .instance()
             .get(&key)
             .unwrap_or(Map::new(env));
-        
-        pending.set(swap_id, record);
+
+        pending.set(swap_id, pending_swap);
         env.storage().instance().set(&key, &pending);
         
         env.events().publish(
