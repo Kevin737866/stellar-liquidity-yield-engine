@@ -18,6 +18,17 @@ export class YieldCalculator {
     currentPriceRatio: number,
     timeElapsed: number
   ): ImpermanentLossData {
+    // A non-positive baseline is undefined for the IL formula; return a
+    // zero-damage result instead of NaN/Infinity so callers can render.
+    if (initialPriceRatio <= 0 || currentPriceRatio <= 0) {
+      return {
+        currentPriceRatio,
+        initialPriceRatio,
+        ilPercent: 0,
+        timeElapsed
+      };
+    }
+
     // IL formula: 2 * sqrt(price_ratio) / (1 + price_ratio) - 1
     const priceRatio = currentPriceRatio / initialPriceRatio;
     const sqrtRatio = Math.sqrt(priceRatio);
@@ -43,6 +54,17 @@ export class YieldCalculator {
     },
     timeHorizon: number
   ): ApyProjection {
+    // No historical data to project from — report a zero projection with no
+    // confidence rather than producing NaN averages.
+    if (historicalApy.length === 0) {
+      return {
+        projectedApy: 0,
+        confidence: 0,
+        timeHorizon,
+        factors: ['Historical APY: no data available']
+      };
+    }
+
     // Calculate average historical APY
     const avgHistoricalApy = historicalApy.reduce((sum, apy) => sum + apy, 0) / historicalApy.length;
     
@@ -197,18 +219,23 @@ export class YieldCalculator {
     compoundingFrequency: number, // Times per year
     timeYears: number
   ): { finalAmount: bigint; totalInterest: bigint; effectiveApy: number } {
-    const rate = apy / 10000 / 100; // Convert to decimal
+    // APY arrives in basis points (10000 = 100%); convert to a decimal
+    // fraction for the compounding formula.
+    const rate = apy / 10000;
     const n = compoundingFrequency;
     const t = timeYears;
-    
+
     // Compound interest formula: A = P(1 + r/n)^(nt)
     const compoundFactor = Math.pow(1 + rate / n, n * t);
     const finalAmount = principal * BigInt(Math.floor(compoundFactor * 1000000)) / 1000000n;
     const totalInterest = finalAmount - principal;
-    
-    // Calculate effective APY
-    const effectiveApy = (Math.pow(compoundFactor, 1 / t) - 1) * 10000;
-    
+
+    // Effective APY is undefined for a zero/negative horizon; report 0 so
+    // consumers don't receive NaN from `Math.pow(1, 1/t)`.
+    const effectiveApy = t > 0
+      ? (Math.pow(compoundFactor, 1 / t) - 1) * 10000
+      : 0;
+
     return {
       finalAmount,
       totalInterest,
@@ -390,5 +417,25 @@ export class YieldCalculator {
       bestCaseIl,
       ilDistribution: ilResults
     };
+  }
+
+  /**
+   * Compute historical impermanent loss from a series of price ratios.
+   *
+   * Issue #133: replaces simulated projection with actual indexed history
+   * when available.
+   */
+  static computeHistoricalImpermanentLoss(
+    initialPriceRatio: number,
+    priceHistory: Array<{ timestamp: number; priceRatio: number }>
+  ): Array<{ timestamp: number; priceRatio: number; ilPercent: number }> {
+    return priceHistory.map((point) => {
+      const il = this.calculateImpermanentLoss(initialPriceRatio, point.priceRatio, 0);
+      return {
+        timestamp: point.timestamp,
+        priceRatio: point.priceRatio,
+        ilPercent: il.ilPercent,
+      };
+    });
   }
 }

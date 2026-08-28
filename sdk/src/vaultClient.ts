@@ -2,10 +2,12 @@ import {
   Address, 
   Contract, 
   SorobanRpc, 
+  Transaction, 
   TransactionBuilder, 
   Networks,
   BASE_FEE,
-  xdr
+  xdr,
+  scValToNative
 } from 'stellar-sdk';
 import {
   VaultInfo,
@@ -18,6 +20,7 @@ import {
   VaultError,
   NetworkConfig
 } from './types';
+import { waitForTransaction } from './utils/transaction';
 
 export class VaultClient {
   private contract: Contract;
@@ -42,7 +45,7 @@ export class VaultClient {
     options?: TransactionOptions
   ): Promise<TransactionResult> {
     try {
-      const account = await this.server.getAccount(userKeyPair.publicKey());
+      const account = await this.server.getAccount(await this.resolvePublicKey(userKeyPair));
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -57,7 +60,7 @@ export class VaultClient {
         .setTimeout(options?.timeout || 30)
         .build();
 
-      const signedTx = userKeyPair.sign(tx);
+      const signedTx = await this.signWith(userKeyPair, tx);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -90,7 +93,7 @@ export class VaultClient {
     options?: TransactionOptions
   ): Promise<TransactionResult & { amountA: bigint; amountB: bigint }> {
     try {
-      const account = await this.server.getAccount(userKeyPair.publicKey());
+      const account = await this.server.getAccount(await this.resolvePublicKey(userKeyPair));
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -105,7 +108,7 @@ export class VaultClient {
         .setTimeout(options?.timeout || 30)
         .build();
 
-      const signedTx = userKeyPair.sign(tx);
+      const signedTx = await this.signWith(userKeyPair, tx);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -157,7 +160,7 @@ export class VaultClient {
     options?: TransactionOptions
   ): Promise<TransactionResult> {
     try {
-      const account = await this.server.getAccount(userKeyPair.publicKey());
+      const account = await this.server.getAccount(await this.resolvePublicKey(userKeyPair));
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -167,7 +170,7 @@ export class VaultClient {
         .setTimeout(options?.timeout || 30)
         .build();
 
-      const signedTx = userKeyPair.sign(tx);
+      const signedTx = await this.signWith(userKeyPair, tx);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -293,7 +296,7 @@ export class VaultClient {
         throw new Error('Failed to get APY');
       }
 
-      return Number(result.result.returnValue);
+      return Number(scValToNative(result.result.returnValue));
     } catch (error) {
       throw new VaultError(`Failed to get APY: ${error.message}`, 'GET_APY_ERROR');
     }
@@ -320,7 +323,7 @@ export class VaultClient {
         throw new Error('Failed to get TVL');
       }
 
-      return BigInt(result.result.returnValue);
+      return BigInt(scValToNative(result.result.returnValue));
     } catch (error) {
       throw new VaultError(`Failed to get TVL: ${error.message}`, 'GET_TVL_ERROR');
     }
@@ -347,7 +350,7 @@ export class VaultClient {
         throw new Error('Failed to check pause status');
       }
 
-      return Boolean(result.result.returnValue);
+      return Boolean(scValToNative(result.result.returnValue));
     } catch (error) {
       throw new VaultError(`Failed to check pause status: ${error.message}`, 'PAUSE_CHECK_ERROR');
     }
@@ -358,7 +361,7 @@ export class VaultClient {
    */
   async pause(adminKeyPair: any, options?: TransactionOptions): Promise<TransactionResult> {
     try {
-      const account = await this.server.getAccount(adminKeyPair.publicKey());
+      const account = await this.server.getAccount(await this.resolvePublicKey(adminKeyPair));
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -368,7 +371,7 @@ export class VaultClient {
         .setTimeout(options?.timeout || 30)
         .build();
 
-      const signedTx = adminKeyPair.sign(tx);
+      const signedTx = await this.signWith(adminKeyPair, tx);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -397,7 +400,7 @@ export class VaultClient {
    */
   async unpause(adminKeyPair: any, options?: TransactionOptions): Promise<TransactionResult> {
     try {
-      const account = await this.server.getAccount(adminKeyPair.publicKey());
+      const account = await this.server.getAccount(await this.resolvePublicKey(adminKeyPair));
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -407,7 +410,7 @@ export class VaultClient {
         .setTimeout(options?.timeout || 30)
         .build();
 
-      const signedTx = adminKeyPair.sign(tx);
+      const signedTx = await this.signWith(adminKeyPair, tx);
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -434,28 +437,15 @@ export class VaultClient {
   // Helper methods
 
   /**
-   * Poll `getTransaction` until the transaction reaches a terminal state
-   * (SUCCESS or FAILED). Soroban RPC's `sendTransaction` only reports that
-   * a transaction was accepted (PENDING) — the final outcome requires
-   * polling `getTransaction`.
+   * Poll `getTransaction` until the transaction reaches a terminal state.
+   * Delegates to the shared `waitForTransaction` helper so that all Soroban
+   * RPC clients wait for transaction finality consistently.
    */
   private async confirmTransaction(
     hash: string,
     timeoutMs: number = 30_000
   ): Promise<SorobanRpc.GetTransactionResponse> {
-    const deadline = Date.now() + timeoutMs;
-    let txResult = await this.server.getTransaction(hash);
-
-    while (
-      (txResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND ||
-        (txResult.status as string) === 'PENDING') &&
-      Date.now() < deadline
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      txResult = await this.server.getTransaction(hash);
-    }
-
-    return txResult;
+    return waitForTransaction(this.server, hash, { timeoutMs });
   }
 
   /**
@@ -509,47 +499,86 @@ export class VaultClient {
     ];
   }
 
+  /**
+   * Parse the `get_vault_info` return value into a typed `VaultInfo`.
+   *
+   * The contract returns a struct where `name` is a Symbol and token/pool
+   * addresses are Addresses; `scValToNative` handles the symbol-to-string
+   * and address-to-G-address conversions for us.
+   */
   private parseVaultInfo(returnValue: xdr.ScVal): VaultInfo {
-    const fields = returnValue.fields() || [];
+    const data = scValToNative(returnValue) as any;
     return {
-      name: fields[0]?.toString() || '',
-      tokenA: new Address(fields[1]?.toString() || ''),
-      tokenB: new Address(fields[2]?.toString() || ''),
-      poolId: new Address(fields[3]?.toString() || ''),
-      strategyId: Number(fields[4] || 0),
-      feeRate: Number(fields[5] || 0),
-      harvestFee: Number(fields[6] || 0),
-      withdrawalFee: Number(fields[7] || 0)
+      name: data.name,
+      tokenA: new Address(data.token_a),
+      tokenB: new Address(data.token_b),
+      poolId: new Address(data.pool_id),
+      strategyId: Number(data.strategy_id),
+      feeRate: Number(data.fee_rate),
+      harvestFee: Number(data.harvest_fee),
+      withdrawalFee: Number(data.withdrawal_fee)
     };
   }
 
   private parseMetrics(returnValue: xdr.ScVal): VaultMetrics {
-    const fields = returnValue.fields() || [];
+    const data = scValToNative(returnValue) as any;
     return {
-      totalShares: BigInt(fields[0]?.toString() || '0'),
-      totalAmountA: BigInt(fields[1]?.toString() || '0'),
-      totalAmountB: BigInt(fields[2]?.toString() || '0'),
-      apy: Number(fields[3] || 0),
-      tvl: BigInt(fields[4]?.toString() || '0'),
-      lastHarvest: Number(fields[5] || 0)
+      totalShares: BigInt(data.total_shares),
+      totalAmountA: BigInt(data.total_amount_a),
+      totalAmountB: BigInt(data.total_amount_b),
+      apy: Number(data.apy),
+      tvl: BigInt(data.tvl),
+      lastHarvest: Number(data.last_harvest)
     };
   }
 
   private parseUserPosition(returnValue: xdr.ScVal): UserPosition {
-    const fields = returnValue.fields() || [];
+    const data = scValToNative(returnValue) as any;
     return {
-      shares: BigInt(fields[0]?.toString() || '0'),
-      lastHarvest: Number(fields[1] || 0),
-      depositedAmountA: BigInt(fields[2]?.toString() || '0'),
-      depositedAmountB: BigInt(fields[3]?.toString() || '0')
+      shares: BigInt(data.shares),
+      lastHarvest: Number(data.last_harvest),
+      depositedAmountA: BigInt(data.deposited_amount_a),
+      depositedAmountB: BigInt(data.deposited_amount_b)
     };
   }
 
+  /**
+   * Parse the `withdraw` return value into the withdrawn token amounts.
+   *
+   * The contract returns a tuple `(final_amount_a, final_amount_b)`, which
+   * is encoded as an ScVal vector of i128s; `scValToNative` turns it into a
+   * plain array of bigints.
+   */
   private parseWithdrawResult(returnValue: xdr.ScVal): { amountA: bigint; amountB: bigint } {
-    const fields = returnValue.fields() || [];
+    const [amountA, amountB] = scValToNative(returnValue) as [bigint, bigint];
     return {
-      amountA: BigInt(fields[0]?.toString() || '0'),
-      amountB: BigInt(fields[1]?.toString() || '0')
+      amountA: BigInt(amountA),
+      amountB: BigInt(amountB)
     };
+  }
+
+  /**
+   * Resolve the account public key from either a `Keypair` (synchronous
+   * `publicKey()`) or an async wallet signer such as Freighter
+   * (`getPublicKey(): Promise<string>`).
+   */
+  private async resolvePublicKey(signerOrKeypair: any): Promise<string> {
+    if (typeof signerOrKeypair.getPublicKey === 'function') {
+      return await signerOrKeypair.getPublicKey();
+    }
+    return signerOrKeypair.publicKey();
+  }
+
+  /**
+   * Sign a transaction with either a `Keypair` (synchronous `sign()`) or an
+   * async wallet signer (`signTransaction(tx, networkPassphrase)`). This is
+   * what wires browser-wallet signing (e.g. Freighter) into every write
+   * method.
+   */
+  private async signWith(signerOrKeypair: any, tx: Transaction): Promise<Transaction> {
+    if (typeof signerOrKeypair.signTransaction === 'function') {
+      return await signerOrKeypair.signTransaction(tx, this.getNetworkPassphrase());
+    }
+    return signerOrKeypair.sign(tx);
   }
 }
