@@ -1,7 +1,9 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, 
+    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
     unwrap::UnwrapOptimized
 };
+
+use crate::YieldVaultClient;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -120,7 +122,7 @@ impl RebalanceEngine {
             allocations,
         };
 
-        let mut strategies = Self::get_strategies(&env);
+        let mut strategies = Self::get_strategies(env.clone());
         strategies.push_back(strategy);
         env.storage().instance().set(&Symbol::new(&env, "strategies"), &strategies);
 
@@ -142,7 +144,7 @@ impl RebalanceEngine {
         Self::require_admin(&env, admin);
         Self::require_not_paused(&env);
 
-        let mut strategies = Self::get_strategies(&env);
+        let mut strategies = Self::get_strategies(env.clone());
         let mut found = false;
 
         for i in 0..strategies.len() {
@@ -173,11 +175,11 @@ impl RebalanceEngine {
     ) -> Vec<RebalanceProposal> {
         Self::require_not_paused(&env);
 
-        let strategy = Self::get_strategy(&env, strategy_id);
+        let strategy = Self::get_strategy(env.clone(), strategy_id);
         let mut proposals: Vec<RebalanceProposal> = Vec::new(&env);
 
         // Analyze each allocation in the strategy
-        for allocation in strategy.allocations {
+        for allocation in strategy.allocations.clone() {
             let current_apy = Self::get_pool_current_apy(&env, &allocation.pool_id);
             let target_apy = allocation.target_apy;
 
@@ -192,7 +194,9 @@ impl RebalanceEngine {
                         to_pool: better_pool.pool_id,
                         amount_a: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
                         amount_b: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
-                        expected_apy_improvement: better_pool.current_apy - current_apy,
+                        // saturating_sub guards against u32 underflow if a real pool
+                        // query ever returns a lower APY than the current allocation.
+                        expected_apy_improvement: better_pool.current_apy.saturating_sub(current_apy),
                         estimated_gas_cost: Self::estimate_gas_cost(&env),
                         timestamp: env.ledger().timestamp(),
                     };
@@ -223,6 +227,12 @@ impl RebalanceEngine {
             success = true;
         }
 
+        let apy_after = if success {
+            Self::get_pool_current_apy(&env, &proposal.to_pool)
+        } else {
+            apy_before
+        };
+
         // Record in history
         let history_entry = RebalanceHistory {
             timestamp: env.ledger().timestamp(),
@@ -230,11 +240,7 @@ impl RebalanceEngine {
             to_pool: proposal.to_pool,
             amount_moved: proposal.amount_a + proposal.amount_b,
             apy_before,
-            apy_after: if success { 
-                Self::get_pool_current_apy(&env, &proposal.to_pool) 
-            } else { 
-                apy_before 
-            },
+            apy_after,
             success,
         };
 
@@ -294,24 +300,52 @@ impl RebalanceEngine {
         strategy.allocations
     }
 
-    /// Calculate impermanent loss for a pool
+    /// Calculate impermanent loss for a pool using the standard formula
+    /// `IL = 1 - 2 * sqrt(r) / (1 + r)`, where `r = current_price / entry_price`.
+    /// Returns the loss as basis points, capped at 10000 (100%).
+    ///
+    /// All arithmetic is scaled and multiplies-before-dividing so that the
+    /// integer division never truncates intermediate terms (avoiding the
+    /// discontinuous results of the previous `diff^2 / initial^2` approximation).
     pub fn calculate_impermanent_loss(
         env: Env,
         pool_id: Address,
         price_ratio: i128, // Current price ratio * 10000
         initial_price_ratio: i128, // Initial price ratio * 10000
     ) -> u32 {
-        // IL formula: 2 * sqrt(price_ratio) / (1 + price_ratio) - 1
-        // Simplified calculation for demonstration
-        let ratio_diff = (price_ratio - initial_price_ratio).abs();
-        let il_percent = (ratio_diff * ratio_diff) / (initial_price_ratio * initial_price_ratio / 10000);
-        
-        // Cap at 100% and convert to basis points
-        if il_percent > 10000 {
-            10000
-        } else {
-            il_percent as u32
+        if price_ratio <= 0 || initial_price_ratio <= 0 {
+            return 0;
         }
+
+        // r scaled by 10000: (current / entry) * 10000
+        let r_scaled = (price_ratio as i128 * 10000) / initial_price_ratio;
+
+        // sqrt(r) scaled by 10000 = sqrt(r_scaled * 10000)
+        let sqrt_r_scaled = Self::isqrt((r_scaled as u128) * 10000);
+
+        // term = (2 * sqrt(r) / (1 + r)) * 10000
+        let denominator = r_scaled as u128 + 10000;
+        let two_sqrt = sqrt_r_scaled * 2;
+        let term = (two_sqrt * 10000) / denominator;
+
+        // By AM-GM, 1 + r >= 2 * sqrt(r), so term <= 10000 always and
+        // `10000 - term` can never underflow. IL rises as the price diverges.
+        let il_bp = if term >= 10000 { 0 } else { 10000 - term };
+        il_bp.min(10000) as u32
+    }
+
+    /// Integer square root (Babylonian), returns floor(sqrt(n)).
+    fn isqrt(n: u128) -> u128 {
+        if n <= 1 {
+            return n;
+        }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
     }
 
     /// Helper functions
@@ -336,22 +370,48 @@ impl RebalanceEngine {
         strategy: &RebalanceStrategy,
     ) -> Vec<PoolAllocation> {
         let mut better_pools: Vec<PoolAllocation> = Vec::new(env);
-        
-        // In production, this would query all available pools
-        // For demonstration, return a simulated better pool
-        if current_allocation.current_apy < strategy.min_apy_threshold {
-            better_pools.push_back(PoolAllocation {
-                pool_id: Address::generate(env),
-                token_a: current_allocation.token_a.clone(),
-                token_b: current_allocation.token_b.clone(),
-                allocation_percent: current_allocation.allocation_percent,
-                target_apy: current_allocation.target_apy + 500, // 5% higher
-                current_apy: current_allocation.current_apy + 600, // 6% higher
-                impermanent_loss_risk: current_allocation.impermanent_loss_risk,
-            });
+
+        if current_allocation.current_apy >= strategy.min_apy_threshold {
+            return better_pools;
+        }
+
+        // Look up real registered pools for the same token pair instead of
+        // fabricating an address - only pools an admin has actually registered
+        // via `register_pool` are eligible candidates.
+        let registry = Self::get_pool_registry(env);
+        for (pool_id, pool) in registry.iter() {
+            if pool_id == current_allocation.pool_id {
+                continue;
+            }
+            if pool.token_a != current_allocation.token_a || pool.token_b != current_allocation.token_b {
+                continue;
+            }
+            if pool.current_apy > current_allocation.current_apy
+                && pool.impermanent_loss_risk <= strategy.max_il_risk
+            {
+                better_pools.push_back(pool);
+            }
         }
 
         better_pools
+    }
+
+    /// Registered candidate pools available for rebalancing, keyed by pool address.
+    fn get_pool_registry(env: &Env) -> Map<Address, PoolAllocation> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "pool_registry"))
+            .unwrap_or(Map::new(env))
+    }
+
+    /// Register (or update) a real candidate pool so `find_better_pools` and
+    /// arbitrage scanning can recommend it instead of a fabricated address.
+    pub fn register_pool(env: Env, admin: Address, pool: PoolAllocation) {
+        Self::require_admin(&env, admin);
+
+        let mut registry = Self::get_pool_registry(&env);
+        registry.set(pool.pool_id.clone(), pool);
+        env.storage().instance().set(&Symbol::new(&env, "pool_registry"), &registry);
     }
 
     fn estimate_rebalance_amount(env: &Env, pool_id: &Address) -> i128 {
@@ -558,12 +618,16 @@ impl RebalanceEngine {
             return false;
         }
 
+        // The vault's real current pool, queried from the vault contract itself
+        // rather than fabricated - see #154.
+        let current_pool = YieldVaultClient::new(&env, &vault_id).get_vault_info().pool_id;
+
         // 1. Withdraw from current pool (atomic operation 1)
         let withdrawn = Self::perform_rebalance(
             &env,
             &RebalanceProposal {
-                from_pool: Address::generate(&env), // Current vault pool
-                to_pool: Address::generate(&env),
+                from_pool: current_pool.clone(),
+                to_pool: current_pool.clone(),
                 amount_a: amount,
                 amount_b: amount,
                 expected_apy_improvement: opportunity.apy_delta,
@@ -580,7 +644,7 @@ impl RebalanceEngine {
         let deposited = Self::perform_rebalance(
             &env,
             &RebalanceProposal {
-                from_pool: Address::generate(&env),
+                from_pool: current_pool,
                 to_pool: opportunity.pool_id,
                 amount_a: amount,
                 amount_b: amount,
@@ -614,7 +678,8 @@ impl RebalanceEngine {
                 && !history.get(2).unwrap().success;
             
             if all_losses {
-                Self::pause(env, Self::get_admin(env.clone()));
+                let admin = Self::get_admin(env.clone());
+                Self::pause(env, admin);
                 return true;
             }
         }
