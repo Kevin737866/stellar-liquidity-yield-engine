@@ -112,13 +112,12 @@ temp/
 soroban/
 .example/
 
-# Test files and snapshots
+# Test files (except root integration tests)
 test/
-tests/
 __tests__/
+**/__tests__/
 **/__snapshots__/
 *.snap
-*.snap.orig
 
 # Documentation build
 docs/_build/
