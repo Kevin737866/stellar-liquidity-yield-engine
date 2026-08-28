@@ -114,7 +114,9 @@ impl StrategyRegistry {
         parameters: StrategyParameters,
     ) -> u32 {
         Self::require_not_paused(&env);
-
+        require!(min_investment > 0, "min investment must be positive");
+        require!(max_investment >= min_investment, "max investment must be greater than or equal to min investment");
+        
         let strategy_id = Self::get_next_strategy_id(&env);
         let current_time = env.ledger().timestamp();
 
@@ -200,7 +202,9 @@ impl StrategyRegistry {
         parameters: StrategyParameters,
     ) {
         Self::require_not_paused(&env);
-
+        require!(min_investment > 0, "min investment must be positive");
+        require!(max_investment >= min_investment, "max investment must be greater than or equal to min investment");
+        
         let mut strategies = Self::get_strategies(&env);
         let mut found = false;
 
