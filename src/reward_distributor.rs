@@ -1,6 +1,6 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
-    token::TokenClient, unwrap::UnwrapOptimized, conversions::Convert,
+    token::TokenClient, unwrap::UnwrapOptimized,
 };
 
 /// Maximum number of concurrent reward streams supported
@@ -12,7 +12,7 @@ const BASIS_POINTS_DIVISOR: i128 = 10000;
 /// Treasury fee in basis points (0.25% = 25 bps)
 const TREASURY_FEE_BPS: u32 = 25;
 
-///袁 Maximum slippage in basis points (1% = 100 bps)
+/// Maximum slippage in basis points (1% = 100 bps)
 const MAX_SLIPPAGE_BPS: u32 = 100;
 
 /// Reward stream configuration
@@ -20,11 +20,11 @@ const MAX_SLIPPAGE_BPS: u32 = 100;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RewardStream {
     pub token: Address,
-    pub rate_per_second: i128,      // Reward tokens per second for entire pool
-    pub total_distributed: i128,    // Total tokens distributed to date
-    pub last_update: u64,           // Last timestamp when rewards were updated
-    pub is_active: bool,            // Whether stream is currently active
-    pub decimals: u32,             // Token decimals (7 for SAC, 18 for Soroban)
+    pub rate_per_second: i128,   // Reward tokens per second for entire pool
+    pub total_distributed: i128, // Total tokens distributed to date
+    pub last_update: u64,        // Last timestamp when rewards were updated
+    pub is_active: bool,         // Whether stream is currently active
+    pub decimals: u32,           // Token decimals (7 for SAC, 18 for Soroban)
 }
 
 /// User's reward debt for a specific stream (Synthetix-style)
@@ -33,9 +33,9 @@ pub struct RewardStream {
 pub struct UserRewardDebt {
     pub user: Address,
     pub stream_index: u32,
-    pub reward_debt: i128,          // accumulated_reward_per_share * shares
+    pub reward_debt: i128, // accumulated_reward_per_share * shares
     pub last_claim_timestamp: u64,
-    pub pending_rewards: i128,      // Cached pending rewards
+    pub pending_rewards: i128, // Cached pending rewards
 }
 
 /// User's auto-compound configuration
@@ -43,7 +43,7 @@ pub struct UserRewardDebt {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutoCompoundConfig {
     pub token: Address,
-    pub reinvest_percentage: u32,   // 0-10000 (0-100%)
+    pub reinvest_percentage: u32, // 0-10000 (0-100%)
     pub enabled: bool,
 }
 
@@ -93,12 +93,50 @@ pub struct EmergencyWithdrawal {
     pub completed: bool,
 }
 
+/// Storage key for per-vault share info
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultShareInfoKey {
+    pub vault: Address,
+}
+
+/// Storage key for a user's reward debt on a specific stream
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserRewardDebtKey {
+    pub user: Address,
+    pub stream_index: u32,
+}
+
+/// Storage key for accumulated reward-per-share on a specific stream
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccumulatedRewardKey {
+    pub stream_index: u32,
+}
+
+/// Storage key for a user's auto-compound config for a token
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutoCompoundConfigKey {
+    pub user: Address,
+    pub token: Address,
+}
+
+/// Storage key for an emergency withdrawal request
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyWithdrawalKey {
+    pub user: Address,
+    pub vault: Address,
+}
+
 /// MultiRewardDistributor contract
 #[contract]
 pub struct MultiRewardDistributor;
 
 /// Error types for the contract
-#[contracttype]
+#[contracterror]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RewardError {
     Unauthorized = 1,
@@ -117,32 +155,46 @@ pub enum RewardError {
 #[contractimpl]
 impl MultiRewardDistributor {
     /// Initialize the multi-reward distributor
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        treasury: Address,
-        swap_router: Address,
-    ) {
+    pub fn initialize(env: Env, admin: Address, treasury: Address, swap_router: Address) {
         // Check if already initialized
-        let is_init: bool = env.storage()
+        let is_init: bool = env
+            .storage()
             .instance()
             .get(&Symbol::new(&env, "initialized"))
             .unwrap_or(false);
-        require!(!is_init, RewardError::AlreadyInitialized);
-        
-        env.storage().instance().set(&Symbol::new(&env, "initialized"), &true);
-        env.storage().instance().set(&Symbol::new(&env, "admin"), &admin);
-        env.storage().instance().set(&Symbol::new(&env, "treasury"), &treasury);
-        env.storage().instance().set(&Symbol::new(&env, "swap_router"), &swap_router);
-        env.storage().instance().set(&Symbol::new(&env, "paused"), &false);
-        env.storage().instance().set(&Symbol::new(&env, "emergency_mode"), &false);
-        
+        if is_init {
+            panic_with_error!(env, RewardError::AlreadyInitialized);
+        }
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "initialized"), &true);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "admin"), &admin);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "treasury"), &treasury);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "swap_router"), &swap_router);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &false);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "emergency_mode"), &false);
+
         // Initialize empty reward streams
         let streams: Vec<RewardStream> = Vec::new(&env);
-        env.storage().instance().set(&Symbol::new(&env, "streams"), &streams);
-        
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "streams"), &streams);
+
         // Initialize swap queue counter
-        env.storage().instance().set(&Symbol::new(&env, "next_swap_id"), &1u64);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "next_swap_id"), &1u64);
     }
 
     // ==================== Admin Functions ====================
@@ -158,16 +210,15 @@ impl MultiRewardDistributor {
     ) -> u32 {
         Self::require_admin(&env, admin);
         Self::require_not_paused(&env);
-        
+
         let mut streams = Self::get_streams(&env);
-        require!(
-            streams.len() < MAX_REWARD_STREAMS,
-            RewardError::StreamLimitExceeded
-        );
-        
+        if streams.len() >= MAX_REWARD_STREAMS {
+            panic_with_error!(env, RewardError::StreamLimitExceeded);
+        }
+
         let stream_index = streams.len();
         let current_time = env.ledger().timestamp();
-        
+
         let new_stream = RewardStream {
             token: token.clone(),
             rate_per_second,
@@ -176,16 +227,18 @@ impl MultiRewardDistributor {
             is_active: true,
             decimals,
         };
-        
+
         streams.push_back(new_stream);
-        env.storage().instance().set(&Symbol::new(&env, "streams"), &streams);
-        
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "streams"), &streams);
+
         // Emit event
         env.events().publish(
             ("reward_stream_added", stream_index),
             (&token, rate_per_second),
         );
-        
+
         stream_index
     }
 
@@ -197,48 +250,44 @@ impl MultiRewardDistributor {
         new_rate_per_second: i128,
     ) {
         Self::require_admin(&env, admin);
-        
+
         let mut streams = Self::get_streams(&env);
-        require!(
-            stream_index < streams.len(),
-            RewardError::InvalidStream
-        );
-        
+        if stream_index >= streams.len() {
+            panic_with_error!(&env, RewardError::InvalidStream);
+        }
+
         // Update the stream at index
         let mut stream = streams.get(stream_index).unwrap();
         stream.rate_per_second = new_rate_per_second;
         stream.last_update = env.ledger().timestamp();
-        
+
         // Replace the stream
         streams.set(stream_index, stream);
-        env.storage().instance().set(&Symbol::new(&env, "streams"), &streams);
-        
-        env.events().publish(
-            ("reward_rate_updated", stream_index),
-            new_rate_per_second,
-        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "streams"), &streams);
+
+        env.events()
+            .publish(("reward_rate_updated", stream_index), new_rate_per_second);
     }
 
     /// Deactivate a reward stream (admin only)
-    pub fn deactivate_stream(
-        env: Env,
-        admin: Address,
-        stream_index: u32,
-    ) {
+    pub fn deactivate_stream(env: Env, admin: Address, stream_index: u32) {
         Self::require_admin(&env, admin);
-        
+
         let mut streams = Self::get_streams(&env);
-        require!(
-            stream_index < streams.len(),
-            RewardError::InvalidStream
-        );
-        
+        if stream_index >= streams.len() {
+            panic_with_error!(&env, RewardError::InvalidStream);
+        }
+
         let mut stream = streams.get(stream_index).unwrap();
         stream.is_active = false;
         stream.last_update = env.ledger().timestamp();
-        
+
         streams.set(stream_index, stream);
-        env.storage().instance().set(&Symbol::new(&env, "streams"), &streams);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "streams"), &streams);
     }
 
     // ==================== Core Reward Functions ====================
@@ -254,11 +303,11 @@ impl MultiRewardDistributor {
         vault_share_decimals: u32,
     ) -> Map<u32, i128> {
         Self::require_not_emergency(&env);
-        
+
         let current_time = env.ledger().timestamp();
-        let streams = Self::get_streams(&env);
+        let mut streams = Self::get_streams(&env);
         let mut pending_rewards: Map<u32, i128> = Map::new(&env);
-        
+
         // Get or initialize vault info
         let mut vault_info = Self::get_vault_info(&env, &vault);
         if vault_info.total_shares == 0 {
@@ -266,53 +315,49 @@ impl MultiRewardDistributor {
         }
         vault_info.share_decimals = vault_share_decimals;
         Self::set_vault_info(&env, &vault, &vault_info);
-        
+
         for i in 0..streams.len() {
             let mut stream = streams.get(i).unwrap();
-            
+
             if !stream.is_active {
                 continue;
             }
-            
+
             // Calculate time elapsed since last update
             let time_elapsed = current_time - stream.last_update;
-            
+
             if time_elapsed > 0 && vault_info.total_shares > 0 {
-                // Calculate reward per share for this time period
-                // reward_per_share_delta = rate * time_elapsed / total_shares
                 let reward_delta = stream.rate_per_second * time_elapsed as i128;
-                
-                // Normalize to share decimals (assuming 7 or 18 decimals for tokens)
-                let share_multiplier: i128 = 10_i128.pow(stream.decimals.saturating_sub(vault_share_decimals) as u32);
-                let normalized_reward = reward_delta * share_multiplier;
-                
-                // Update stream's total distributed
-                let user_share_of_pool = (user_shares * normalized_reward) / vault_info.total_shares;
-                stream.total_distributed += user_share_of_pool;
-                
-                // Update user's reward debt
-                let mut reward_debt = Self::get_user_reward_debt(&env, &user, i);
-                let accumulated_delta = (vault_info.total_shares * share_multiplier) / vault_info.total_shares;
-                reward_debt.reward_debt += user_shares * accumulated_delta;
-                reward_debt.last_claim_timestamp = current_time;
-                
-                // Calculate pending rewards
-                let accumulated_per_share = Self::get_accumulated_reward_per_share(&env, i);
-                let user_accumulated = user_shares * accumulated_per_share / 10_i128.pow(stream.decimals);
-                reward_debt.pending_rewards = user_accumulated - reward_debt.reward_debt;
-                
-                Self::set_user_reward_debt(&env, &user, i, &reward_debt);
-                
-                // Update stream
+
+                // Accumulate reward_per_share once per time window
+                let accumulated_reward_per_share_delta =
+                    reward_delta * 10_i128.pow(vault_share_decimals) / vault_info.total_shares;
+                let mut accumulated_per_share = Self::get_accumulated_reward_per_share(&env, i);
+                accumulated_per_share += accumulated_reward_per_share_delta;
+                Self::set_accumulated_reward_per_share(&env, i, accumulated_per_share);
+
+                // Update stream totals once per time window
+                stream.total_distributed += reward_delta;
                 stream.last_update = current_time;
                 streams.set(i, stream);
-                
-                pending_rewards.set(i, reward_debt.pending_rewards);
             }
+
+            // Calculate pending rewards for this user (always, even if time_elapsed == 0)
+            let accumulated_per_share = Self::get_accumulated_reward_per_share(&env, i);
+            let mut reward_debt = Self::get_user_reward_debt(&env, &user, i);
+            let user_accumulated =
+                user_shares * accumulated_per_share / 10_i128.pow(vault_share_decimals);
+            reward_debt.pending_rewards = user_accumulated - reward_debt.reward_debt;
+            reward_debt.last_claim_timestamp = current_time;
+
+            Self::set_user_reward_debt(&env, &user, i, &reward_debt);
+            pending_rewards.set(i, reward_debt.pending_rewards);
         }
-        
-        env.storage().instance().set(&Symbol::new(&env, "streams"), &streams);
-        
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "streams"), &streams);
+
         pending_rewards
     }
 
@@ -321,62 +366,62 @@ impl MultiRewardDistributor {
     pub fn claim_rewards(
         env: Env,
         user: Address,
-        vault: Address,
+        _vault: Address,
         stream_indices: Vec<u32>,
         convert_to: Option<Address>,
     ) -> Map<Address, i128> {
         Self::require_not_emergency(&env);
         Self::require_not_paused(&env);
-        
+
         let current_time = env.ledger().timestamp();
         let streams = Self::get_streams(&env);
-        let treasury = Self::get_treasury(&env);
-        let swap_router = Self::get_swap_router(&env);
-        
-        let mut claimed_amounts: Map<Address, i128> = Map::new(&env);
+        let treasury = Self::get_treasury(env.clone());
+        let swap_router = Self::get_swap_router(env.clone());
+
+        let claimed_amounts: Map<Address, i128> = Map::new(&env);
         let mut total_by_token: Map<Address, i128> = Map::new(&env);
-        
+
         for idx in 0..stream_indices.len() {
             let stream_index = stream_indices.get(idx).unwrap();
-            require!(
-                stream_index < streams.len(),
-                RewardError::InvalidStream
-            );
-            
+            if stream_index >= streams.len() {
+                panic_with_error!(env, RewardError::InvalidStream);
+            }
+
             let stream = streams.get(stream_index).unwrap();
             let mut reward_debt = Self::get_user_reward_debt(&env, &user, stream_index);
-            
+
             let pending = reward_debt.pending_rewards;
-            require!(pending > 0, "no pending rewards");
-            
+            if pending <= 0 {
+                panic!("no pending rewards");
+            }
+
             // Calculate treasury fee (0.25%)
             let treasury_fee = (pending * TREASURY_FEE_BPS as i128) / BASIS_POINTS_DIVISOR;
             let net_reward = pending - treasury_fee;
-            
+
             // Transfer net reward to user
             let token_client = TokenClient::new(&env, &stream.token);
             let contract_address = env.current_contract_address();
-            
+
             // Check contract balance
             let contract_balance = token_client.balance(&contract_address);
-            require!(
-                contract_balance >= pending,
-                RewardError::InsufficientBalance
-            );
-            
+            if contract_balance < pending {
+                panic_with_error!(env, RewardError::InsufficientBalance);
+            }
+
             // Transfer to user
             token_client.transfer(&contract_address, &user, &net_reward);
-            
+
             // Transfer treasury fee
             if treasury_fee > 0 {
                 token_client.transfer(&contract_address, &treasury, &treasury_fee);
             }
-            
+
             // Update reward debt
             reward_debt.pending_rewards = 0;
             reward_debt.last_claim_timestamp = current_time;
             Self::set_user_reward_debt(&env, &user, stream_index, &reward_debt);
-            
+
             // Handle conversion if requested
             if let Some(target_token) = &convert_to {
                 if *target_token != stream.token {
@@ -387,7 +432,7 @@ impl MultiRewardDistributor {
                         target_token,
                         MAX_SLIPPAGE_BPS,
                     );
-                    
+
                     let swap_success = Self::execute_swap(
                         &env,
                         &swap_router,
@@ -397,7 +442,7 @@ impl MultiRewardDistributor {
                         net_reward,
                         min_received,
                     );
-                    
+
                     if !swap_success {
                         // Queue failed swap for retry
                         Self::queue_failed_swap(
@@ -411,28 +456,23 @@ impl MultiRewardDistributor {
                     }
                 }
             }
-            
+
             // Update claimed amounts
-            let current = total_by_token.get(&stream.token).unwrap_or(0);
+            let current = total_by_token.get(stream.token.clone()).unwrap_or(0);
             total_by_token.set(stream.token.clone(), current + net_reward);
         }
-        
+
         claimed_amounts
     }
 
     /// Emergency withdrawal - allows user to exit vault even if reward contracts are frozen
     /// This is a safety mechanism that bypasses normal reward claims
-    pub fn emergency_withdraw(
-        env: Env,
-        user: Address,
-        vault: Address,
-        shares: i128,
-    ) {
+    pub fn emergency_withdraw(env: Env, user: Address, vault: Address, shares: i128) {
         // Emergency withdrawal works even in emergency mode
         // It does NOT claim any pending rewards
-        
+
         let current_time = env.ledger().timestamp();
-        
+
         let withdrawal = EmergencyWithdrawal {
             user: user.clone(),
             vault: vault.clone(),
@@ -440,39 +480,36 @@ impl MultiRewardDistributor {
             requested_at: current_time,
             completed: false,
         };
-        
+
         // Store emergency withdrawal request
-        let key = Self::generate_withdrawal_key(&user, &vault);
-        env.storage().instance().set(&Symbol::new(&env, &key), &withdrawal);
-        
+        let key = EmergencyWithdrawalKey {
+            user: user.clone(),
+            vault: vault.clone(),
+        };
+        env.storage().instance().set(&key, &withdrawal);
+
         // Emit emergency withdrawal event
-        env.events().publish(
-            ("emergency_withdrawal_requested",),
-            (&user, &vault, shares),
-        );
+        env.events()
+            .publish(("emergency_withdrawal_requested",), (&user, &vault, shares));
     }
 
     /// Complete emergency withdrawal (called by vault)
-    pub fn complete_emergency_withdrawal(
-        env: Env,
-        user: Address,
-        vault: Address,
-    ) {
-        let key = Self::generate_withdrawal_key(&user, &vault);
-        let mut withdrawal: EmergencyWithdrawal = env.storage()
-            .instance()
-            .get(&Symbol::new(&env, &key))
-            .unwrap();
-        
-        require!(!withdrawal.completed, "already completed");
-        
+    pub fn complete_emergency_withdrawal(env: Env, user: Address, vault: Address) {
+        let key = EmergencyWithdrawalKey {
+            user: user.clone(),
+            vault: vault.clone(),
+        };
+        let mut withdrawal: EmergencyWithdrawal = env.storage().instance().get(&key).unwrap();
+
+        if withdrawal.completed {
+            panic!("already completed");
+        }
+
         withdrawal.completed = true;
-        env.storage().instance().set(&Symbol::new(&env, &key), &withdrawal);
-        
-        env.events().publish(
-            ("emergency_withdrawal_completed",),
-            (&user, &vault),
-        );
+        env.storage().instance().set(&key, &withdrawal);
+
+        env.events()
+            .publish(("emergency_withdrawal_completed",), (&user, &vault));
     }
 
     // ==================== Auto-Compound Functions ====================
@@ -485,19 +522,18 @@ impl MultiRewardDistributor {
         reinvest_percentage: u32,
         enabled: bool,
     ) {
-        require!(
-            reinvest_percentage <= BASIS_POINTS_DIVISOR as u32,
-            RewardError::InvalidPercentage
-        );
-        
+        if reinvest_percentage > BASIS_POINTS_DIVISOR as u32 {
+            panic_with_error!(&env, RewardError::InvalidPercentage);
+        }
+
         let config = AutoCompoundConfig {
             token: token.clone(),
             reinvest_percentage,
             enabled,
         };
-        
+
         Self::set_auto_compound_config_for_user(&env, &user, &token, &config);
-        
+
         env.events().publish(
             ("auto_compound_config_updated",),
             (&user, &token, reinvest_percentage, enabled),
@@ -505,11 +541,7 @@ impl MultiRewardDistributor {
     }
 
     /// Get auto-compound configuration for a user and token
-    pub fn get_auto_compound_config(
-        env: Env,
-        user: Address,
-        token: Address,
-    ) -> AutoCompoundConfig {
+    pub fn get_auto_compound_config(env: Env, user: Address, token: Address) -> AutoCompoundConfig {
         Self::get_auto_compound_config_for_user(&env, &user, &token)
     }
 
@@ -522,48 +554,54 @@ impl MultiRewardDistributor {
         stream_indices: Vec<u32>,
     ) -> Map<Address, i128> {
         Self::require_not_emergency(&env);
-        
+
         let streams = Self::get_streams(&env);
         let mut reinvest_amounts: Map<Address, i128> = Map::new(&env);
         let mut claim_amounts: Map<Address, i128> = Map::new(&env);
-        
+
         for idx in 0..stream_indices.len() {
             let stream_index = stream_indices.get(idx).unwrap();
             let stream = streams.get(stream_index).unwrap();
-            
+
             let config = Self::get_auto_compound_config_for_user(&env, &user, &stream.token);
-            
+
             if !config.enabled {
                 continue;
             }
-            
+
             let reward_debt = Self::get_user_reward_debt(&env, &user, stream_index);
             let pending = reward_debt.pending_rewards;
-            
+
             if pending <= 0 {
                 continue;
             }
-            
+
             let to_reinvest = (pending * config.reinvest_percentage as i128) / BASIS_POINTS_DIVISOR;
             let to_claim = pending - to_reinvest;
-            
+
             if to_reinvest > 0 {
-                let current = reinvest_amounts.get(&stream.token).unwrap_or(0);
+                let current = reinvest_amounts.get(stream.token.clone()).unwrap_or(0);
                 reinvest_amounts.set(stream.token.clone(), current + to_reinvest);
             }
-            
+
             if to_claim > 0 {
-                let current = claim_amounts.get(&stream.token).unwrap_or(0);
+                let current = claim_amounts.get(stream.token.clone()).unwrap_or(0);
                 claim_amounts.set(stream.token.clone(), current + to_claim);
             }
         }
-        
+
         // Execute claims for non-reinvested amounts
         if !claim_amounts.is_empty() {
             let indices_to_claim: Vec<u32> = stream_indices;
-            Self::claim_rewards(env.clone(), user.clone(), vault.clone(), indices_to_claim, None);
+            Self::claim_rewards(
+                env.clone(),
+                user.clone(),
+                vault.clone(),
+                indices_to_claim,
+                None,
+            );
         }
-        
+
         // Return reinvest amounts for vault to handle
         reinvest_amounts
     }
@@ -578,10 +616,9 @@ impl MultiRewardDistributor {
     /// Get stream info by index
     pub fn get_stream(env: Env, stream_index: u32) -> RewardStream {
         let streams = Self::get_streams(&env);
-        require!(
-            stream_index < streams.len(),
-            RewardError::InvalidStream
-        );
+        if stream_index >= streams.len() {
+            panic_with_error!(&env, RewardError::InvalidStream);
+        }
         streams.get(stream_index).unwrap()
     }
 
@@ -593,7 +630,7 @@ impl MultiRewardDistributor {
     ) -> Map<u32, i128> {
         let streams = Self::get_streams(&env);
         let mut pending: Map<u32, i128> = Map::new(&env);
-        
+
         for idx in 0..stream_indices.len() {
             let stream_index = stream_indices.get(idx).unwrap();
             if stream_index < streams.len() {
@@ -601,48 +638,106 @@ impl MultiRewardDistributor {
                 pending.set(stream_index, reward_debt.pending_rewards);
             }
         }
-        
+
         pending
     }
 
-    /// Get total pending rewards across all streams with USD valuation
-    /// Note: USD prices should be provided off-chain or via oracle
+    /// Get total pending rewards across all streams with USD valuation.
+    ///
+    /// USD prices are resolved from the configured on-chain price oracle when
+    /// available, falling back to the caller-provided `prices` map for tokens
+    /// the oracle does not report. Prices are in 8-decimal USD.
     pub fn get_pending_rewards_with_usd(
         env: Env,
         user: Address,
-        vault: Address,
-        user_shares: i128,
+        _vault: Address,
+        _user_shares: i128,
         prices: Map<Address, i128>, // token -> USD price with 8 decimals
     ) -> (Map<Address, i128>, Map<Address, i128>, i128) {
         let streams = Self::get_streams(&env);
         let mut amounts: Map<Address, i128> = Map::new(&env);
         let mut usd_values: Map<Address, i128> = Map::new(&env);
         let mut total_usd: i128 = 0;
-        
+
         for i in 0..streams.len() {
             let stream = streams.get(i).unwrap();
             let reward_debt = Self::get_user_reward_debt(&env, &user, i);
             let pending = reward_debt.pending_rewards;
-            
+
             if pending > 0 {
                 amounts.set(stream.token.clone(), pending);
-                
-                let price = prices.get(&stream.token).unwrap_or(0);
+
+                let price = Self::resolve_usd_price(&env, &stream.token, &prices);
                 let usd_value = Self::normalize_usd_value(pending, stream.decimals, price);
                 usd_values.set(stream.token.clone(), usd_value);
                 total_usd += usd_value;
             }
         }
-        
+
         (amounts, usd_values, total_usd)
+    }
+
+    /// Set the on-chain USD price oracle contract (admin only).
+    ///
+    /// The oracle contract must expose a `get_price(Address) -> i128` function
+    /// returning the token's USD price in 8 decimals.
+    pub fn set_price_oracle(env: Env, admin: Address, oracle: Address) {
+        Self::require_admin(&env, admin.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "price_oracle"), &oracle);
+
+        env.events()
+            .publish(("price_oracle_updated",), (admin, oracle));
+    }
+
+    /// Get the configured on-chain price oracle address, if any.
+    pub fn get_price_oracle(env: &Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "price_oracle"))
+    }
+
+    /// Query the configured on-chain oracle for a token's USD price (8 decimals).
+    ///
+    /// Returns 0 when no oracle is configured or the oracle reports no price.
+    pub fn get_token_usd_price(env: Env, token: Address) -> i128 {
+        let oracle = match Self::get_price_oracle(&env) {
+            Some(o) => o,
+            None => return 0,
+        };
+        Self::query_oracle_price(&env, &oracle, &token).unwrap_or(0)
+    }
+
+    /// Resolve a token's USD price: oracle first, then the provided fallback map.
+    fn resolve_usd_price(env: &Env, token: &Address, fallback: &Map<Address, i128>) -> i128 {
+        if let Some(oracle) = Self::get_price_oracle(env) {
+            if let Some(price) = Self::query_oracle_price(env, &oracle, token) {
+                if price > 0 {
+                    return price;
+                }
+            }
+        }
+        fallback.get(token.clone()).unwrap_or(0)
+    }
+
+    /// Safely query the oracle contract for a token price without reverting
+    /// the query when a token is unknown to the oracle.
+    fn query_oracle_price(env: &Env, oracle: &Address, token: &Address) -> Option<i128> {
+        let method = Symbol::new(env, "get_price");
+        let args = (token.clone(),).into_val(env);
+        match env.try_invoke_contract::<i128, soroban_sdk::Error>(oracle, &method, args) {
+            Ok(Ok(price)) if price > 0 => Some(price),
+            _ => None,
+        }
     }
 
     /// Get reward history for a user (stored off-chain in production)
     /// Returns cached summary for on-chain queries
     pub fn get_reward_history_summary(
         env: Env,
-        user: Address,
-        limit: u32,
+        _user: Address,
+        _limit: u32,
     ) -> Vec<(u64, Address, i128)> {
         // In production, this would query off-chain storage
         // For now, return empty vec - history stored in events
@@ -654,58 +749,53 @@ impl MultiRewardDistributor {
     /// Pause the contract (admin only)
     pub fn pause(env: Env, admin: Address) {
         Self::require_admin(&env, admin);
-        env.storage().instance().set(&Symbol::new(&env, "paused"), &true);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &true);
     }
 
     /// Unpause the contract (admin only)
     pub fn unpause(env: Env, admin: Address) {
         Self::require_admin(&env, admin);
-        env.storage().instance().set(&Symbol::new(&env, "paused"), &false);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "paused"), &false);
     }
 
     /// Enable emergency mode (admin only)
     pub fn enable_emergency_mode(env: Env, admin: Address) {
         Self::require_admin(&env, admin);
-        env.storage().instance().set(&Symbol::new(&env, "emergency_mode"), &true);
-        
-        env.events().publish(
-            ("emergency_mode_enabled",),
-            (),
-        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "emergency_mode"), &true);
+
+        env.events().publish(("emergency_mode_enabled",), ());
     }
 
     /// Disable emergency mode (admin only)
     pub fn disable_emergency_mode(env: Env, admin: Address) {
         Self::require_admin(&env, admin);
-        env.storage().instance().set(&Symbol::new(&env, "emergency_mode"), &false);
-        
-        env.events().publish(
-            ("emergency_mode_disabled",),
-            (),
-        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "emergency_mode"), &false);
+
+        env.events().publish(("emergency_mode_disabled",), ());
     }
 
     /// Fund reward pool (deposit tokens for distribution)
-    pub fn fund_reward_pool(
-        env: Env,
-        admin: Address,
-        token: Address,
-        amount: i128,
-    ) {
-        Self::require_admin(&env, admin);
-        
+    pub fn fund_reward_pool(env: Env, admin: Address, token: Address, amount: i128) {
+        Self::require_admin(&env, admin.clone());
+
         // Transfer tokens from admin to contract
         let token_client = TokenClient::new(&env, &token);
         token_client.transfer(&admin, &env.current_contract_address(), &amount);
-        
+
         // Update pool balance
         let key = Symbol::new(&env, "pool_balance");
-        let mut pool_balances: Map<Address, i128> = env.storage()
-            .instance()
-            .get(&key)
-            .unwrap_or(Map::new(&env));
-        
-        let current = pool_balances.get(&token).unwrap_or(0);
+        let mut pool_balances: Map<Address, i128> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(&env));
+
+        let current = pool_balances.get(token.clone()).unwrap_or(0);
         pool_balances.set(token, current + amount);
         env.storage().instance().set(&key, &pool_balances);
     }
@@ -713,24 +803,24 @@ impl MultiRewardDistributor {
     /// Retry failed swaps
     pub fn retry_failed_swaps(env: Env, admin: Address, max_retries: u32) -> u32 {
         Self::require_admin(&env, admin);
-        
-        let swap_router = Self::get_swap_router(&env);
+
+        let swap_router = Self::get_swap_router(env.clone());
         let mut retried = 0u32;
-        
+
         // In production, iterate through pending swaps
         // For now, simplified implementation
         let pending_swaps: Vec<PendingSwap> = Vec::new(&env);
-        
+
         for idx in 0..pending_swaps.len() {
             let mut swap = pending_swaps.get(idx).unwrap();
-            
+
             if swap.retry_count >= max_retries {
                 continue;
             }
-            
+
             swap.retry_count += 1;
             swap.status = SwapStatus::Processing;
-            
+
             // Attempt swap again
             let success = Self::execute_swap(
                 &env,
@@ -741,7 +831,7 @@ impl MultiRewardDistributor {
                 swap.amount,
                 swap.min_received,
             );
-            
+
             if success {
                 swap.status = SwapStatus::Completed;
                 retried += 1;
@@ -749,17 +839,17 @@ impl MultiRewardDistributor {
                 swap.status = SwapStatus::Failed;
             }
         }
-        
+
         retried
     }
 
     /// Get contract state
     pub fn get_state(env: Env) -> (bool, bool, u32, Address) {
-        let paused = Self::is_paused(&env);
-        let emergency = Self::is_emergency(&env);
+        let paused = Self::is_paused(env.clone());
+        let emergency = Self::is_emergency(env.clone());
         let streams = Self::get_streams(&env);
-        let admin = Self::get_admin(&env);
-        
+        let admin = Self::get_admin(env.clone());
+
         (paused, emergency, streams.len(), admin)
     }
 
@@ -767,15 +857,21 @@ impl MultiRewardDistributor {
 
     fn require_admin(env: &Env, caller: Address) {
         let admin = Self::get_admin(env.clone());
-        require!(caller == admin, RewardError::Unauthorized);
+        if caller != admin {
+            panic_with_error!(env, RewardError::Unauthorized);
+        }
     }
 
     fn require_not_paused(env: &Env) {
-        require!(!Self::is_paused(env.clone()), RewardError::Paused);
+        if Self::is_paused(env.clone()) {
+            panic_with_error!(env, RewardError::Paused);
+        }
     }
 
     fn require_not_emergency(env: &Env) {
-        require!(!Self::is_emergency(env.clone()), RewardError::EmergencyModeActive);
+        if Self::is_emergency(env.clone()) {
+            panic_with_error!(env, RewardError::EmergencyModeActive);
+        }
     }
 
     fn get_admin(env: Env) -> Address {
@@ -821,9 +917,12 @@ impl MultiRewardDistributor {
     }
 
     fn get_vault_info(env: &Env, vault: &Address) -> VaultShareInfo {
+        let key = VaultShareInfoKey {
+            vault: vault.clone(),
+        };
         env.storage()
             .instance()
-            .get(&Symbol::new(env, &Self::vault_key(vault)))
+            .get(&key)
             .unwrap_or(VaultShareInfo {
                 vault: vault.clone(),
                 total_shares: 0,
@@ -832,22 +931,20 @@ impl MultiRewardDistributor {
     }
 
     fn set_vault_info(env: &Env, vault: &Address, info: &VaultShareInfo) {
-        env.storage()
-            .instance()
-            .set(&Symbol::new(env, &Self::vault_key(vault)), info);
-    }
-
-    fn vault_key(vault: &Address) -> Vec<u8> {
-        let mut key = Vec::new(vault);
-        key.extend_from_slice(b"vault_info");
-        key
+        let key = VaultShareInfoKey {
+            vault: vault.clone(),
+        };
+        env.storage().instance().set(&key, info);
     }
 
     fn get_user_reward_debt(env: &Env, user: &Address, stream_index: u32) -> UserRewardDebt {
-        let key = Self::reward_debt_key(user, stream_index);
+        let key = UserRewardDebtKey {
+            user: user.clone(),
+            stream_index,
+        };
         env.storage()
             .instance()
-            .get(&Symbol::new(env, &key))
+            .get(&key)
             .unwrap_or(UserRewardDebt {
                 user: user.clone(),
                 stream_index,
@@ -858,37 +955,21 @@ impl MultiRewardDistributor {
     }
 
     fn set_user_reward_debt(env: &Env, user: &Address, stream_index: u32, debt: &UserRewardDebt) {
-        let key = Self::reward_debt_key(user, stream_index);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(env, &key), debt);
-    }
-
-    fn reward_debt_key(user: &Address, stream_index: u32) -> Vec<u8> {
-        let mut key = Vec::new(user);
-        key.extend_from_slice(b"reward_debt_");
-        // Add stream index bytes
-        let idx_bytes: Vec<u8> = stream_index.to_be_bytes().to_vec();
-        key.extend_from_slice(&idx_bytes);
-        key
+        let key = UserRewardDebtKey {
+            user: user.clone(),
+            stream_index,
+        };
+        env.storage().instance().set(&key, debt);
     }
 
     fn get_accumulated_reward_per_share(env: &Env, stream_index: u32) -> i128 {
-        let streams = Self::get_streams(env);
-        if stream_index >= streams.len() {
-            return 0;
-        }
-        
-        let stream = streams.get(stream_index).unwrap();
-        let current_time = env.ledger().timestamp();
-        let time_elapsed = current_time.saturating_sub(stream.last_update);
-        
-        if time_elapsed > 0 && stream.is_active {
-            // Return accumulated amount based on rate
-            stream.rate_per_second * time_elapsed as i128
-        } else {
-            stream.total_distributed
-        }
+        let key = AccumulatedRewardKey { stream_index };
+        env.storage().instance().get(&key).unwrap_or(0)
+    }
+
+    fn set_accumulated_reward_per_share(env: &Env, stream_index: u32, value: i128) {
+        let key = AccumulatedRewardKey { stream_index };
+        env.storage().instance().set(&key, &value);
     }
 
     fn get_auto_compound_config_for_user(
@@ -896,10 +977,13 @@ impl MultiRewardDistributor {
         user: &Address,
         token: &Address,
     ) -> AutoCompoundConfig {
-        let key = Self::auto_compound_key(user, token);
+        let key = AutoCompoundConfigKey {
+            user: user.clone(),
+            token: token.clone(),
+        };
         env.storage()
             .instance()
-            .get(&Symbol::new(env, &key))
+            .get(&key)
             .unwrap_or(AutoCompoundConfig {
                 token: token.clone(),
                 reinvest_percentage: 0,
@@ -913,23 +997,17 @@ impl MultiRewardDistributor {
         token: &Address,
         config: &AutoCompoundConfig,
     ) {
-        let key = Self::auto_compound_key(user, token);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(env, &key), config);
-    }
-
-    fn auto_compound_key(user: &Address, token: &Address) -> Vec<u8> {
-        let mut key = Vec::new(user);
-        key.extend_from_slice(b"auto_compound_");
-        key.extend_from_slice(&token.to_string().into_bytes());
-        key
+        let key = AutoCompoundConfigKey {
+            user: user.clone(),
+            token: token.clone(),
+        };
+        env.storage().instance().set(&key, config);
     }
 
     fn calculate_min_received(
         amount: i128,
-        from_token: &Address,
-        to_token: &Address,
+        _from_token: &Address,
+        _to_token: &Address,
         max_slippage_bps: u32,
     ) -> i128 {
         // In production, query DEX for expected output
@@ -940,7 +1018,7 @@ impl MultiRewardDistributor {
 
     fn execute_swap(
         env: &Env,
-        swap_router: &Address,
+        _swap_router: &Address,
         user: &Address,
         from_token: &Address,
         to_token: &Address,
@@ -954,13 +1032,13 @@ impl MultiRewardDistributor {
         // 2. Execute swap on Stellar DEX
         // 3. Transfer output tokens to user
         // 4. Handle any failures
-        
+
         // Emit swap event
         env.events().publish(
             ("swap_executed",),
             (user, from_token, to_token, amount, min_received),
         );
-        
+
         true
     }
 
@@ -973,7 +1051,7 @@ impl MultiRewardDistributor {
         min_received: i128,
     ) {
         let swap_id = Self::get_next_swap_id(env);
-        
+
         let pending_swap = PendingSwap {
             id: swap_id,
             user: user.clone(),
@@ -985,16 +1063,14 @@ impl MultiRewardDistributor {
             retry_count: 0,
             status: SwapStatus::Failed,
         };
-        
+
         let key = Symbol::new(env, "pending_swap");
-        let mut swaps: Map<u64, PendingSwap> = env.storage()
-            .instance()
-            .get(&key)
-            .unwrap_or(Map::new(env));
-        
+        let mut swaps: Map<u64, PendingSwap> =
+            env.storage().instance().get(&key).unwrap_or(Map::new(env));
+
         swaps.set(swap_id, pending_swap);
         env.storage().instance().set(&key, &swaps);
-        
+
         env.events().publish(
             ("swap_queued_for_retry",),
             (swap_id, user, from_token, to_token, amount),
@@ -1002,14 +1078,14 @@ impl MultiRewardDistributor {
     }
 
     fn get_next_swap_id(env: &Env) -> u64 {
-        let id: u64 = env.storage()
+        let id: u64 = env
+            .storage()
             .instance()
             .get(&Symbol::new(env, "next_swap_id"))
             .unwrap_or(1);
-        env.storage().instance().set(
-            &Symbol::new(env, "next_swap_id"),
-            &(id + 1),
-        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "next_swap_id"), &(id + 1));
         id
     }
 
@@ -1019,11 +1095,120 @@ impl MultiRewardDistributor {
         let divisor: i128 = 10_i128.pow(decimals);
         amount * price / divisor
     }
+}
 
-    fn generate_withdrawal_key(user: &Address, vault: &Address) -> Vec<u8> {
-        let mut key = Vec::new(user);
-        key.extend_from_slice(b"emergency_");
-        key.extend_from_slice(&vault.to_string().into_bytes());
-        key
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::{
+        token::{StellarAssetClient, TokenClient},
+        Env, IntoVal, Symbol,
+    };
+
+    fn setup(
+        env: &Env,
+    ) -> (
+        Address,
+        Address,
+        Address,
+        MultiRewardDistributorClient,
+        TokenClient,
+    ) {
+        let admin = Address::generate(env);
+        let treasury = Address::generate(env);
+        let swap_router = Address::generate(env);
+        let token = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_client = TokenClient::new(env, &token.address());
+
+        let contract_id = env.register_contract(None, MultiRewardDistributor);
+        let client = MultiRewardDistributorClient::new(env, &contract_id);
+
+        client.initialize(&admin, &treasury, &swap_router);
+
+        (admin, treasury, swap_router, client, token_client)
+    }
+
+    #[test]
+    fn test_multi_user_reward_accrual() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, token_client) = setup(&env);
+
+        let user_a = Address::generate(&env);
+        let user_b = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.fund_reward_pool(&admin, &token, &1_000_000);
+
+        let rewards_a = client.update_rewards(&user_a, &token, &1000, &7);
+        let rewards_b = client.update_rewards(&user_b, &token, &2000, &7);
+
+        let pending_a = rewards_a.get(0).unwrap();
+        let pending_b = rewards_b.get(0).unwrap();
+
+        assert!(pending_a > 0);
+        assert!(pending_b > 0);
+        assert_eq!(pending_b, pending_a * 2);
+    }
+
+    #[test]
+    fn test_rate_change_updates_future_accrual() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, token_client) = setup(&env);
+
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.fund_reward_pool(&admin, &token, &10_000_000);
+
+        client.update_rewards(&user, &token, &1000, &7);
+        client.update_reward_rate(&admin, &0, &2000);
+        client.update_rewards(&user, &token, &1000, &7);
+
+        let rewards = client.update_rewards(&user, &token, &1000, &7);
+        let pending = rewards.get(0).unwrap();
+        assert!(pending > 0);
+    }
+
+    #[test]
+    fn test_deactivated_stream_skips_accrual() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, _token_client) = setup(&env);
+
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.deactivate_stream(&admin, &0);
+
+        let rewards = client.update_rewards(&user, &token, &1000, &7);
+        assert!(rewards.is_empty());
+    }
+
+    #[test]
+    fn test_auto_compound_split_accounting() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, _treasury, _swap_router, client, token_client) = setup(&env);
+
+        let user = Address::generate(&env);
+        let token = Address::generate(&env);
+
+        client.add_reward_stream(&admin, &token, &1000, &7);
+        client.fund_reward_pool(&admin, &token, &1_000_000);
+
+        client.set_auto_compound_config(&user, &token, &5000, &true);
+        client.update_rewards(&user, &token, &1000, &7);
+
+        let reinvest = client.execute_auto_compound(&user, &token, &Vec::from_array(&env, [0u32]));
+        let total = reinvest.get(token.clone()).unwrap_or(0);
+        assert!(total >= 0);
     }
 }

@@ -1,7 +1,9 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, 
+    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
     unwrap::UnwrapOptimized
 };
+
+use crate::YieldVaultClient;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +109,7 @@ impl RebalanceEngine {
     ) -> u32 {
         Self::require_admin(&env, admin);
         Self::require_not_paused(&env);
+        Self::validate_allocations(&allocations);
 
         let strategy_id = Self::get_next_strategy_id(&env);
         
@@ -120,7 +123,7 @@ impl RebalanceEngine {
             allocations,
         };
 
-        let mut strategies = Self::get_strategies(&env);
+        let mut strategies = Self::get_strategies(env.clone());
         strategies.push_back(strategy);
         env.storage().instance().set(&Symbol::new(&env, "strategies"), &strategies);
 
@@ -141,8 +144,9 @@ impl RebalanceEngine {
     ) {
         Self::require_admin(&env, admin);
         Self::require_not_paused(&env);
+        Self::validate_allocations(&allocations);
 
-        let mut strategies = Self::get_strategies(&env);
+        let mut strategies = Self::get_strategies(env.clone());
         let mut found = false;
 
         for i in 0..strategies.len() {
@@ -173,12 +177,12 @@ impl RebalanceEngine {
     ) -> Vec<RebalanceProposal> {
         Self::require_not_paused(&env);
 
-        let strategy = Self::get_strategy(&env, strategy_id);
+        let strategy = Self::get_strategy(env.clone(), strategy_id);
         let mut proposals: Vec<RebalanceProposal> = Vec::new(&env);
 
         // Analyze each allocation in the strategy
         for allocation in strategy.allocations {
-            let current_apy = Self::get_pool_current_apy(&env, &allocation.pool_id);
+            let current_apy = allocation.current_apy;
             let target_apy = allocation.target_apy;
 
             // Check if rebalancing is needed
@@ -190,8 +194,8 @@ impl RebalanceEngine {
                     let proposal = RebalanceProposal {
                         from_pool: allocation.pool_id.clone(),
                         to_pool: better_pool.pool_id,
-                        amount_a: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
-                        amount_b: Self::estimate_rebalance_amount(&env, &allocation.pool_id),
+                        amount_a: allocation.allocation_percent as i128,
+                        amount_b: allocation.allocation_percent as i128,
                         expected_apy_improvement: better_pool.current_apy - current_apy,
                         estimated_gas_cost: Self::estimate_gas_cost(&env),
                         timestamp: env.ledger().timestamp(),
@@ -223,6 +227,12 @@ impl RebalanceEngine {
             success = true;
         }
 
+        let apy_after = if success {
+            Self::get_pool_current_apy(&env, &proposal.to_pool)
+        } else {
+            apy_before
+        };
+
         // Record in history
         let history_entry = RebalanceHistory {
             timestamp: env.ledger().timestamp(),
@@ -230,17 +240,33 @@ impl RebalanceEngine {
             to_pool: proposal.to_pool,
             amount_moved: proposal.amount_a + proposal.amount_b,
             apy_before,
-            apy_after: if success { 
-                Self::get_pool_current_apy(&env, &proposal.to_pool) 
-            } else { 
-                apy_before 
-            },
+            apy_after,
             success,
         };
 
         Self::add_to_history(&env, history_entry);
 
         success
+    }
+
+    /// Validate that allocations are non-empty, each within bounds (<= 10000 bps),
+    /// and that the percentages sum to exactly 10000 bps (100%).
+    fn validate_allocations(allocations: &Vec<PoolAllocation>) {
+        require!(!allocations.is_empty(), "allocations must not be empty");
+
+        let mut total_bps: u64 = 0;
+        for allocation in allocations.iter() {
+            require!(
+                allocation.allocation_percent <= 10000,
+                "allocation_percent must not exceed 10000 bps (100%)"
+            );
+            total_bps += allocation.allocation_percent as u64;
+        }
+
+        require!(
+            total_bps == 10000,
+            "allocations must sum to exactly 10000 bps (100%)"
+        );
     }
 
     /// Get all strategies
@@ -264,6 +290,11 @@ impl RebalanceEngine {
 
     /// Get rebalance history
     pub fn get_history(env: Env, limit: u32) -> Vec<RebalanceHistory> {
+        // A limit of 0 means no results should be returned
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+
         let history: Vec<RebalanceHistory> = env.storage()
             .instance()
             .get(&Symbol::new(&env, "history"))
@@ -289,24 +320,52 @@ impl RebalanceEngine {
         strategy.allocations
     }
 
-    /// Calculate impermanent loss for a pool
+    /// Calculate impermanent loss for a pool using the standard formula
+    /// `IL = 1 - 2 * sqrt(r) / (1 + r)`, where `r = current_price / entry_price`.
+    /// Returns the loss as basis points, capped at 10000 (100%).
+    ///
+    /// All arithmetic is scaled and multiplies-before-dividing so that the
+    /// integer division never truncates intermediate terms (avoiding the
+    /// discontinuous results of the previous `diff^2 / initial^2` approximation).
     pub fn calculate_impermanent_loss(
         env: Env,
         pool_id: Address,
         price_ratio: i128, // Current price ratio * 10000
         initial_price_ratio: i128, // Initial price ratio * 10000
     ) -> u32 {
-        // IL formula: 2 * sqrt(price_ratio) / (1 + price_ratio) - 1
-        // Simplified calculation for demonstration
-        let ratio_diff = (price_ratio - initial_price_ratio).abs();
-        let il_percent = (ratio_diff * ratio_diff) / (initial_price_ratio * initial_price_ratio / 10000);
-        
-        // Cap at 100% and convert to basis points
-        if il_percent > 10000 {
-            10000
-        } else {
-            il_percent as u32
+        if price_ratio <= 0 || initial_price_ratio <= 0 {
+            return 0;
         }
+
+        // r scaled by 10000: (current / entry) * 10000
+        let r_scaled = (price_ratio as i128 * 10000) / initial_price_ratio;
+
+        // sqrt(r) scaled by 10000 = sqrt(r_scaled * 10000)
+        let sqrt_r_scaled = Self::isqrt((r_scaled as u128) * 10000);
+
+        // term = (2 * sqrt(r) / (1 + r)) * 10000
+        let denominator = r_scaled as u128 + 10000;
+        let two_sqrt = sqrt_r_scaled * 2;
+        let term = (two_sqrt * 10000) / denominator;
+
+        // By AM-GM, 1 + r >= 2 * sqrt(r), so term <= 10000 always and
+        // `10000 - term` can never underflow. IL rises as the price diverges.
+        let il_bp = if term >= 10000 { 0 } else { 10000 - term };
+        il_bp.min(10000) as u32
+    }
+
+    /// Integer square root (Babylonian), returns floor(sqrt(n)).
+    fn isqrt(n: u128) -> u128 {
+        if n <= 1 {
+            return n;
+        }
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
+        }
+        x
     }
 
     /// Helper functions
@@ -319,10 +378,9 @@ impl RebalanceEngine {
         id
     }
 
-    fn get_pool_current_apy(env: &Env, pool_id: &Address) -> u32 {
-        // This would integrate with Stellar AMM to get real APY
-        // For demonstration, return a simulated value
-        1500 // 15% APY
+    fn get_pool_current_apy(_env: &Env, _pool_id: &Address) -> u32 {
+        // APY is supplied by the strategy's on-chain pool allocation.
+        0
     }
 
     fn find_better_pools(
@@ -332,27 +390,22 @@ impl RebalanceEngine {
     ) -> Vec<PoolAllocation> {
         let mut better_pools: Vec<PoolAllocation> = Vec::new(env);
         
-        // In production, this would query all available pools
-        // For demonstration, return a simulated better pool
-        if current_allocation.current_apy < strategy.min_apy_threshold {
-            better_pools.push_back(PoolAllocation {
-                pool_id: Address::generate(env),
-                token_a: current_allocation.token_a.clone(),
-                token_b: current_allocation.token_b.clone(),
-                allocation_percent: current_allocation.allocation_percent,
-                target_apy: current_allocation.target_apy + 500, // 5% higher
-                current_apy: current_allocation.current_apy + 600, // 6% higher
-                impermanent_loss_risk: current_allocation.impermanent_loss_risk,
-            });
+        // Only return pools already registered in the strategy allocations.
+        for candidate in strategy.allocations.iter() {
+            if candidate.pool_id != current_allocation.pool_id
+                && candidate.current_apy > current_allocation.current_apy
+                && candidate.current_apy - current_allocation.current_apy >= strategy.min_apy_threshold
+                && candidate.impermanent_loss_risk <= strategy.max_il_risk
+            {
+                better_pools.push_back(candidate);
+            }
         }
 
         better_pools
     }
 
-    fn estimate_rebalance_amount(env: &Env, pool_id: &Address) -> i128 {
-        // This would calculate the actual amount in the pool
-        // For demonstration, return a simulated value
-        1000000i128
+    fn estimate_rebalance_amount(_env: &Env, _pool_id: &Address) -> i128 {
+        0
     }
 
     fn estimate_gas_cost(env: &Env) -> i128 {
@@ -502,7 +555,12 @@ impl RebalanceEngine {
         opportunities
     }
 
-    /// Calculate the total cost of rebalancing including all fees
+    /// Calculate the total cost of rebalancing including all fees and return a
+    /// clear profitability decision.
+    ///
+    /// Returns `(total_cost, net_profit, is_profitable)` where `net_profit` is
+    /// `expected_profit - total_cost` and `is_profitable` is true when the net
+    /// profit is strictly greater than zero.
     pub fn calculate_rebalance_cost(
         env: Env,
         from_pool: Address,
@@ -511,7 +569,8 @@ impl RebalanceEngine {
         gas_estimate: i128,
         il_basis_points: u32,
         entry_fee_basis_points: u32,
-    ) -> (i128, i128) {
+        expected_profit: i128,
+    ) -> (i128, i128, bool) {
         // IL cost in absolute terms
         let il_cost = (amount * il_basis_points as i128) / 10000;
         
@@ -522,34 +581,50 @@ impl RebalanceEngine {
         let slippage_cost = (amount * 10i128) / 10000;
         let total_cost = gas_estimate + il_cost + entry_cost + slippage_cost;
 
-        // Profitability threshold: net profit must exceed 0
-        (total_cost, gas_estimate)
+        // Profitability threshold: net profit must exceed 0.
+        let net_profit = expected_profit - total_cost;
+        let is_profitable = net_profit > 0;
+
+        (total_cost, net_profit, is_profitable)
     }
 
     /// Execute atomic flash rebalance: withdraw → swap → deposit in single transaction
+    /// Cooldown is tracked per vault so one vault's rebalance does not block others.
     pub fn execute_flash_rebalance(
         env: Env,
         caller: Address,
+        vault_id: Address,
         opportunity: ArbitrageOpportunity,
         amount: i128,
     ) -> bool {
         Self::require_not_paused(&env);
 
-        // Check cooldown
-        let mut thresholds = Self::get_arbitrage_thresholds(env.clone());
-        let time_since_last = env.ledger().timestamp() - thresholds.last_rebalance_time;
-        
-        // Enforce 24h (86400s) cooldown per vault to prevent churn
+        // Check per-vault cooldown
+        let thresholds = Self::get_arbitrage_thresholds(env.clone());
+        let last_rebalance_times: Map<Address, u64> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "vault_last_rebalance_times"))
+            .unwrap_or(Map::new(&env));
+
+        let vault_last_time = last_rebalance_times.get(vault_id.clone()).unwrap_or(0u64);
+        let time_since_last = env.ledger().timestamp() - vault_last_time;
+
+        // Enforce cooldown per vault to prevent churn
         if time_since_last < thresholds.cooldown_period {
             return false;
         }
+
+        // The vault's real current pool, queried from the vault contract itself
+        // rather than fabricated - see #154.
+        let current_pool = YieldVaultClient::new(&env, &vault_id).get_vault_info().pool_id;
 
         // 1. Withdraw from current pool (atomic operation 1)
         let withdrawn = Self::perform_rebalance(
             &env,
             &RebalanceProposal {
-                from_pool: Address::generate(&env), // Current vault pool
-                to_pool: Address::generate(&env),
+                from_pool: current_pool.clone(),
+                to_pool: current_pool.clone(),
                 amount_a: amount,
                 amount_b: amount,
                 expected_apy_improvement: opportunity.apy_delta,
@@ -566,7 +641,7 @@ impl RebalanceEngine {
         let deposited = Self::perform_rebalance(
             &env,
             &RebalanceProposal {
-                from_pool: Address::generate(&env),
+                from_pool: current_pool,
                 to_pool: opportunity.pool_id,
                 amount_a: amount,
                 amount_b: amount,
@@ -577,9 +652,10 @@ impl RebalanceEngine {
         );
 
         if deposited {
-            // Update last rebalance timestamp
-            thresholds.last_rebalance_time = env.ledger().timestamp();
-            env.storage().instance().set(&Symbol::new(&env, "arbitrage_thresholds"), &thresholds);
+            // Update per-vault last rebalance timestamp
+            let mut times = last_rebalance_times;
+            times.set(vault_id, env.ledger().timestamp());
+            env.storage().instance().set(&Symbol::new(&env, "vault_last_rebalance_times"), &times);
         }
 
         deposited
@@ -599,7 +675,8 @@ impl RebalanceEngine {
                 && !history.get(2).unwrap().success;
             
             if all_losses {
-                Self::pause(env, Self::get_admin(env.clone()));
+                let admin = Self::get_admin(env.clone());
+                Self::pause(env, admin);
                 return true;
             }
         }

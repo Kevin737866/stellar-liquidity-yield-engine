@@ -1,5 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { VaultClient, VaultInfo, VaultMetrics, UserPosition, NetworkConfig } from 'stellar-liquidity-yield-engine-sdk';
+import {
+  createFreighterSigner,
+  getFreighterPublicKey,
+  isFreighterAvailable,
+  isFreighterConnected,
+} from '../lib/freighter';
 
 interface UseYieldVaultOptions {
   vaultAddress: string;
@@ -22,7 +28,31 @@ interface UseYieldVaultReturn {
   harvest: () => Promise<any>;
   getAPY: () => Promise<number>;
   getTVL: () => Promise<bigint>;
+  walletAddress: string | null;
+  walletConnected: boolean;
+  connecting: boolean;
+  connect: () => Promise<string | null>;
+  disconnect: () => void;
 }
+
+const networkConfigFor = (network: 'testnet' | 'mainnet'): NetworkConfig =>
+  ({
+    network,
+    horizonUrl:
+      network === 'mainnet'
+        ? 'https://horizon.stellar.org'
+        : 'https://horizon-testnet.stellar.org',
+    sorobanRpcUrl:
+      network === 'mainnet'
+        ? 'https://soroban.stellar.org'
+        : 'https://soroban-testnet.stellar.org',
+    contracts: {
+      yieldEngine: '',
+      rewardDistributor: '',
+      rebalanceEngine: '',
+      strategyRegistry: '',
+    },
+  } as NetworkConfig);
 
 export const useYieldVault = ({
   vaultAddress,
@@ -37,8 +67,16 @@ export const useYieldVault = ({
   const [isPaused, setIsPaused] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
 
-  const vaultClient = new VaultClient(vaultAddress, network);
+  const vaultClient = useMemo(
+    () => new VaultClient(vaultAddress, networkConfigFor(network)),
+    [vaultAddress, network]
+  );
+
+  // Use the Freighter address when connected, falling back to the prop.
+  const activeAddress = walletAddress || userAddress;
 
   const refresh = useCallback(async () => {
     try {
@@ -48,7 +86,7 @@ export const useYieldVault = ({
       const [info, metrics, position, paused] = await Promise.all([
         vaultClient.getVaultInfo(),
         vaultClient.getMetrics(),
-        vaultClient.getUserPosition(userAddress),
+        vaultClient.getUserPosition(activeAddress),
         vaultClient.isPaused()
       ]);
 
@@ -61,7 +99,52 @@ export const useYieldVault = ({
     } finally {
       setLoading(false);
     }
-  }, [vaultClient, userAddress]);
+  }, [vaultClient, activeAddress]);
+
+  const connect = useCallback(async (): Promise<string | null> => {
+    if (connecting) return walletAddress;
+
+    if (!isFreighterAvailable()) {
+      setError('Freighter wallet not found. Install the Freighter extension and try again.');
+      return null;
+    }
+
+    setConnecting(true);
+    setError(null);
+    try {
+      const publicKey = await getFreighterPublicKey();
+      setWalletAddress(publicKey);
+      await refresh();
+      return publicKey;
+    } catch (err: any) {
+      setError(err.message || 'Failed to connect to Freighter');
+      return null;
+    } finally {
+      setConnecting(false);
+    }
+  }, [connecting, walletAddress, refresh]);
+
+  const disconnect = useCallback(() => {
+    setWalletAddress(null);
+  }, []);
+
+  // Reflect Freighter's persisted connection state on mount.
+  useEffect(() => {
+    let cancelled = false;
+    isFreighterConnected()
+      .then(async (connected) => {
+        if (connected && !cancelled) {
+          const publicKey = await getFreighterPublicKey().catch(() => null);
+          if (publicKey && !cancelled) {
+            setWalletAddress(publicKey);
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const deposit = useCallback(async (
     amountA: bigint,
@@ -70,30 +153,27 @@ export const useYieldVault = ({
   ) => {
     try {
       setError(null);
-      
-      // This would need user's keypair - simplified for demo
-      // const result = await vaultClient.deposit(userKeyPair, {
-      //   amountA,
-      //   amountB,
-      //   minShares
-      // });
-      
-      // For demo purposes, return a mock result
-      const result = {
-        hash: `deposit_${Date.now()}`,
-        success: true,
-        gasUsed: 0
-      };
-      
+
+      if (!walletAddress) {
+        throw new Error('Connect a Freighter wallet before depositing.');
+      }
+
+      // Sign and submit a real deposit transaction through Freighter.
+      const result = await vaultClient.deposit(createFreighterSigner(network), {
+        amountA,
+        amountB,
+        minShares
+      });
+
       // Refresh data after successful deposit
       await refresh();
-      
+
       return result;
     } catch (err: any) {
       setError(err.message);
       throw err;
     }
-  }, [vaultClient, refresh]);
+  }, [vaultClient, refresh, walletAddress, network]);
 
   const withdraw = useCallback(async (
     shares: bigint,
@@ -102,56 +182,48 @@ export const useYieldVault = ({
   ) => {
     try {
       setError(null);
-      
-      // This would need user's keypair - simplified for demo
-      // const result = await vaultClient.withdraw(userKeyPair, {
-      //   shares,
-      //   minAmountA,
-      //   minAmountB
-      // });
-      
-      // For demo purposes, return a mock result
-      const result = {
-        hash: `withdraw_${Date.now()}`,
-        success: true,
-        gasUsed: 0,
-        amountA: minAmountA,
-        amountB: minAmountB
-      };
-      
+
+      if (!walletAddress) {
+        throw new Error('Connect a Freighter wallet before withdrawing.');
+      }
+
+      // Sign and submit a real withdrawal transaction through Freighter.
+      const result = await vaultClient.withdraw(createFreighterSigner(network), {
+        shares,
+        minAmountA,
+        minAmountB
+      });
+
       // Refresh data after successful withdrawal
       await refresh();
-      
+
       return result;
     } catch (err: any) {
       setError(err.message);
       throw err;
     }
-  }, [vaultClient, refresh]);
+  }, [vaultClient, refresh, walletAddress, network]);
 
   const harvest = useCallback(async () => {
     try {
       setError(null);
-      
-      // This would need user's keypair - simplified for demo
-      // const result = await vaultClient.harvest(userKeyPair);
-      
-      // For demo purposes, return a mock result
-      const result = {
-        hash: `harvest_${Date.now()}`,
-        success: true,
-        gasUsed: 0
-      };
-      
+
+      if (!walletAddress) {
+        throw new Error('Connect a Freighter wallet before harvesting.');
+      }
+
+      // Sign and submit a real harvest transaction through Freighter.
+      const result = await vaultClient.harvest(createFreighterSigner(network));
+
       // Refresh data after successful harvest
       await refresh();
-      
+
       return result;
     } catch (err: any) {
       setError(err.message);
       throw err;
     }
-  }, [vaultClient, refresh]);
+  }, [vaultClient, refresh, walletAddress, network]);
 
   const getAPY = useCallback(async () => {
     try {
@@ -201,7 +273,12 @@ export const useYieldVault = ({
     withdraw,
     harvest,
     getAPY,
-    getTVL
+    getTVL,
+    walletAddress,
+    walletConnected: !!walletAddress,
+    connecting,
+    connect,
+    disconnect
   };
 };
 

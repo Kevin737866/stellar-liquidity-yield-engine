@@ -245,7 +245,8 @@ Time: ${new Date(result.timestamp).toISOString()}
 
 /**
  * Cron-compatible entry point for scheduled execution
- * Usage: Add to crontab: */15 * * * * node dist/bots/autoRebalancer.js
+ * Usage: add a crontab entry that runs `node dist/bots/autoRebalancer.js`
+ * every 15 minutes, e.g. "/15 * * * *".
  */
 async function runScheduledRebalancer() {
   const config: RebalancerConfig = {
