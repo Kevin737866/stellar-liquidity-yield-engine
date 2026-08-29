@@ -5,8 +5,15 @@
  * Handles proposal creation, voting, fee claiming, and token delegation.
  */
 
-import { Server, Keypair, Transaction, xdr, scValToNative, nativeToScVal } from 'stellar-sdk';
-import { Contract } from './types';
+import { 
+  Keypair, 
+  SorobanRpc, 
+  Transaction, 
+  TransactionBuilder,
+  BASE_FEE,
+  scValToNative, 
+  Contract
+} from 'stellar-sdk';
 
 // ===== Configuration =====
 const GOVERNANCE_CONTRACT_ADDRESS = process.env.GOVERNANCE_CONTRACT || 'GOV_TOKEN_CONTRACT_ADDRESS';
@@ -97,16 +104,16 @@ export interface ProtocolParameters {
  * Governance SDK Client
  */
 export class GovernanceSDK {
-  private server: Server;
+  private server: SorobanRpc.Server;
   private networkPassphrase: string;
   private keypair?: Keypair;
 
   constructor(
-    server: Server,
+    sorobanRpcUrl: string,
     networkPassphrase: string,
     keypair?: Keypair
   ) {
-    this.server = server;
+    this.server = new SorobanRpc.Server(sorobanRpcUrl);
     this.networkPassphrase = networkPassphrase;
     this.keypair = keypair;
   }
@@ -897,34 +904,35 @@ export class GovernanceSDK {
     functionName: string,
     args: Record<string, any>
   ): Promise<any> {
-    // This would use Soroban-RPC simulateTransaction in production
-    // Placeholder for SDK simulation
-    const account = await this.server.loadAccount(this.keypair!.publicKey());
-    
-    const transaction = new TransactionBuilder(account, {
-      fee: '100',
-      networkPassphrase: this.networkPassphrase
-    })
-      .addOperation(Operation.invokeContractFunction({
-        contract: contractAddress,
-        method: functionName,
-        args: Object.entries(args).map(([key, value]) => 
-          new xdr.ScVal(xdr.ScValType.scvMap([])) // Simplified
-        )
-      }))
-      .setTimeout(30)
-      .build();
+    const contract = new Contract(contractAddress);
 
-    try {
-      const result = await this.server.simulateTransaction(transaction);
-      if (result.results && result.results.length > 0) {
-        return scValToNative(result.results[0].retval);
-      }
-      return null;
-    } catch (error) {
-      console.log('Simulation call failed, returning mock data');
-      return null;
+    const simResult = await this.server.simulateTransaction(
+      new TransactionBuilder(
+        await this.server.getAccount(
+          'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'
+        ),
+        {
+          fee: BASE_FEE,
+          networkPassphrase: this.networkPassphrase
+        }
+      )
+        .addOperation(
+          contract.call(
+            functionName,
+            ...Object.entries(args).map(([, value]) => value)
+          )
+        )
+        .build()
+    );
+
+    if (
+      simResult.result &&
+      (simResult.result as any).status === 'SUCCESS' &&
+      (simResult.result as any).returnValue
+    ) {
+      return scValToNative((simResult.result as any).returnValue);
     }
+    return null;
   }
 
   /**
@@ -935,25 +943,23 @@ export class GovernanceSDK {
     functionName: string,
     args: Record<string, any>
   ): Promise<Transaction> {
-    const account = await this.server.loadAccount(this.keypair!.publicKey());
+    const contract = new Contract(contractAddress);
+    const account = await this.server.getAccount(this.keypair!.publicKey());
 
-    const operation = Operation.invokeContractFunction({
-      contract: contractAddress,
-      method: functionName,
-      args: Object.entries(args).map(([key, value]) => 
-        nativeToScVal(value)
-      )
-    });
-
-    const transaction = new TransactionBuilder(account, {
-      fee: '5000', // 0.005 XLM
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
       networkPassphrase: this.networkPassphrase
     })
-      .addOperation(operation)
-      .setTimeout(180) // 3 minutes
+      .addOperation(
+        contract.call(
+          functionName,
+          ...Object.entries(args).map(([, value]) => value)
+        )
+      )
+      .setTimeout(180)
       .build();
 
-    return transaction;
+    return tx;
   }
 
   /**
