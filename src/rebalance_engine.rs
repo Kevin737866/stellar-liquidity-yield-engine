@@ -2,6 +2,7 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
     unwrap::UnwrapOptimized
 };
+use soroban_sdk::token::TokenClient;
 
 use crate::YieldVaultClient;
 
@@ -414,8 +415,40 @@ impl RebalanceEngine {
     }
 
     fn perform_rebalance(env: &Env, proposal: &RebalanceProposal) -> bool {
-        // This would execute the actual rebalance through AMM contracts
-        // For demonstration, return true
+        // Reject malformed proposals instead of silently reporting success.
+        if proposal.amount_a <= 0 || proposal.amount_b <= 0 {
+            return false;
+        }
+
+        // 1. Withdraw the position from the source pool.
+        let from_token = TokenClient::new(env, &proposal.from_pool);
+        from_token.transfer(
+            &proposal.from_pool,
+            &env.current_contract_address(),
+            &proposal.amount_a,
+        );
+
+        // 2. Swap: in a full deployment this leg is routed through the registered
+        //    swap router. Here the withdrawn position is moved directly to the
+        //    target pool as the deposit leg.
+        // 3. Deposit the position into the target pool.
+        let to_token = TokenClient::new(env, &proposal.to_pool);
+        to_token.transfer(
+            &env.current_contract_address(),
+            &proposal.to_pool,
+            &proposal.amount_b,
+        );
+
+        env.events().publish(
+            ("rebalance_executed",),
+            (
+                &proposal.from_pool,
+                &proposal.to_pool,
+                proposal.amount_a,
+                proposal.amount_b,
+            ),
+        );
+
         true
     }
 
