@@ -5,6 +5,13 @@ export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
 export { ArbitrageScanner, ArbitrageExecutor, ArbitrageOptimizer } from './arbitrage';
+
+// Issue #130: Strategy registry client for fetching active strategies.
+// A dedicated on-chain registry contract is not yet deployed, so this client
+// constructs sensible default strategies from the SDK's YieldStrategy type.
+// When a real registry contract is available, replace `fetchActiveStrategies`
+// with a contract call to `get_active_strategies`.
+export { StrategyRegistryClient } from './strategyRegistryClient';
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
 // Governance SDK exports

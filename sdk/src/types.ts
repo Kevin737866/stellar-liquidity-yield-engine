@@ -343,6 +343,68 @@ export interface PaginationOptions {
   order?: 'asc' | 'desc';
 }
 
+// Performance History Types (Issue #128)
+
+/**
+ * A snapshot of vault performance at a point in time, derived from harvest
+ * events. Used by `VaultClient.getPerformanceHistory()`.
+ */
+export interface PerformanceSnapshot {
+  /** Unix timestamp (seconds) when the snapshot was recorded */
+  timestamp: number;
+  /** APY in basis points at the time of the snapshot */
+  apy: number;
+  /** Total value locked at the time of the snapshot */
+  tvl: bigint;
+  /** Amount harvested in this event (in smallest token units) */
+  harvestAmount: bigint;
+}
+
+/**
+ * A single raw harvest event returned by `VaultClient.getHarvestHistory()`.
+ */
+export interface HarvestEvent {
+  /** Unix timestamp (seconds) of the harvest */
+  timestamp: number;
+  /** Total rewards collected during this harvest */
+  rewardsHarvested: bigint;
+  /** Gas units consumed by this harvest transaction */
+  gasUsed: number;
+  /** Transaction hash of the harvest */
+  txHash: string;
+}
+
+/**
+ * An impermanent loss snapshot derived from on-chain price data.
+ * Returned by `VaultClient.getILHistory()`.
+ */
+export interface ILSnapshot {
+  /** Unix timestamp (seconds) of the measurement */
+  timestamp: number;
+  /** IL as a percentage (negative means loss) */
+  ilPercent: number;
+  /** Token B / Token A price ratio at this point in time */
+  priceRatio: number;
+}
+
+/**
+ * Aggregate harvest efficiency metrics computed by
+ * `YieldCalculator.calculateHarvestEfficiency()`.
+ */
+export interface HarvestEfficiencyMetrics {
+  /** Sum of all rewards harvested across all events */
+  totalRewards: bigint;
+  /** Sum of all gas used across all harvest events */
+  totalGas: number;
+  /**
+   * Ratio of rewards to gas cost. Higher is better.
+   * Computed as: Number(totalRewards) / totalGas (or 0 when totalGas === 0)
+   */
+  efficiencyRatio: number;
+  /** Average gas consumed per individual harvest */
+  avgGasPerHarvest: number;
+}
+
 // Event Types
 export interface VaultEvent {
   type: 'deposit' | 'withdraw' | 'harvest' | 'pause' | 'unpause';
