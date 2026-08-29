@@ -177,7 +177,7 @@ impl SwapRouter {
         pool_address: Address,
         reserve_a: i128,
         reserve_b: i128,
-    ) {
+    ) -> Result<(), SwapError> {
         let mut pools = Self::get_pools(&env);
         
         if let Some(mut pool) = pools.get(&pool_address) {
@@ -185,6 +185,9 @@ impl SwapRouter {
             pool.reserve_b = reserve_b;
             pools.set(pool_address, pool);
             env.storage().instance().set(&Symbol::new(&env, "pools"), &pools);
+            Ok(())
+        } else {
+            Err(SwapError::NoPoolFound)
         }
     }
 
