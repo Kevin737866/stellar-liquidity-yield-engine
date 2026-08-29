@@ -10,7 +10,7 @@
 //! - 10% Liquidity Mining
 
 use soroban_sdk::{
-    contract, contractimpl, contractmeta, Address, Env, Map, String, Vec,
+    contract, contractimpl, contractmeta, contracttype, Address, Env, Map, String, Vec,
     BigInt, Val,
 };
 use soroban_sdk::token::TokenClient;
@@ -52,7 +52,7 @@ const MIN_VOTE_DURATION: u64 = 604800; // 1 week in seconds
 
 // ===== Proposal States =====
 #[contracttype]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProposalState {
     Pending = 0,
     Active = 1,
@@ -66,7 +66,7 @@ pub enum ProposalState {
 
 // ===== Call Data for Proposals =====
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallData {
     pub contract_address: Address,
     pub function_name: Symbol,
@@ -75,7 +75,7 @@ pub struct CallData {
 
 // ===== Governance Proposal =====
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GovernanceProposal {
     pub proposer: Address,
     pub description: String,
