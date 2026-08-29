@@ -6,7 +6,10 @@ import {
   PoolInfo,
   TokenInfo,
   PriceData,
-  TimeInterval
+  TimeInterval,
+  PerformanceSnapshot,
+  HarvestEvent,
+  HarvestEfficiencyMetrics
 } from './types';
 
 export class YieldCalculator {
@@ -416,6 +419,86 @@ export class YieldCalculator {
       worstCaseIl,
       bestCaseIl,
       ilDistribution: ilResults
+    };
+  }
+
+  /**
+   * Compute the compound APY from a series of `PerformanceSnapshot` records.
+   *
+   * Each snapshot contributes its `apy` (in basis points) weighted by the
+   * elapsed time between consecutive snapshots. If fewer than two snapshots
+   * are provided the raw APY of the single snapshot is returned; an empty
+   * array returns 0.
+   *
+   * Issue #128.
+   */
+  static calculateHistoricalAPY(snapshots: PerformanceSnapshot[]): number {
+    if (snapshots.length === 0) return 0;
+    if (snapshots.length === 1) return snapshots[0].apy;
+
+    // Sort ascending by timestamp so time-weighting is correct.
+    const sorted = [...snapshots].sort((a, b) => a.timestamp - b.timestamp);
+
+    const totalPeriodSeconds =
+      sorted[sorted.length - 1].timestamp - sorted[0].timestamp;
+
+    if (totalPeriodSeconds <= 0) {
+      // All snapshots at the same timestamp — plain average.
+      const avg =
+        sorted.reduce((sum, s) => sum + s.apy, 0) / sorted.length;
+      return Math.round(avg);
+    }
+
+    // Time-weighted compound APY.
+    // For each interval [i, i+1] compute the per-second rate from the
+    // average APY of the two bounding snapshots, then chain-multiply.
+    let compoundFactor = 1;
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const intervalSeconds = sorted[i + 1].timestamp - sorted[i].timestamp;
+      const avgApyBps = (sorted[i].apy + sorted[i + 1].apy) / 2;
+      const annualRate = avgApyBps / 10000; // convert basis points → fraction
+      const intervalYears = intervalSeconds / (365.25 * 24 * 3600);
+      compoundFactor *= Math.pow(1 + annualRate, intervalYears);
+    }
+
+    // Back-convert to annual basis points.
+    const annualisedDecimal = Math.pow(compoundFactor, 1 / (totalPeriodSeconds / (365.25 * 24 * 3600))) - 1;
+    return Math.round(annualisedDecimal * 10000);
+  }
+
+  /**
+   * Compute aggregate harvest efficiency metrics from a list of
+   * `HarvestEvent` records.
+   *
+   * Returns zeros for all fields when the list is empty so callers don't
+   * need to guard against undefined.
+   *
+   * Issue #128.
+   */
+  static calculateHarvestEfficiency(harvests: HarvestEvent[]): HarvestEfficiencyMetrics {
+    if (harvests.length === 0) {
+      return {
+        totalRewards: 0n,
+        totalGas: 0,
+        efficiencyRatio: 0,
+        avgGasPerHarvest: 0
+      };
+    }
+
+    const totalRewards = harvests.reduce(
+      (sum, h) => sum + h.rewardsHarvested,
+      0n
+    );
+    const totalGas = harvests.reduce((sum, h) => sum + h.gasUsed, 0);
+    const efficiencyRatio =
+      totalGas > 0 ? Number(totalRewards) / totalGas : 0;
+    const avgGasPerHarvest = totalGas / harvests.length;
+
+    return {
+      totalRewards,
+      totalGas,
+      efficiencyRatio,
+      avgGasPerHarvest
     };
   }
 

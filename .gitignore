@@ -1,5 +1,6 @@
 # Rust
 /target/
+target/
 **/*.rs.bk
 Cargo.lock
 
@@ -17,6 +18,7 @@ build/
 # Environment variables
 .env
 .env.local
+.env.*.local
 .env.development.local
 .env.test.local
 .env.production.local
@@ -47,11 +49,9 @@ pids
 *.seed
 *.pid.lock
 
-# Coverage directory used by tools like istanbul
+# Coverage
 coverage/
 *.lcov
-
-# nyc test coverage
 .nyc_output
 
 # Dependency directories
@@ -72,7 +72,7 @@ jspm_packages/
 # Yarn Integrity file
 .yarn-integrity
 
-# parcel-bundler cache (https://parceljs.org/)
+# parcel-bundler cache
 .cache
 .parcel-cache
 
@@ -104,6 +104,14 @@ jspm_packages/
 tmp/
 temp/
 
+# Temporary files
+*.tmp
+*.temp
+*.tempname
+*.bak
+*.backup
+*.old
+
 # Wasm files
 *.wasm
 *.wat
@@ -112,35 +120,16 @@ temp/
 soroban/
 .example/
 
-# Test files (except root integration tests)
-test/
-__tests__/
-**/__tests__/
+# Test snapshots
 **/__snapshots__/
 *.snap
-
-# Documentation build
-docs/_build/
-
-# Backup files
-*.bak
-*.backup
-*.old
-
-# Soroban test snapshots
 /test_snapshots/
 **/test_snapshots/
 
+# Test directories (except root integration tests)
+test/
+__tests__/
+**/__tests__/
 
-# Additional entries (issues #141-144)
-# Catch build artifacts regardless of path prefix
-target/
-dist/
-build/
-
-# Wildcard env files
-.env.*.local
-
-# Temporary files
-*.tmp
-*.temp
+# Documentation build
+docs/_build/

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -7,17 +7,39 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { 
   ArrowRightLeft, 
   TrendingUp, 
-  Clock, 
-  DollarSign, 
   Activity,
   CheckCircle,
+  CheckCircle2,
   XCircle,
-  AlertCircle
+  AlertCircle,
+  Loader2
 } from 'lucide-react';
-import { RebalancerClient, RebalanceStrategy, RebalanceHistory, PoolAllocation } from 'stellar-liquidity-yield-engine-sdk';
+import { RebalancerClient, RebalanceStrategy, RebalanceHistory, PoolAllocation, RebalanceProposal, NetworkConfig } from 'stellar-liquidity-yield-engine-sdk';
+import { useTxStatus } from '../hooks/useTxStatus';
 
 interface RebalancePanelProps {
   network?: 'testnet' | 'mainnet';
+}
+
+/** Build a minimal `NetworkConfig` from a network string. */
+function networkConfigFor(network: 'testnet' | 'mainnet'): NetworkConfig {
+  return {
+    network,
+    horizonUrl:
+      network === 'mainnet'
+        ? 'https://horizon.stellar.org'
+        : 'https://horizon-testnet.stellar.org',
+    sorobanRpcUrl:
+      network === 'mainnet'
+        ? 'https://soroban.stellar.org'
+        : 'https://soroban-testnet.stellar.org',
+    contracts: {
+      yieldEngine: '',
+      rewardDistributor: '',
+      rebalanceEngine: '',
+      strategyRegistry: '',
+    },
+  } as NetworkConfig;
 }
 
 export const RebalancePanel: React.FC<RebalancePanelProps> = ({
@@ -25,12 +47,19 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
 }) => {
   const [strategies, setStrategies] = useState<RebalanceStrategy[]>([]);
   const [history, setHistory] = useState<RebalanceHistory[]>([]);
+  const [proposals, setProposals] = useState<RebalanceProposal[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<RebalanceStrategy | null>(null);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const rebalancerClient = new RebalancerClient(network);
+  const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
+
+  // Fix: RebalancerClient takes NetworkConfig, not a plain string.
+  const rebalancerClient = useMemo(
+    () => new RebalancerClient(networkConfigFor(network)),
+    [network]
+  );
 
   useEffect(() => {
     loadData();
@@ -66,8 +95,8 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
       setAnalyzing(true);
       setError(null);
       
-      const proposals = await rebalancerClient.analyzeRebalanceOpportunities(selectedStrategy.strategyId);
-      console.log('Rebalance proposals:', proposals);
+      const result = await rebalancerClient.analyzeRebalanceOpportunities(selectedStrategy.strategyId);
+      setProposals(result);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -75,17 +104,24 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
     }
   };
 
-  const handleExecuteRebalance = async (proposal: any) => {
-    try {
-      setError(null);
-      // This would need user's keypair - simplified for demo
-      // await rebalancerClient.executeRebalance(userKeyPair, proposal);
-      
-      // Refresh data after successful execution
+  const handleExecuteRebalance = async (proposal: RebalanceProposal) => {
+    resetTx();
+    setError(null);
+
+    await runTx(async () => {
+      // executeRebalance requires a keypair/signer. In a real deployment
+      // this would be a Freighter signer. We pass a placeholder here so the
+      // call reaches the SDK and returns a TransactionResult with a hash.
+      // Replace `null` with `createFreighterSigner(network)` when a wallet
+      // is wired in.
+      const result = await rebalancerClient.executeRebalance(null as any, proposal);
       await loadData();
-    } catch (err: any) {
-      setError(err.message);
-    }
+      return {
+        hash: result.hash,
+        success: result.success,
+        error: result.error
+      };
+    });
   };
 
   const getRiskLevelColor = (riskLevel: number) => {
@@ -105,6 +141,8 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
       default: return 'Unknown';
     }
   };
+
+  const isTxInFlight = txStatus === 'submitting' || txStatus === 'pending';
 
   if (loading) {
     return (
@@ -177,27 +215,71 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
             </div>
 
             {selectedStrategy && (
-              <div className="flex gap-3">
-                <Button 
-                  onClick={handleAnalyzeOpportunities}
-                  disabled={analyzing}
-                  className="flex-1"
-                >
-                  {analyzing ? (
-                    <>
-                      <Activity className="h-4 w-4 mr-2 animate-spin" />
-                      Analyzing...
-                    </>
-                  ) : (
-                    <>
-                      <TrendingUp className="h-4 w-4 mr-2" />
-                      Analyze Opportunities
-                    </>
-                  )}
-                </Button>
-                <Button onClick={loadData} variant="outline">
-                  Refresh
-                </Button>
+              <div className="space-y-4">
+                <div className="flex gap-3">
+                  <Button 
+                    onClick={handleAnalyzeOpportunities}
+                    disabled={analyzing || isTxInFlight}
+                    className="flex-1"
+                  >
+                    {analyzing ? (
+                      <>
+                        <Activity className="h-4 w-4 mr-2 animate-spin" />
+                        Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <TrendingUp className="h-4 w-4 mr-2" />
+                        Analyze Opportunities
+                      </>
+                    )}
+                  </Button>
+                  <Button onClick={loadData} variant="outline" disabled={isTxInFlight}>
+                    Refresh
+                  </Button>
+                </div>
+
+                {/* Rebalance proposals */}
+                {proposals.length > 0 && (
+                  <div className="space-y-3">
+                    <h4 className="font-semibold text-sm text-gray-700">
+                      {proposals.length} rebalance proposal{proposals.length !== 1 ? 's' : ''} found
+                    </h4>
+                    {proposals.map((proposal, idx) => (
+                      <Card key={idx} className="border-blue-200">
+                        <CardContent className="p-4">
+                          <div className="flex items-center justify-between">
+                            <div className="text-sm space-y-1">
+                              <div>
+                                <span className="text-gray-500">Expected APY improvement: </span>
+                                <span className="font-semibold text-green-600">
+                                  +{(proposal.expectedApyImprovement / 100).toFixed(2)}%
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-gray-500">Est. gas: </span>
+                                <span className="font-semibold">
+                                  {Number(proposal.estimatedGasCost).toLocaleString()}
+                                </span>
+                              </div>
+                            </div>
+                            <Button
+                              size="sm"
+                              onClick={() => handleExecuteRebalance(proposal)}
+                              disabled={isTxInFlight}
+                            >
+                              {isTxInFlight ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                'Execute'
+                              )}
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </TabsContent>
@@ -300,6 +382,52 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
             </div>
           </TabsContent>
         </Tabs>
+
+        {/* Transaction Status Banner */}
+        {txStatus !== 'idle' && (
+          <div className={`mt-4 rounded-md p-3 border text-sm ${
+            txStatus === 'confirmed'
+              ? 'bg-green-50 border-green-200 text-green-700'
+              : txStatus === 'failed'
+              ? 'bg-red-50 border-red-200 text-red-600'
+              : 'bg-blue-50 border-blue-200 text-blue-700'
+          }`}>
+            <div className="flex items-center gap-2">
+              {(txStatus === 'submitting' || txStatus === 'pending') && (
+                <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" />
+              )}
+              {txStatus === 'confirmed' && (
+                <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+              )}
+              {txStatus === 'failed' && (
+                <XCircle className="h-4 w-4 flex-shrink-0" />
+              )}
+
+              <span className="font-medium">
+                {txStatus === 'submitting' && 'Submitting rebalance transaction…'}
+                {txStatus === 'pending' && 'Waiting for confirmation…'}
+                {txStatus === 'confirmed' && 'Rebalance confirmed'}
+                {txStatus === 'failed' && (txError ?? 'Rebalance failed')}
+              </span>
+
+              {txHash && (
+                <span className="ml-auto font-mono text-xs truncate max-w-[160px]" title={txHash}>
+                  {txHash.slice(0, 8)}…{txHash.slice(-6)}
+                </span>
+              )}
+
+              {(txStatus === 'confirmed' || txStatus === 'failed') && (
+                <button
+                  onClick={resetTx}
+                  className="ml-2 underline text-xs opacity-70 hover:opacity-100"
+                  type="button"
+                >
+                  Dismiss
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (

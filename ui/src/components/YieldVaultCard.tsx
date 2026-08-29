@@ -3,8 +3,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { TrendingUp, TrendingDown, DollarSign, Activity, Lock, Unlock, Wallet } from 'lucide-react';
+import { TrendingUp, TrendingDown, DollarSign, Activity, Lock, Unlock, Wallet, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { useYieldVault } from '../hooks/useYieldVault';
+import { useTxStatus } from '../hooks/useTxStatus';
 import { shortenAddress } from '../lib/freighter';
 
 interface YieldVaultCardProps {
@@ -22,6 +23,8 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   const [depositAmountB, setDepositAmountB] = useState('');
   const [withdrawShares, setWithdrawShares] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
 
   const {
     vaultInfo,
@@ -53,36 +56,37 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
 
   const handleDeposit = async () => {
     if (!depositAmountA || !depositAmountB) return;
+    resetTx();
+    setError(null);
 
-    try {
-      setError(null);
-      await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
+    await runTx(async () => {
+      const result = await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
       setDepositAmountA('');
       setDepositAmountB('');
-    } catch (err: any) {
-      setError(err.message);
-    }
+      return result;
+    });
   };
 
   const handleWithdraw = async () => {
     if (!withdrawShares) return;
+    resetTx();
+    setError(null);
 
-    try {
-      setError(null);
-      await withdraw(BigInt(withdrawShares), 0n, 0n);
+    await runTx(async () => {
+      const result = await withdraw(BigInt(withdrawShares), 0n, 0n);
       setWithdrawShares('');
-    } catch (err: any) {
-      setError(err.message);
-    }
+      return result;
+    });
   };
 
   const handleHarvest = async () => {
-    try {
-      setError(null);
-      await harvest();
-    } catch (err: any) {
-      setError(err.message);
-    }
+    resetTx();
+    setError(null);
+
+    await runTx(async () => {
+      const result = await harvest();
+      return result;
+    });
   };
 
   if (loading) {
@@ -115,6 +119,8 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   const userValue = userShares > 0n && vaultMetrics.totalShares > 0n 
     ? (Number(userShares) / Number(vaultMetrics.totalShares)) * Number(vaultMetrics.tvl)
     : 0;
+
+  const isTxInFlight = txStatus === 'submitting' || txStatus === 'pending';
 
   return (
     <Card className="w-full max-w-2xl mx-auto">
@@ -229,7 +235,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                   placeholder="0"
                   value={depositAmountA}
                   onChange={(e) => setDepositAmountA(e.target.value)}
-                  disabled={isPaused}
+                  disabled={isPaused || isTxInFlight}
                 />
               </div>
               <div>
@@ -239,16 +245,18 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                   placeholder="0"
                   value={depositAmountB}
                   onChange={(e) => setDepositAmountB(e.target.value)}
-                  disabled={isPaused}
+                  disabled={isPaused || isTxInFlight}
                 />
               </div>
             </div>
             <Button 
               onClick={handleDeposit} 
-              disabled={!depositAmountA || !depositAmountB || isPaused || !walletConnected}
+              disabled={!depositAmountA || !depositAmountB || isPaused || !walletConnected || isTxInFlight}
               className="w-full"
             >
-              Deposit
+              {isTxInFlight ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
+              ) : 'Deposit'}
             </Button>
           </div>
         </div>
@@ -264,16 +272,18 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 placeholder="0"
                 value={withdrawShares}
                 onChange={(e) => setWithdrawShares(e.target.value)}
-                disabled={isPaused || userShares === 0n}
+                disabled={isPaused || userShares === 0n || isTxInFlight}
               />
             </div>
             <Button 
               onClick={handleWithdraw} 
-              disabled={!withdrawShares || isPaused || userShares === 0n || !walletConnected}
+              disabled={!withdrawShares || isPaused || userShares === 0n || !walletConnected || isTxInFlight}
               variant="outline"
               className="w-full"
             >
-              Withdraw
+              {isTxInFlight ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
+              ) : 'Withdraw'}
             </Button>
           </div>
         </div>
@@ -282,20 +292,69 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
         <div className="flex gap-3">
           <Button 
             onClick={handleHarvest} 
-            disabled={isPaused || !walletConnected}
+            disabled={isPaused || !walletConnected || isTxInFlight}
             variant="secondary"
             className="flex-1"
           >
-            Harvest Rewards
+            {isTxInFlight ? (
+              <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
+            ) : 'Harvest Rewards'}
           </Button>
           <Button 
             onClick={refresh}
             variant="outline"
             className="flex-1"
+            disabled={isTxInFlight}
           >
             Refresh
           </Button>
         </div>
+
+        {/* Transaction Status Banner */}
+        {txStatus !== 'idle' && (
+          <div className={`rounded-md p-3 border text-sm ${
+            txStatus === 'confirmed'
+              ? 'bg-green-50 border-green-200 text-green-700'
+              : txStatus === 'failed'
+              ? 'bg-red-50 border-red-200 text-red-600'
+              : 'bg-blue-50 border-blue-200 text-blue-700'
+          }`}>
+            <div className="flex items-center gap-2">
+              {(txStatus === 'submitting' || txStatus === 'pending') && (
+                <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" />
+              )}
+              {txStatus === 'confirmed' && (
+                <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+              )}
+              {txStatus === 'failed' && (
+                <XCircle className="h-4 w-4 flex-shrink-0" />
+              )}
+
+              <span className="font-medium">
+                {txStatus === 'submitting' && 'Submitting transaction…'}
+                {txStatus === 'pending' && 'Waiting for confirmation…'}
+                {txStatus === 'confirmed' && 'Transaction confirmed'}
+                {txStatus === 'failed' && (txError ?? 'Transaction failed')}
+              </span>
+
+              {txHash && (
+                <span className="ml-auto font-mono text-xs truncate max-w-[160px]" title={txHash}>
+                  {txHash.slice(0, 8)}…{txHash.slice(-6)}
+                </span>
+              )}
+
+              {(txStatus === 'confirmed' || txStatus === 'failed') && (
+                <button
+                  onClick={resetTx}
+                  className="ml-2 underline text-xs opacity-70 hover:opacity-100"
+                  type="button"
+                >
+                  Dismiss
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (
