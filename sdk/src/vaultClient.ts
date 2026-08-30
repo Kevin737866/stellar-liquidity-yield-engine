@@ -48,7 +48,8 @@ export class VaultClient {
     options?: TransactionOptions
   ): Promise<TransactionResult> {
     try {
-      const account = await this.server.getAccount(await this.resolvePublicKey(userKeyPair));
+      const userAddress = await this.resolvePublicKey(userKeyPair);
+      const account = await this.server.getAccount(userAddress);
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -57,7 +58,7 @@ export class VaultClient {
         .addOperation(
           this.contract.call(
             'deposit',
-            ...this.prepareDepositArgs(params)
+            ...this.prepareDepositArgs(userAddress, params)
           )
         )
         .setTimeout(options?.timeout || 30)
@@ -96,7 +97,8 @@ export class VaultClient {
     options?: TransactionOptions
   ): Promise<TransactionResult & { amountA: bigint; amountB: bigint }> {
     try {
-      const account = await this.server.getAccount(await this.resolvePublicKey(userKeyPair));
+      const userAddress = await this.resolvePublicKey(userKeyPair);
+      const account = await this.server.getAccount(userAddress);
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -105,7 +107,7 @@ export class VaultClient {
         .addOperation(
           this.contract.call(
             'withdraw',
-            ...this.prepareWithdrawArgs(params)
+            ...this.prepareWithdrawArgs(userAddress, params)
           )
         )
         .setTimeout(options?.timeout || 30)
@@ -163,13 +165,14 @@ export class VaultClient {
     options?: TransactionOptions
   ): Promise<TransactionResult> {
     try {
-      const account = await this.server.getAccount(await this.resolvePublicKey(userKeyPair));
+      const userAddress = await this.resolvePublicKey(userKeyPair);
+      const account = await this.server.getAccount(userAddress);
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
         networkPassphrase: this.getNetworkPassphrase()
       })
-        .addOperation(this.contract.call('harvest'))
+        .addOperation(this.contract.call('harvest', userAddress))
         .setTimeout(options?.timeout || 30)
         .build();
 
@@ -668,16 +671,18 @@ export class VaultClient {
     }
   }
 
-  private prepareDepositArgs(params: DepositParams): any[] {
+  private prepareDepositArgs(user: string, params: DepositParams): any[] {
     return [
+      user,
       params.amountA.toString(),
       params.amountB.toString(),
       params.minShares.toString()
     ];
   }
 
-  private prepareWithdrawArgs(params: WithdrawParams): any[] {
+  private prepareWithdrawArgs(user: string, params: WithdrawParams): any[] {
     return [
+      user,
       params.shares.toString(),
       params.minAmountA.toString(),
       params.minAmountB.toString()

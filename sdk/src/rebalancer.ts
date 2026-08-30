@@ -180,7 +180,7 @@ export class RebalancerClient {
     userKeyPair: any,
     proposal: RebalanceProposal,
     options?: TransactionOptions
-  ): Promise<TransactionResult & { success: boolean }> {
+  ): Promise<TransactionResult & { executed: boolean }> {
     try {
       const account = await this.server.getAccount(userKeyPair.publicKey());
       
@@ -203,13 +203,13 @@ export class RebalancerClient {
       
       if (result.status === 'SUCCESS') {
         const txResult = await waitForTransaction(this.server, result.hash);
-        const success = Boolean(txResult.result!.returnValue);
+        const executed = Boolean(txResult.result!.returnValue);
         
         return {
           hash: result.hash,
           success: true,
           gasUsed: 0,
-          success: success
+          executed
         };
       } else {
         return {
@@ -217,7 +217,7 @@ export class RebalancerClient {
           success: false,
           gasUsed: 0,
           error: result.errorResult,
-          success: false
+          executed: false
         };
       }
     } catch (error: any) {
