@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { TrendingUp, TrendingDown, DollarSign, Activity, Lock, Unlock } from 'lucide-react';
-import { VaultClient, VaultInfo, VaultMetrics, UserPosition } from 'stellar-liquidity-yield-engine-sdk';
+import { TrendingUp, TrendingDown, DollarSign, Activity, Lock, Unlock, Wallet, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { useYieldVault } from '../hooks/useYieldVault';
+import { useTxStatus } from '../hooks/useTxStatus';
+import { shortenAddress } from '../lib/freighter';
 
 interface YieldVaultCardProps {
   vaultAddress: string;
@@ -17,97 +19,74 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   userAddress,
   network = 'testnet'
 }) => {
-  const [vaultInfo, setVaultInfo] = useState<VaultInfo | null>(null);
-  const [vaultMetrics, setVaultMetrics] = useState<VaultMetrics | null>(null);
-  const [userPosition, setUserPosition] = useState<UserPosition | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [depositAmountA, setDepositAmountA] = useState('');
   const [depositAmountB, setDepositAmountB] = useState('');
   const [withdrawShares, setWithdrawShares] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const vaultClient = new VaultClient(vaultAddress, network === 'testnet' ? 'testnet' : 'mainnet');
+  const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
 
-  useEffect(() => {
-    loadVaultData();
-  }, [vaultAddress, userAddress]);
+  const {
+    vaultInfo,
+    vaultMetrics,
+    userPosition,
+    isPaused,
+    loading,
+    error: hookError,
+    refresh,
+    deposit,
+    withdraw,
+    harvest,
+    walletAddress,
+    walletConnected,
+    connecting,
+    connect,
+    disconnect,
+  } = useYieldVault({
+    vaultAddress,
+    userAddress,
+    network,
+    autoRefresh: true,
+    refreshInterval: 30000,
+  });
 
-  const loadVaultData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const [info, metrics, position, paused] = await Promise.all([
-        vaultClient.getVaultInfo(),
-        vaultClient.getMetrics(),
-        vaultClient.getUserPosition(userAddress),
-        vaultClient.isPaused()
-      ]);
-
-      setVaultInfo(info);
-      setVaultMetrics(metrics);
-      setUserPosition(position);
-      setIsPaused(paused);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  React.useEffect(() => {
+    setError(hookError);
+  }, [hookError]);
 
   const handleDeposit = async () => {
     if (!depositAmountA || !depositAmountB) return;
+    resetTx();
+    setError(null);
 
-    try {
-      setError(null);
-      // This would need user's keypair - simplified for demo
-      // await vaultClient.deposit(userKeyPair, {
-      //   amountA: BigInt(depositAmountA),
-      //   amountB: BigInt(depositAmountB),
-      //   minShares: BigInt(0)
-      // });
-      
-      // Refresh data after successful deposit
-      await loadVaultData();
+    await runTx(async () => {
+      const result = await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
       setDepositAmountA('');
       setDepositAmountB('');
-    } catch (err: any) {
-      setError(err.message);
-    }
+      return result;
+    });
   };
 
   const handleWithdraw = async () => {
     if (!withdrawShares) return;
+    resetTx();
+    setError(null);
 
-    try {
-      setError(null);
-      // This would need user's keypair - simplified for demo
-      // await vaultClient.withdraw(userKeyPair, {
-      //   shares: BigInt(withdrawShares),
-      //   minAmountA: BigInt(0),
-      //   minAmountB: BigInt(0)
-      // });
-      
-      // Refresh data after successful withdrawal
-      await loadVaultData();
+    await runTx(async () => {
+      const result = await withdraw(BigInt(withdrawShares), 0n, 0n);
       setWithdrawShares('');
-    } catch (err: any) {
-      setError(err.message);
-    }
+      return result;
+    });
   };
 
   const handleHarvest = async () => {
-    try {
-      setError(null);
-      // This would need user's keypair - simplified for demo
-      // await vaultClient.harvest(userKeyPair);
-      
-      // Refresh data after successful harvest
-      await loadVaultData();
-    } catch (err: any) {
-      setError(err.message);
-    }
+    resetTx();
+    setError(null);
+
+    await runTx(async () => {
+      const result = await harvest();
+      return result;
+    });
   };
 
   if (loading) {
@@ -141,6 +120,8 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
     ? (Number(userShares) / Number(vaultMetrics.totalShares)) * Number(vaultMetrics.tvl)
     : 0;
 
+  const isTxInFlight = txStatus === 'submitting' || txStatus === 'pending';
+
   return (
     <Card className="w-full max-w-2xl mx-auto">
       <CardHeader>
@@ -158,6 +139,37 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 Active
               </Badge>
             )}
+          </div>
+        </div>
+
+        {/* Freighter wallet connection */}
+        <div className="flex items-center justify-between border-t pt-3">
+          {walletConnected ? (
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="flex items-center gap-1">
+                <Wallet className="h-3 w-3" />
+                {shortenAddress(walletAddress || '')}
+              </Badge>
+              <Button variant="ghost" size="sm" onClick={disconnect}>
+                Disconnect
+              </Button>
+            </div>
+          ) : (
+            <Button
+              onClick={connect}
+              disabled={connecting}
+              variant="outline"
+              size="sm"
+              className="gap-1"
+            >
+              <Wallet className="h-4 w-4" />
+              {connecting ? 'Connecting…' : 'Connect Freighter'}
+            </Button>
+          )}
+          <div className="text-xs text-gray-500">
+            {walletConnected
+              ? 'Transactions signed via Freighter'
+              : 'Connect to deposit, withdraw and harvest'}
           </div>
         </div>
       </CardHeader>
@@ -223,7 +235,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                   placeholder="0"
                   value={depositAmountA}
                   onChange={(e) => setDepositAmountA(e.target.value)}
-                  disabled={isPaused}
+                  disabled={isPaused || isTxInFlight}
                 />
               </div>
               <div>
@@ -233,16 +245,18 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                   placeholder="0"
                   value={depositAmountB}
                   onChange={(e) => setDepositAmountB(e.target.value)}
-                  disabled={isPaused}
+                  disabled={isPaused || isTxInFlight}
                 />
               </div>
             </div>
             <Button 
               onClick={handleDeposit} 
-              disabled={!depositAmountA || !depositAmountB || isPaused}
+              disabled={!depositAmountA || !depositAmountB || isPaused || !walletConnected || isTxInFlight}
               className="w-full"
             >
-              Deposit
+              {isTxInFlight ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
+              ) : 'Deposit'}
             </Button>
           </div>
         </div>
@@ -258,16 +272,18 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 placeholder="0"
                 value={withdrawShares}
                 onChange={(e) => setWithdrawShares(e.target.value)}
-                disabled={isPaused || userShares === 0n}
+                disabled={isPaused || userShares === 0n || isTxInFlight}
               />
             </div>
             <Button 
               onClick={handleWithdraw} 
-              disabled={!withdrawShares || isPaused || userShares === 0n}
+              disabled={!withdrawShares || isPaused || userShares === 0n || !walletConnected || isTxInFlight}
               variant="outline"
               className="w-full"
             >
-              Withdraw
+              {isTxInFlight ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
+              ) : 'Withdraw'}
             </Button>
           </div>
         </div>
@@ -276,20 +292,69 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
         <div className="flex gap-3">
           <Button 
             onClick={handleHarvest} 
-            disabled={isPaused}
+            disabled={isPaused || !walletConnected || isTxInFlight}
             variant="secondary"
             className="flex-1"
           >
-            Harvest Rewards
+            {isTxInFlight ? (
+              <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
+            ) : 'Harvest Rewards'}
           </Button>
           <Button 
-            onClick={loadVaultData}
+            onClick={refresh}
             variant="outline"
             className="flex-1"
+            disabled={isTxInFlight}
           >
             Refresh
           </Button>
         </div>
+
+        {/* Transaction Status Banner */}
+        {txStatus !== 'idle' && (
+          <div className={`rounded-md p-3 border text-sm ${
+            txStatus === 'confirmed'
+              ? 'bg-green-50 border-green-200 text-green-700'
+              : txStatus === 'failed'
+              ? 'bg-red-50 border-red-200 text-red-600'
+              : 'bg-blue-50 border-blue-200 text-blue-700'
+          }`}>
+            <div className="flex items-center gap-2">
+              {(txStatus === 'submitting' || txStatus === 'pending') && (
+                <Loader2 className="h-4 w-4 animate-spin flex-shrink-0" />
+              )}
+              {txStatus === 'confirmed' && (
+                <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+              )}
+              {txStatus === 'failed' && (
+                <XCircle className="h-4 w-4 flex-shrink-0" />
+              )}
+
+              <span className="font-medium">
+                {txStatus === 'submitting' && 'Submitting transaction…'}
+                {txStatus === 'pending' && 'Waiting for confirmation…'}
+                {txStatus === 'confirmed' && 'Transaction confirmed'}
+                {txStatus === 'failed' && (txError ?? 'Transaction failed')}
+              </span>
+
+              {txHash && (
+                <span className="ml-auto font-mono text-xs truncate max-w-[160px]" title={txHash}>
+                  {txHash.slice(0, 8)}…{txHash.slice(-6)}
+                </span>
+              )}
+
+              {(txStatus === 'confirmed' || txStatus === 'failed') && (
+                <button
+                  onClick={resetTx}
+                  className="ml-2 underline text-xs opacity-70 hover:opacity-100"
+                  type="button"
+                >
+                  Dismiss
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (

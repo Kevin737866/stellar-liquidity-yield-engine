@@ -26,6 +26,8 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
   const [simulations, setSimulations] = useState(1000);
   const [simulationData, setSimulationData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [historicalData, setHistoricalData] = useState<Array<{ timestamp: number; priceRatio: number; ilPercent: number }>>([]);
+  const [useHistorical, setUseHistorical] = useState(false);
 
   // Calculate current IL
   const currentIL = useMemo(() => {
@@ -54,6 +56,15 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
 
   // Generate time series data
   const timeSeriesData = useMemo(() => {
+    if (useHistorical && historicalData.length > 0) {
+      return historicalData.map((point) => ({
+        day: Math.floor((point.timestamp - (historicalData[0]?.timestamp || point.timestamp)) / (24 * 60 * 60 * 1000)),
+        priceRatio: point.priceRatio,
+        impermanentLoss: point.ilPercent,
+        cumulativeLoss: point.ilPercent,
+      }));
+    }
+
     const data = [];
     const initial = parseFloat(initialRatio) || 1.0;
     const current = parseFloat(priceRatio) || 1.0;
@@ -70,7 +81,7 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
     }
     
     return data;
-  }, [priceRatio, initialRatio]);
+  }, [priceRatio, initialRatio, historicalData, useHistorical]);
 
   const runSimulation = async () => {
     try {
@@ -91,6 +102,26 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
       setSimulationData(result);
     } catch (error) {
       console.error('Simulation failed:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchHistoricalData = async () => {
+    try {
+      setLoading(true);
+      
+      // Issue #133: fetch real price history from an off-chain indexer / API
+      // Replace this mock with an actual endpoint once history is indexed.
+      const response = await fetch('/api/price-history?pair=TOKEN_A/TOKEN_B&days=365');
+      const json = await response.json();
+      
+      const initial = parseFloat(initialRatio) || 1.0;
+      const computed = YieldCalculator.computeHistoricalImpermanentLoss(initial, json.prices);
+      setHistoricalData(computed);
+      setUseHistorical(true);
+    } catch (error) {
+      console.error('Failed to fetch historical IL data:', error);
     } finally {
       setLoading(false);
     }
@@ -231,6 +262,28 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
           </TabsContent>
 
           <TabsContent value="timeline" className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-gray-600">
+                <p>This chart shows how impermanent loss evolves over time based on the current price trajectory.</p>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant={useHistorical ? "default" : "outline"}
+                  size="sm"
+                  onClick={fetchHistoricalData}
+                  disabled={loading}
+                >
+                  {loading ? 'Loading...' : 'Fetch Historical IL'}
+                </Button>
+                <Button
+                  variant={!useHistorical ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setUseHistorical(false)}
+                >
+                  Use Simulation
+                </Button>
+              </div>
+            </div>
             <div className="h-96">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={timeSeriesData}>

@@ -1,5 +1,6 @@
-import { 
-  VaultClient, 
+import { Keypair } from 'stellar-sdk';
+import {
+  VaultClient,
   RewardDistributorClient,
   TESTNET_CONFIG,
   NetworkConfig,
@@ -18,32 +19,42 @@ import {
  * 5. Handle edge cases and error recovery
  */
 
+/**
+ * Reads a required environment variable or throws with a helpful message.
+ * The bot needs real, deployed vault addresses and a real funded testnet
+ * secret key - it refuses to run against placeholder values.
+ */
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `Missing required environment variable ${name}. This bot only runs against real testnet vaults - ` +
+      `set VAULT_ADDRESSES (comma-separated contract IDs) and BOT_SECRET_KEY (a funded testnet secret key) before running it.`
+    );
+  }
+  return value;
+}
+
 // Configuration
 const BOT_CONFIG = {
-  // Vault addresses to monitor
-  vaultAddresses: [
-    'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
-    'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q',
-    'CBANDN74J4LGH4TPE4XV5N6IZ4SD4J6Q4Z6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q6Q'
-  ],
-  
+  // Vault addresses to monitor - real, deployed vault contract IDs
+  vaultAddresses: requireEnv('VAULT_ADDRESSES').split(',').map(addr => addr.trim()),
+
   // Harvesting thresholds
   minRewardThreshold: BigInt(1000), // Minimum reward to trigger harvest
-  maxGasPrice: 100, // Maximum gas price in stroops
-  
+
   // Timing configuration
   checkInterval: 60000, // Check every minute (in production: 15-30 minutes)
   harvestCooldown: 3600000, // 1 hour cooldown between harvests
-  
+
   // Performance tracking
   enablePerformanceTracking: true,
   performanceReportInterval: 3600000 // Report every hour
 };
 
-const BOT_KEYPAIR = {
-  publicKey: 'GD...BOT_PUBLIC_KEY',
-  secret: 'S...BOT_SECRET_KEY'
-};
+// A real funded testnet keypair, loaded from the environment rather than
+// a fabricated placeholder secret.
+const BOT_KEYPAIR = Keypair.fromSecret(requireEnv('BOT_SECRET_KEY'));
 
 // Performance tracking interface
 interface HarvestPerformance {
@@ -247,13 +258,6 @@ class YieldHarvestBot {
         return false;
       }
 
-      // Check gas price (simplified - in production, check current network gas prices)
-      const currentGasPrice = await this.getCurrentGasPrice();
-      if (currentGasPrice > this.config.maxGasPrice) {
-        console.log(`⛽ Vault ${vaultAddress}: Gas price too high (${currentGasPrice} > ${this.config.maxGasPrice})`);
-        return false;
-      }
-
       // Execute harvest
       console.log(`🌾 Harvesting vault ${vaultAddress}...`);
       const harvestResult = await vaultClient.harvest(this.keypair);
@@ -294,15 +298,6 @@ class YieldHarvestBot {
     const estimatedRewards = (metrics.tvl * BigInt(metrics.apy) * BigInt(Math.floor(hoursSinceLastHarvest * 1000))) / (10000n * 8760000n);
     
     return estimatedRewards;
-  }
-
-  /**
-   * Get current gas price (simplified)
-   */
-  private async getCurrentGasPrice(): Promise<number> {
-    // In production, this would query the network for current gas prices
-    // For now, return a simulated value
-    return 50; // 50 stroops
   }
 
   /**

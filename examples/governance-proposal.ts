@@ -14,7 +14,7 @@ import {
   formatVotingPower,
   GOVERNANCE_CONSTANTS
 } from '../sdk/src/governance';
-import { Server, Keypair, Networks } from 'stellar-sdk';
+import { Keypair, Networks } from 'stellar-sdk';
 
 // ===== Configuration =====
 const CONFIG = {
@@ -31,11 +31,10 @@ const CONFIG = {
 };
 
 // ===== Initialize SDK =====
-const server = new Server(CONFIG.horizonUrl);
 const userKeypair = Keypair.random(); // In production, use actual keypair
 
 const governanceSDK = new GovernanceSDK(
-  server,
+  CONFIG.rpcUrl,
   CONFIG.network,
   userKeypair
 );
