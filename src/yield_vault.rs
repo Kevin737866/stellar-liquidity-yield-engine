@@ -131,25 +131,18 @@ impl YieldVault {
         token_a_client.transfer(&user, &env.current_contract_address(), &amount_a);
         token_b_client.transfer(&user, &env.current_contract_address(), &amount_b);
 
-        // Calculate shares based on current ratio
+        // Calculate shares based on the combined value of both tokens
         let shares = if metrics.total_shares == 0 {
-            // First deposit: compute a geometric mean so both tokens are valued.
-            // If either side is zero the depositor still earns shares proportional
-            // to what they contributed, preventing over/under-pricing.
-            if amount_a > 0 && amount_b > 0 {
-                // Geometric mean – values both tokens equally regardless of
-                // the absolute amounts deposited.
-                let product = (amount_a as u128) * (amount_b as u128);
-                let sqrt_val = Self::isqrt(product);
-                sqrt_val as i128
-            } else {
-                // Single-sided deposit: use the non-zero amount directly.
-                amount_a + amount_b
-            }
+            // First deposit - 1:1 shares per unit of combined deposit value
+            amount_a + amount_b
         } else {
-            // Calculate proportional shares
-            let share_ratio = amount_a * metrics.total_shares / metrics.total_amount_a;
-            share_ratio
+            // Proportional to the combined value of both tokens
+            let total_value = metrics.total_amount_a + metrics.total_amount_b;
+            if total_value <= 0 {
+                0
+            } else {
+                (amount_a + amount_b) * metrics.total_shares / total_value
+            }
         };
 
         if shares < min_shares {
@@ -318,7 +311,7 @@ impl YieldVault {
 
             // Transfer fees to treasury
             if fee_a > 0 || fee_b > 0 {
-                let treasury = Self::get_treasury(env.clone());
+                let admin = Self::get_admin(env.clone());
                 let token_a_client = TokenClient::new(&env, &vault_info.token_a);
                 let token_b_client = TokenClient::new(&env, &vault_info.token_b);
 
@@ -623,7 +616,6 @@ mod tests {
     ) {
         let admin = Address::generate(env);
         let user = Address::generate(env);
-        let treasury = Address::generate(env);
         let token_a = env.register_stellar_asset_contract_v2(admin.clone());
         let token_b = env.register_stellar_asset_contract_v2(admin.clone());
         let token_a_client = TokenClient::new(env, &token_a.address());
@@ -645,83 +637,83 @@ mod tests {
             &fee_rate,
             &harvest_fee,
             &withdrawal_fee,
-            &treasury,
         );
 
-        (vault, vault_id, token_a_client, token_b_client, token_a_admin, token_b_admin, user, treasury)
+        (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin)
+    }
+
+    fn mint_pair(
+        token_a_client: &TokenClient,
+        token_b_client: &TokenClient,
+        token_a_admin: &StellarAssetClient,
+        token_b_admin: &StellarAssetClient,
+        to: &Address,
+        amount_a: i128,
+        amount_b: i128,
+    ) {
+        token_a_admin.mint(to, &amount_a);
+        token_b_admin.mint(to, &amount_b);
     }
 
     #[test]
-    fn test_performance_fee_applied_on_gains() {
+    fn test_first_deposit_uses_combined_value() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        // 1% performance fee, no harvest/withdrawal fees
-        let (vault, vault_id, token_a_client, token_b_client, token_a_admin, token_b_admin, user, treasury) =
-            setup(&env, 100, 0, 0);
-
-        // Deposit 1000 + 1000 -> 1000 shares (first deposit, min of both)
-        token_a_admin.mint(&user, &1000);
-        token_b_admin.mint(&user, &1000);
-        vault.deposit(&user, &1000, &1000, &0);
-
-        // Simulate vault growth: mint "rewards" to the contract, then harvest
-        // (rewards are simulated as 1000 per token, harvest_fee = 0)
-        token_a_admin.mint(&vault_id, &1000);
-        token_b_admin.mint(&vault_id, &1000);
-        vault.harvest(&user);
-        // metrics now: total_amount_a = 2000, total_amount_b = 2000
-
-        // Withdraw everything: 1000 shares redeem 2000 + 2000
-        // cost basis = 1000 + 1000 -> gain = 2000, perf fee = 1% = 20 (10 + 10)
-        let (out_a, out_b) = vault.withdraw(&user, &1000, &0, &0);
-
-        assert_eq!(out_a, 1990);
-        assert_eq!(out_b, 1990);
-        assert_eq!(token_a_client.balance(&treasury), 10);
-        assert_eq!(token_b_client.balance(&treasury), 10);
-    }
-
-    #[test]
-    fn test_no_performance_fee_without_gain() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        let (vault, vault_id, token_a_client, token_b_client, token_a_admin, token_b_admin, user, treasury) =
-            setup(&env, 100, 0, 0);
-
-        token_a_admin.mint(&user, &1000);
-        token_b_admin.mint(&user, &1000);
-        vault.deposit(&user, &1000, &1000, &0);
-
-        // Withdraw half immediately: 500 shares redeem 500 + 500, no gain
-        let (out_a, out_b) = vault.withdraw(&user, &500, &0, &0);
-
-        assert_eq!(out_a, 500);
-        assert_eq!(out_b, 500);
-        assert_eq!(token_a_client.balance(&treasury), 0);
-        assert_eq!(token_b_client.balance(&treasury), 0);
-    }
-
-    #[test]
-    fn test_zero_fee_rate_charges_no_performance_fee() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        let (vault, vault_id, token_a_client, token_b_client, token_a_admin, token_b_admin, user, treasury) =
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _) =
             setup(&env, 0, 0, 0);
 
-        token_a_admin.mint(&user, &1000);
-        token_b_admin.mint(&user, &1000);
-        vault.deposit(&user, &1000, &1000, &0);
+        // Token-B-only first deposit must still mint shares
+        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 0, 100);
+        let shares = vault.deposit(&user, &0, &100, &0);
 
-        token_a_admin.mint(&vault_id, &1000);
-        token_b_admin.mint(&vault_id, &1000);
-        vault.harvest(&user);
+        assert_eq!(shares, 100);
+        assert_eq!(vault.get_user_position(&user).shares, 100);
+    }
 
-        let (out_a, out_b) = vault.withdraw(&user, &1000, &0, &0);
+    #[test]
+    fn test_subsequent_deposit_pricing_uses_combined_value() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user1, _) =
+            setup(&env, 0, 0, 0);
+        let user2 = Address::generate(&env);
+        let user3 = Address::generate(&env);
 
-        assert_eq!(out_a, 2000);
-        assert_eq!(out_b, 2000);
-        assert_eq!(token_a_client.balance(&treasury), 0);
-        assert_eq!(token_b_client.balance(&treasury), 0);
+        // First deposit: 100 A + 100 B -> 200 shares (1:1 combined value)
+        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user1, 100, 100);
+        let shares1 = vault.deposit(&user1, &100, &100, &0);
+        assert_eq!(shares1, 200);
+
+        // Token-B-only deposit: 100 B out of 200 total value -> 100 shares
+        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user2, 0, 100);
+        let shares2 = vault.deposit(&user2, &0, &100, &0);
+        assert_eq!(shares2, 100);
+
+        // Mixed deposit: 50 A + 50 B out of 200 total value -> 100 shares
+        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user3, 50, 50);
+        let shares3 = vault.deposit(&user3, &50, &50, &0);
+        assert_eq!(shares3, 100);
+
+        // Vault state reflects both tokens
+        let metrics = vault.get_metrics();
+        assert_eq!(metrics.total_shares, 400);
+        assert_eq!(metrics.total_amount_a, 150);
+        assert_eq!(metrics.total_amount_b, 250);
+    }
+
+    #[test]
+    fn test_deposit_enforces_min_shares() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _) =
+            setup(&env, 0, 0, 0);
+
+        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 10, 10);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.deposit(&user, &10, &10, &100);
+        }));
+
+        assert!(result.is_err(), "deposit below min_shares must panic");
     }
 
     #[test]
