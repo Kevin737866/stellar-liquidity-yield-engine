@@ -104,6 +104,11 @@ impl YieldVault {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "metrics"), &metrics);
+
+        env.events().publish(
+            (Symbol::new(&env, "vault_initialized"),),
+            (admin, name, token_a, token_b, treasury),
+        );
     }
 
     /// Deposit tokens into the vault
@@ -166,6 +171,11 @@ impl YieldVault {
         metrics.total_amount_b += amount_b;
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
         env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+
+        env.events().publish(
+            (Symbol::new(&env, "deposit"),),
+            (user, amount_a, amount_b, shares),
+        );
 
         shares
     }
@@ -253,6 +263,11 @@ impl YieldVault {
             }
         }
 
+        env.events().publish(
+            (Symbol::new(&env, "withdraw"),),
+            (user, shares, final_amount_a, final_amount_b),
+        );
+
         (final_amount_a, final_amount_b)
     }
 
@@ -314,6 +329,11 @@ impl YieldVault {
                     token_b_client.transfer(&env.current_contract_address(), &treasury, &fee_b);
                 }
             }
+
+            env.events().publish(
+                (Symbol::new(&env, "harvest"),),
+                (_caller, net_rewards_a, net_rewards_b, fee_a, fee_b),
+            );
         }
     }
 
@@ -370,6 +390,11 @@ impl YieldVault {
 
         let metrics = Self::get_metrics(env.clone());
         env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+
+        env.events().publish(
+            (Symbol::new(&env, "prices_updated"),),
+            (admin, price_a, price_b),
+        );
     }
 
     /// Get the currently configured token prices as (price_a, price_b).
@@ -462,6 +487,8 @@ impl YieldVault {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &true);
+        env.events()
+            .publish((Symbol::new(&env, "vault_paused"),), (admin,));
     }
 
     /// Unpause vault (admin only)
@@ -473,6 +500,8 @@ impl YieldVault {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &false);
+        env.events()
+            .publish((Symbol::new(&env, "vault_unpaused"),), (admin,));
     }
 
     /// Require the caller to be the vault admin

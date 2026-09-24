@@ -203,3 +203,59 @@ impl RiskEngine {
         (total_cost, total_fee_bp)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use soroban_sdk::Env;
+
+    fn il(env: &Env, current: i128, entry: i128) -> u32 {
+        RiskEngine::calculate_impermanent_loss(env.clone(), current, entry)
+    }
+
+    #[test]
+    fn test_il_no_change_is_zero() {
+        let env = Env::default();
+        // r = 1 => IL = 0
+        assert_eq!(il(&env, 10000, 10000), 0);
+        assert_eq!(il(&env, 20000, 20000), 0);
+    }
+
+    #[test]
+    fn test_il_standard_values() {
+        let env = Env::default();
+        // r = 2 => IL = 1 - 2*sqrt(2)/3 = 5.72% => ~572 bp (allow +-15 due to integer sqrt)
+        let il_2x = il(&env, 20000, 10000);
+        assert!(il_2x >= 560 && il_2x <= 590, "r=2x got {} expected ~572", il_2x);
+
+        // r = 0.5 => symmetric to r=2 => ~572 bp
+        let il_half = il(&env, 5000, 10000);
+        assert!(il_half >= 560 && il_half <= 590, "r=0.5 got {} expected ~572", il_half);
+
+        // r = 4 => IL = 1 - 2*2/5 = 20% => 2000 bp
+        let il_4x = il(&env, 40000, 10000);
+        assert!(il_4x >= 1985 && il_4x <= 2015, "r=4x got {} expected 2000", il_4x);
+
+        // r = 1.5 => IL = 1 - 2*sqrt(1.5)/2.5
+        // sqrt1.5=1.2247 => 2*1.2247/2.5=0.9798 => IL 2.02% => ~202 bp
+        let il_1_5 = il(&env, 15000, 10000);
+        assert!(il_1_5 >= 190 && il_1_5 <= 220, "r=1.5 got {} expected ~202", il_1_5);
+    }
+
+    #[test]
+    fn test_il_zero_or_negative_returns_zero() {
+        let env = Env::default();
+        assert_eq!(il(&env, 0, 10000), 0);
+        assert_eq!(il(&env, 10000, 0), 0);
+        assert_eq!(il(&env, -1000, 10000), 0);
+    }
+
+    #[test]
+    fn test_il_is_monotonic_with_divergence() {
+        let env = Env::default();
+        let il_small = il(&env, 11000, 10000); // r=1.1
+        let il_large = il(&env, 20000, 10000); // r=2
+        assert!(il_large > il_small, "IL should increase with price divergence");
+    }
+}

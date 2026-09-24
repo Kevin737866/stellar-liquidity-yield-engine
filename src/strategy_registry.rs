@@ -84,8 +84,8 @@ impl StrategyRegistry {
             .instance()
             .set(&Symbol::new(&env, "next_strategy_id"), &1u32);
 
-        // Initialize empty collections
-        let strategies: Vec<YieldStrategy> = Vec::new(&env);
+        // Strategies stored as Map<u32, YieldStrategy> for O(1) access
+        let strategies: Map<u32, YieldStrategy> = Map::new(&env);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "strategies"), &strategies);
@@ -135,8 +135,12 @@ impl StrategyRegistry {
             updated_at: current_time,
         };
 
-        let mut strategies = Self::get_strategies(&env);
-        strategies.push_back(strategy);
+        // O(1) insert into Map keyed by strategy_id
+        let mut strategies = Self::get_strategies_map(&env);
+        // Validate risk_level bounds (1-3) per issue #118
+        require!(risk_level >= 1 && risk_level <= 3, "risk_level must be 1-3");
+        require!(strategies.get(strategy_id).is_none(), "strategy id collision");
+        strategies.set(strategy_id, strategy.clone());
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "strategies"), &strategies);
@@ -148,6 +152,12 @@ impl StrategyRegistry {
             .instance()
             .set(&Symbol::new(&env, "strategy_params"), &strategy_params);
 
+        // Audit event
+        env.events().publish(
+            (Symbol::new(&env, "strategy_registered"), strategy_id),
+            (creator, name, risk_level),
+        );
+
         strategy_id
     }
 
@@ -155,26 +165,22 @@ impl StrategyRegistry {
     pub fn approve_strategy(env: Env, admin: Address, strategy_id: u32, comments: Symbol) {
         Self::require_admin(&env, admin.clone());
 
-        let mut strategies = Self::get_strategies(&env);
-        let mut found = false;
-
-        for i in 0..strategies.len() {
-            if strategies.get(i).unwrap().strategy_id == strategy_id {
-                let mut strategy = strategies.get(i).unwrap();
-                strategy.is_active = true;
-                strategy.updated_at = env.ledger().timestamp();
-                strategies.set(i, strategy);
-                found = true;
-                break;
-            }
-        }
-
-        if !found {
-            panic!("strategy not found");
-        }
+        let mut strategies = Self::get_strategies_map(&env);
+        let mut strategy = strategies
+            .get(strategy_id)
+            .unwrap_or_else(|| panic!("strategy not found"));
+        strategy.is_active = true;
+        strategy.updated_at = env.ledger().timestamp();
+        strategies.set(strategy_id, strategy);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "strategies"), &strategies);
+
+        // Audit event
+        env.events().publish(
+            (Symbol::new(&env, "strategy_approved"), strategy_id),
+            (admin.clone(), strategy_id),
+        );
 
         // Record approval
         let approval = StrategyApproval {
@@ -205,40 +211,31 @@ impl StrategyRegistry {
         require!(min_investment > 0, "min investment must be positive");
         require!(max_investment >= min_investment, "max investment must be greater than or equal to min investment");
         
-        let mut strategies = Self::get_strategies(&env);
-        let mut found = false;
-
-        for i in 0..strategies.len() {
-            if strategies.get(i).unwrap().strategy_id == strategy_id {
-                let strategy = strategies.get(i).unwrap();
-                if strategy.creator != creator {
-                    panic!("unauthorized: not strategy creator");
-                }
-
-                let updated_strategy = YieldStrategy {
-                    strategy_id,
-                    name,
-                    description,
-                    creator,
-                    risk_level,
-                    min_investment,
-                    max_investment,
-                    fee_structure,
-                    performance_history: strategy.performance_history,
-                    is_active: false, // Requires re-approval after update
-                    created_at: strategy.created_at,
-                    updated_at: env.ledger().timestamp(),
-                };
-
-                strategies.set(i, updated_strategy);
-                found = true;
-                break;
-            }
+        let mut strategies = Self::get_strategies_map(&env);
+        let strategy = strategies
+            .get(strategy_id)
+            .unwrap_or_else(|| panic!("strategy not found"));
+        if strategy.creator != creator {
+            panic!("unauthorized: not strategy creator");
         }
+        require!(risk_level >= 1 && risk_level <= 3, "risk_level must be 1-3");
 
-        if !found {
-            panic!("strategy not found");
-        }
+        let updated_strategy = YieldStrategy {
+            strategy_id,
+            name: name.clone(),
+            description,
+            creator: creator.clone(),
+            risk_level,
+            min_investment,
+            max_investment,
+            fee_structure,
+            performance_history: strategy.performance_history,
+            is_active: false, // Requires re-approval after update
+            created_at: strategy.created_at,
+            updated_at: env.ledger().timestamp(),
+        };
+
+        strategies.set(strategy_id, updated_strategy);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "strategies"), &strategies);
@@ -249,6 +246,11 @@ impl StrategyRegistry {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "strategy_params"), &strategy_params);
+
+        env.events().publish(
+            (Symbol::new(&env, "strategy_updated"), strategy_id),
+            (creator, name, risk_level),
+        );
     }
 
     /// Record strategy performance
@@ -262,89 +264,86 @@ impl StrategyRegistry {
     ) {
         Self::require_not_paused(&env);
 
-        let mut strategies = Self::get_strategies(&env);
-        let mut found = false;
+        let mut strategies = Self::get_strategies_map(&env);
+        let mut strategy = strategies
+            .get(strategy_id)
+            .unwrap_or_else(|| panic!("strategy not found"));
 
-        for i in 0..strategies.len() {
-            if strategies.get(i).unwrap().strategy_id == strategy_id {
-                let mut strategy = strategies.get(i).unwrap();
+        let performance_record = PerformanceRecord {
+            timestamp: env.ledger().timestamp(),
+            total_value,
+            net_apy,
+            volatility,
+            sharpe_ratio,
+        };
 
-                let performance_record = PerformanceRecord {
-                    timestamp: env.ledger().timestamp(),
-                    total_value,
-                    net_apy,
-                    volatility,
-                    sharpe_ratio,
-                };
+        strategy.performance_history.push_back(performance_record);
+        strategy.updated_at = env.ledger().timestamp();
 
-                strategy.performance_history.push_back(performance_record);
-                strategy.updated_at = env.ledger().timestamp();
-
-                // Keep only last 100 performance records
-                if strategy.performance_history.len() > 100 {
-                    let total_records = strategy.performance_history.len();
-                    let start = total_records - 100;
-                    let records_trimmed = start as u32;
-                    let mut trimmed: Vec<PerformanceRecord> = Vec::new(&env);
-                    for j in start..total_records {
-                        trimmed.push_back(strategy.performance_history.get(j).unwrap());
-                    }
-                    strategy.performance_history = trimmed;
-
-                    // Publish event so off-chain analytics can capture dropped records
-                    let event = PerformanceHistoryTrimmed {
-                        strategy_id,
-                        records_trimmed,
-                        records_kept: 100,
-                        timestamp: env.ledger().timestamp(),
-                    };
-                    env.events().publish(
-                        (
-                            Symbol::new(&env, "performance_history_trimmed"),
-                            strategy_id,
-                        ),
-                        (event.records_trimmed, event.records_kept, event.timestamp),
-                    );
-                }
-
-                strategies.set(i, strategy);
-                found = true;
-                break;
+        // Keep only last 100 performance records
+        if strategy.performance_history.len() > 100 {
+            let total_records = strategy.performance_history.len();
+            let start = total_records - 100;
+            let records_trimmed = start as u32;
+            let mut trimmed: Vec<PerformanceRecord> = Vec::new(&env);
+            for j in start..total_records {
+                trimmed.push_back(strategy.performance_history.get(j).unwrap());
             }
+            strategy.performance_history = trimmed;
+
+            // Publish event so off-chain analytics can capture dropped records
+            let event = PerformanceHistoryTrimmed {
+                strategy_id,
+                records_trimmed,
+                records_kept: 100,
+                timestamp: env.ledger().timestamp(),
+            };
+            env.events().publish(
+                (
+                    Symbol::new(&env, "performance_history_trimmed"),
+                    strategy_id,
+                ),
+                (event.records_trimmed, event.records_kept, event.timestamp),
+            );
         }
 
-        if !found {
-            panic!("strategy not found");
-        }
+        strategies.set(strategy_id, strategy.clone());
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "strategies"), &strategies);
+
+        // Audit event for performance recording
+        env.events().publish(
+            (Symbol::new(&env, "performance_recorded"), strategy_id),
+            (strategy_id, net_apy, total_value),
+        );
     }
 
     /// Deactivate a strategy
     pub fn deactivate_strategy(env: Env, admin: Address, strategy_id: u32) {
         Self::require_admin(&env, admin.clone());
 
-        let mut strategies = Self::get_strategies(&env);
-        let mut found = false;
-
-        for i in 0..strategies.len() {
-            if strategies.get(i).unwrap().strategy_id == strategy_id {
-                let mut strategy = strategies.get(i).unwrap();
-                strategy.is_active = false;
-                strategy.updated_at = env.ledger().timestamp();
+        let mut strategies = Self::get_strategies_map(&env);
+        let mut strategy = strategies
+            .get(strategy_id)
+            .unwrap_or_else(|| panic!("strategy not found"));
+        strategy.is_active = false;
+        strategy.updated_at = env.ledger().timestamp();
                 strategies.set(i, strategy);
                 found = true;
                 break;
             }
         }
 
-        if !found {
-            panic!("strategy not found");
-        }
+        strategies.set(strategy_id, strategy);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "strategies"), &strategies);
+
+        env.events().publish(
+            (Symbol::new(&env, "strategy_deactivated"), strategy_id),
+            (admin.clone(), strategy_id),
+        );
 
         // Record deactivation
         let approval = StrategyApproval {
@@ -386,15 +385,47 @@ impl StrategyRegistry {
         filtered_strategies
     }
 
-    /// Get strategy details
+    /// Get strategy details - O(1) via Map
     pub fn get_strategy(env: Env, strategy_id: u32) -> YieldStrategy {
-        let strategies = Self::get_strategies(&env);
-        for strategy in strategies {
-            if strategy.strategy_id == strategy_id {
-                return strategy;
-            }
+        Self::get_strategies_map(&env)
+            .get(strategy_id)
+            .unwrap_or_else(|| panic!("strategy not found"))
+    }
+
+    // --- Pagination helpers (Issue #107) ---
+    /// Get strategies paginated with limit/offset for bounded reads
+    pub fn get_strategies_paginated(env: Env, limit: u32, offset: u32) -> Vec<YieldStrategy> {
+        let all = Self::get_strategies(&env);
+        Self::paginate_vec(env.clone(), all, limit, offset)
+    }
+
+    /// Get active strategies paginated
+    pub fn get_active_strategies_paginated(env: Env, limit: u32, offset: u32) -> Vec<YieldStrategy> {
+        let active = Self::get_active_strategies(env.clone());
+        Self::paginate_vec(env.clone(), active, limit, offset)
+    }
+
+    /// Get strategies by risk paginated
+    pub fn get_strategies_by_risk_paginated(env: Env, risk_level: u32, limit: u32, offset: u32) -> Vec<YieldStrategy> {
+        let filtered = Self::get_strategies_by_risk(env.clone(), risk_level);
+        Self::paginate_vec(env.clone(), filtered, limit, offset)
+    }
+
+    /// Count total strategies (useful for pagination UI)
+    pub fn get_strategy_count(env: Env) -> u32 {
+        Self::get_strategies_map(&env).len()
+    }
+
+    fn paginate_vec(env: Env, vec: Vec<YieldStrategy>, limit: u32, offset: u32) -> Vec<YieldStrategy> {
+        if limit == 0 || offset as usize >= vec.len() as usize {
+            return Vec::new(&env);
         }
-        panic!("strategy not found");
+        let mut out: Vec<YieldStrategy> = Vec::new(&env);
+        let end = (offset + limit).min(vec.len());
+        for i in offset..end {
+            out.push_back(vec.get(i).unwrap());
+        }
+        out
     }
 
     /// Get strategy parameters
@@ -405,7 +436,7 @@ impl StrategyRegistry {
             .unwrap_or_else(|| panic!("strategy parameters not found"))
     }
 
-    /// Get strategy performance history
+    /// Get strategy performance history (most recent `limit` entries)
     pub fn get_performance_history(
         env: Env,
         strategy_id: u32,
@@ -425,6 +456,25 @@ impl StrategyRegistry {
         }
 
         history
+    }
+
+    /// Paginated performance history with offset for bounded reads (Issue #107)
+    pub fn get_performance_history_paginated(
+        env: Env,
+        strategy_id: u32,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<PerformanceRecord> {
+        let strategy = Self::get_strategy(env.clone(), strategy_id);
+        if limit == 0 || offset >= strategy.performance_history.len() {
+            return Vec::new(&env);
+        }
+        let mut out: Vec<PerformanceRecord> = Vec::new(&env);
+        let end = (offset + limit).min(strategy.performance_history.len());
+        for i in offset..end {
+            out.push_back(strategy.performance_history.get(i).unwrap());
+        }
+        out
     }
 
     /// Get approval history
@@ -480,11 +530,20 @@ impl StrategyRegistry {
         id
     }
 
-    fn get_strategies(env: &Env) -> Vec<YieldStrategy> {
+    fn get_strategies_map(env: &Env) -> Map<u32, YieldStrategy> {
         env.storage()
             .instance()
             .get(&Symbol::new(env, "strategies"))
             .unwrap_optimized()
+    }
+
+    fn get_strategies(env: &Env) -> Vec<YieldStrategy> {
+        let map: Map<u32, YieldStrategy> = Self::get_strategies_map(env);
+        let mut v: Vec<YieldStrategy> = Vec::new(env);
+        for (_, strat) in map.iter() {
+            v.push_back(strat);
+        }
+        v
     }
 
     fn get_strategy_params(env: &Env) -> Map<u32, StrategyParameters> {
@@ -551,18 +610,22 @@ impl StrategyRegistry {
 
     /// Pause strategy registry (admin only)
     pub fn pause(env: Env, admin: Address) {
-        Self::require_admin(&env, admin);
+        Self::require_admin(&env, admin.clone());
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &true);
+        env.events()
+            .publish((Symbol::new(&env, "registry_paused"),), (admin,));
     }
 
     /// Unpause strategy registry (admin only)
     pub fn unpause(env: Env, admin: Address) {
-        Self::require_admin(&env, admin);
+        Self::require_admin(&env, admin.clone());
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &false);
+        env.events()
+            .publish((Symbol::new(&env, "registry_unpaused"),), (admin,));
     }
 }
 
