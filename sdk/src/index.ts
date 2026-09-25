@@ -6,7 +6,14 @@ export * from './types';
 export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
-export { ArbitrageScanner, ArbitrageExecutor, ArbitrageOptimizer } from './arbitrage';
+export {
+  ArbitrageScanner,
+  ArbitrageExecutor,
+  ArbitrageOptimizer,
+  HorizonVolatilitySource,
+  realizedVolatilityBp,
+} from './arbitrage';
+export type { VolatilitySource, VolatilityMetrics, PoolMetrics, Opportunity } from './arbitrage';
 
 // Issue #130: Strategy registry client for fetching active strategies.
 // A dedicated on-chain registry contract is not yet deployed, so this client

@@ -21,14 +21,136 @@ export interface PoolMetrics {
   volatility_7d: number;
 }
 
+/**
+ * Realized volatility for a pool, in basis points (1 bp = 0.01%).
+ */
+export interface VolatilityMetrics {
+  volatility_24h: number;
+  volatility_7d: number;
+}
+
+/**
+ * Resolves volatility for a pool from real price history.
+ *
+ * Implementations must return `null` when there is not enough price history
+ * to compute a trustworthy number - never a made-up default. Callers treat
+ * `null` as "unknown" and exclude the pool from risk assessments.
+ */
+export interface VolatilitySource {
+  getVolatility(poolId: string): Promise<VolatilityMetrics | null>;
+}
+
+/**
+ * Compute realized volatility in basis points from a price series ordered
+ * from oldest to newest.
+ *
+ * Uses log returns: for each window the standard deviation of log returns is
+ * scaled by sqrt(n) to express the total dispersion across the window, then
+ * converted to basis points. Returns `null` when fewer than 2 price changes
+ * are available, so callers can distinguish "unknown" from "zero risk".
+ */
+export function realizedVolatilityBp(
+  prices: number[],
+  minReturns: number = 2,
+): number | null {
+  const returns: number[] = [];
+  for (let i = 1; i < prices.length; i++) {
+    const prev = prices[i - 1];
+    const curr = prices[i];
+    if (!Number.isFinite(prev) || !Number.isFinite(curr) || prev <= 0 || curr <= 0) {
+      continue;
+    }
+    returns.push(Math.log(curr / prev));
+  }
+
+  if (returns.length < Math.max(2, minReturns)) {
+    return null;
+  }
+
+  const mean = returns.reduce((sum, r) => sum + r, 0) / returns.length;
+  const variance =
+    returns.reduce((sum, r) => sum + (r - mean) * (r - mean), 0) /
+    (returns.length - 1);
+  const stdev = Math.sqrt(variance);
+
+  return stdev * Math.sqrt(returns.length) * 10000;
+}
+
+/**
+ * Default `VolatilitySource`: derives volatility from real trade prices
+ * fetched from Horizon for the given liquidity pool.
+ *
+ * Trades are fetched once per pool (up to 200 most recent) and split into
+ * 24h and 7d windows. If either window has too few price points, `null` is
+ * returned so the pool is skipped instead of being risk-assessed on
+ * fabricated numbers.
+ */
+export class HorizonVolatilitySource implements VolatilitySource {
+  private horizonServer: Horizon.Server;
+  private now: () => number;
+
+  constructor(horizonUrl: string = 'https://horizon.stellar.org', options?: { now?: () => number }) {
+    this.horizonServer = new Horizon.Server(horizonUrl);
+    this.now = options?.now ?? (() => Date.now());
+  }
+
+  async getVolatility(poolId: string): Promise<VolatilityMetrics | null> {
+    try {
+      const trades = await this.horizonServer
+        .trades()
+        .forLiquidityPool(poolId)
+        .order('desc')
+        .limit(200)
+        .call();
+
+      const nowSec = Math.floor(this.now() / 1000);
+      const cutoff24h = nowSec - 24 * 60 * 60;
+      const cutoff7d = nowSec - 7 * 24 * 60 * 60;
+
+      const pricesInWindow = (records: any[], cutoffSec: number): number[] =>
+        records
+          .filter((trade) => {
+            const closed = Date.parse(trade.ledger_close_time ?? '');
+            return Number.isFinite(closed) && Math.floor(closed / 1000) >= cutoffSec;
+          })
+          .map((trade) => Number(trade.price?.n) / Number(trade.price?.d))
+          .filter((price) => Number.isFinite(price) && price > 0)
+          .reverse(); // oldest -> newest for log-return computation
+
+      const windowPrices = pricesInWindow(trades.records, cutoff7d);
+      const recentPrices = pricesInWindow(trades.records, cutoff24h);
+
+      const volatility7d = realizedVolatilityBp(windowPrices);
+      const volatility24h = realizedVolatilityBp(recentPrices);
+
+      if (volatility24h === null || volatility7d === null) {
+        return null;
+      }
+
+      return {
+        volatility_24h: volatility24h,
+        volatility_7d: volatility7d,
+      };
+    } catch (error) {
+      console.error(`Failed to fetch price history for pool ${poolId}:`, error);
+      return null;
+    }
+  }
+}
+
 export class ArbitrageScanner {
   private horizonServer: Horizon.Server;
+  private volatilitySource: VolatilitySource;
   private poolCache: Map<string, PoolMetrics> = new Map();
   private lastScanTime: number = 0;
   private cacheExpiry: number = 60000; // 60 seconds
 
-  constructor(horizonUrl: string = 'https://horizon.stellar.org') {
+  constructor(
+    horizonUrl: string = 'https://horizon.stellar.org',
+    options: { volatilitySource?: VolatilitySource } = {},
+  ) {
     this.horizonServer = new Horizon.Server(horizonUrl);
+    this.volatilitySource = options.volatilitySource ?? new HorizonVolatilitySource(horizonUrl);
   }
 
   /**
@@ -81,14 +203,23 @@ export class ArbitrageScanner {
       // Estimate APY from pool fee and trading volume
       const estimate_apy = await this.estimatePoolAPY(pool);
 
+      // Realized volatility from price history. When there is not enough
+      // history we skip the pool entirely rather than risk-assessing it on
+      // fabricated numbers. Rounded to whole basis points because
+      // downstream math converts these values with BigInt().
+      const volatility = await this.volatilitySource.getVolatility(pool.id);
+      if (!volatility) {
+        return null;
+      }
+
       return {
         pool_id: pool.id,
         current_apy: estimate_apy,
         total_liquidity,
         reserve_a,
         reserve_b,
-        volatility_24h: 1500, // Would fetch from price history
-        volatility_7d: 1800,
+        volatility_24h: Math.round(volatility.volatility_24h),
+        volatility_7d: Math.round(volatility.volatility_7d),
       };
     } catch (error) {
       return null;
