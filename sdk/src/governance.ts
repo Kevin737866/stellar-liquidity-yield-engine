@@ -125,6 +125,20 @@ export class GovernanceSDK {
     this.keypair = keypair;
   }
 
+  /**
+   * The signer currently configured on this client, if any
+   */
+  getKeypair(): Keypair | undefined {
+    return this.keypair;
+  }
+
+  /**
+   * Network passphrase this client builds and signs transactions for
+   */
+  getNetworkPassphrase(): string {
+    return this.networkPassphrase;
+  }
+
   // ===== Token Functions =====
 
   /**
