@@ -1,7 +1,9 @@
 import { 
   Address, 
   Contract, 
+  Keypair,
   SorobanRpc, 
+  Transaction,
   TransactionBuilder, 
   Networks,
   BASE_FEE,
@@ -15,6 +17,7 @@ import {
   PoolAllocation,
   TransactionOptions,
   TransactionResult,
+  TransactionSigner,
   RebalanceError,
   NetworkConfig
 } from './types';
@@ -174,15 +177,33 @@ export class RebalancerClient {
   }
 
   /**
-   * Execute a rebalance proposal
+   * Execute a rebalance proposal.
+   *
+   * Accepts either a Stellar `Keypair` or an async wallet `TransactionSigner`
+   * (e.g. Freighter). Both paths build the `execute_rebalance` call, sign it
+   * for the configured network, and submit it to the RPC node.
    */
   async executeRebalance(
-    userKeyPair: any,
+    userKeyPair: Keypair | TransactionSigner,
     proposal: RebalanceProposal,
     options?: TransactionOptions
   ): Promise<TransactionResult & { executed: boolean }> {
     try {
-      const account = await this.server.getAccount(userKeyPair.publicKey());
+      if (!userKeyPair) {
+        throw new RebalanceError(
+          'A keypair or wallet signer is required to execute a rebalance',
+          'SIGNER_REQUIRED'
+        );
+      }
+
+      const usesWalletSigner =
+        typeof (userKeyPair as TransactionSigner).signTransaction === 'function';
+
+      const publicKey = usesWalletSigner
+        ? await (userKeyPair as TransactionSigner).getPublicKey()
+        : (userKeyPair as Keypair).publicKey();
+
+      const account = await this.server.getAccount(publicKey);
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -191,14 +212,25 @@ export class RebalancerClient {
         .addOperation(
           this.contract.call(
             'execute_rebalance',
-            userKeyPair.publicKey(),
+            // Matches the string-argument style used throughout this client.
+            publicKey as any,
             this.formatRebalanceProposal(proposal)
           )
         )
         .setTimeout(options?.timeout || 30)
         .build();
 
-      const signedTx = userKeyPair.sign(tx);
+      let signedTx: Transaction;
+      if (usesWalletSigner) {
+        signedTx = await (userKeyPair as TransactionSigner).signTransaction(
+          tx,
+          this.getNetworkPassphrase()
+        );
+      } else {
+        tx.sign(userKeyPair as Keypair);
+        signedTx = tx;
+      }
+
       const result = await this.server.sendTransaction(signedTx);
       
       if (result.status === 'SUCCESS') {

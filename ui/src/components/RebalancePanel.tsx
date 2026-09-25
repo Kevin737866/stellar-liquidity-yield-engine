@@ -16,6 +16,11 @@ import {
 } from 'lucide-react';
 import { RebalancerClient, RebalanceStrategy, RebalanceHistory, PoolAllocation, RebalanceProposal, NetworkConfig } from 'stellar-liquidity-yield-engine-sdk';
 import { useTxStatus } from '../hooks/useTxStatus';
+import {
+  createFreighterSigner,
+  isFreighterAvailable,
+  isFreighterConnected,
+} from '../lib/freighter';
 
 interface RebalancePanelProps {
   network?: 'testnet' | 'mainnet';
@@ -108,13 +113,27 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
     resetTx();
     setError(null);
 
+    if (!isFreighterAvailable()) {
+      setError('Freighter is not installed. Install the Freighter extension to execute rebalances.');
+      return;
+    }
+
+    try {
+      if (!(await isFreighterConnected())) {
+        setError('Freighter is not connected. Open the extension, connect your wallet and try again.');
+        return;
+      }
+    } catch {
+      setError('Could not reach the Freighter wallet. Unlock the extension and try again.');
+      return;
+    }
+
     await runTx(async () => {
-      // executeRebalance requires a keypair/signer. In a real deployment
-      // this would be a Freighter signer. We pass a placeholder here so the
-      // call reaches the SDK and returns a TransactionResult with a hash.
-      // Replace `null` with `createFreighterSigner(network)` when a wallet
-      // is wired in.
-      const result = await rebalancerClient.executeRebalance(null as any, proposal);
+      // Sign through the wallet: Freighter provides the public key and signs
+      // the built transaction, so `execute_rebalance` runs against the user's
+      // real account instead of a mock placeholder.
+      const signer = createFreighterSigner(network);
+      const result = await rebalancerClient.executeRebalance(signer, proposal);
       await loadData();
       return {
         hash: result.hash,
