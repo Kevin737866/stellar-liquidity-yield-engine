@@ -13,6 +13,8 @@ interface UseYieldVaultOptions {
   network?: 'testnet' | 'mainnet';
   autoRefresh?: boolean;
   refreshInterval?: number;
+  signer?: any;
+  keypair?: any;
 }
 
 interface UseYieldVaultReturn {
@@ -22,6 +24,10 @@ interface UseYieldVaultReturn {
   isPaused: boolean;
   loading: boolean;
   error: string | null;
+  metricsLoading: boolean;
+  positionLoading: boolean;
+  metricsError: string | null;
+  positionError: string | null;
   refresh: () => Promise<void>;
   deposit: (amountA: bigint, amountB: bigint, minShares: bigint) => Promise<any>;
   withdraw: (shares: bigint, minAmountA: bigint, minAmountB: bigint) => Promise<any>;
@@ -59,7 +65,9 @@ export const useYieldVault = ({
   userAddress,
   network = 'testnet',
   autoRefresh = false,
-  refreshInterval = 30000 // 30 seconds
+  refreshInterval = 30000, // 30 seconds
+  signer,
+  keypair,
 }: UseYieldVaultOptions): UseYieldVaultReturn => {
   const [vaultInfo, setVaultInfo] = useState<VaultInfo | null>(null);
   const [vaultMetrics, setVaultMetrics] = useState<VaultMetrics | null>(null);
@@ -67,6 +75,10 @@ export const useYieldVault = ({
   const [isPaused, setIsPaused] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(true);
+  const [positionLoading, setPositionLoading] = useState(true);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [positionError, setPositionError] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
 
@@ -75,31 +87,86 @@ export const useYieldVault = ({
     [vaultAddress, network]
   );
 
-  // Use the Freighter address when connected, falling back to the prop.
-  const activeAddress = walletAddress || userAddress;
+  // Active signer: explicit signer prop, or keypair prop, or Freighter wallet
+  const activeSigner = useMemo(() => {
+    if (signer) return signer;
+    if (keypair) return keypair;
+    if (walletAddress) return createFreighterSigner(network);
+    return null;
+  }, [signer, keypair, walletAddress, network]);
+
+  // Derive resolved address: walletAddress, or keypair publicKey, or passed userAddress
+  const resolvedAddress = useMemo(() => {
+    if (walletAddress) return walletAddress;
+    if (keypair && typeof keypair.publicKey === 'function') {
+      try {
+        return keypair.publicKey();
+      } catch {
+        // fallback
+      }
+    }
+    return userAddress;
+  }, [walletAddress, keypair, userAddress]);
 
   const refresh = useCallback(async () => {
     try {
       setLoading(true);
+      setMetricsLoading(true);
+      setPositionLoading(true);
       setError(null);
+      setMetricsError(null);
+      setPositionError(null);
 
-      const [info, metrics, position, paused] = await Promise.all([
+      const results = await Promise.allSettled([
         vaultClient.getVaultInfo(),
         vaultClient.getMetrics(),
-        vaultClient.getUserPosition(activeAddress),
+        vaultClient.getUserPosition(resolvedAddress),
         vaultClient.isPaused()
       ]);
 
-      setVaultInfo(info);
-      setVaultMetrics(metrics);
-      setUserPosition(position);
-      setIsPaused(paused);
+      const errors: string[] = [];
+
+      if (results[0].status === 'fulfilled') {
+        setVaultInfo(results[0].value);
+      } else {
+        const msg = results[0].reason?.message || 'Failed to fetch vault info';
+        errors.push(`Vault info: ${msg}`);
+      }
+
+      if (results[1].status === 'fulfilled') {
+        setVaultMetrics(results[1].value);
+      } else {
+        const msg = results[1].reason?.message || 'Failed to fetch vault metrics (APY/TVL)';
+        setMetricsError(msg);
+        errors.push(`Metrics: ${msg}`);
+      }
+
+      if (results[2].status === 'fulfilled') {
+        setUserPosition(results[2].value);
+      } else {
+        const msg = results[2].reason?.message || 'Failed to fetch user position';
+        setPositionError(msg);
+        errors.push(`Position: ${msg}`);
+      }
+
+      if (results[3].status === 'fulfilled') {
+        setIsPaused(results[3].value);
+      } else {
+        const msg = results[3].reason?.message || 'Failed to check paused status';
+        errors.push(`State: ${msg}`);
+      }
+
+      if (errors.length > 0) {
+        setError(errors.join('. '));
+      }
     } catch (err: any) {
-      setError(err.message);
+      setError(err?.message || 'Failed to fetch vault data');
     } finally {
       setLoading(false);
+      setMetricsLoading(false);
+      setPositionLoading(false);
     }
-  }, [vaultClient, activeAddress]);
+  }, [vaultClient, resolvedAddress]);
 
   const connect = useCallback(async (): Promise<string | null> => {
     if (connecting) return walletAddress;
@@ -154,12 +221,12 @@ export const useYieldVault = ({
     try {
       setError(null);
 
-      if (!walletAddress) {
-        throw new Error('Connect a Freighter wallet before depositing.');
+      if (!activeSigner) {
+        throw new Error('Connect a Freighter wallet or provide a keypair before depositing.');
       }
 
-      // Sign and submit a real deposit transaction through Freighter.
-      const result = await vaultClient.deposit(createFreighterSigner(network), {
+      // Sign and submit a real deposit transaction through the active wallet/keypair signer.
+      const result = await vaultClient.deposit(activeSigner, {
         amountA,
         amountB,
         minShares
@@ -173,7 +240,7 @@ export const useYieldVault = ({
       setError(err.message);
       throw err;
     }
-  }, [vaultClient, refresh, walletAddress, network]);
+  }, [vaultClient, refresh, activeSigner]);
 
   const withdraw = useCallback(async (
     shares: bigint,
@@ -183,12 +250,12 @@ export const useYieldVault = ({
     try {
       setError(null);
 
-      if (!walletAddress) {
-        throw new Error('Connect a Freighter wallet before withdrawing.');
+      if (!activeSigner) {
+        throw new Error('Connect a Freighter wallet or provide a keypair before withdrawing.');
       }
 
-      // Sign and submit a real withdrawal transaction through Freighter.
-      const result = await vaultClient.withdraw(createFreighterSigner(network), {
+      // Sign and submit a real withdrawal transaction through the active wallet/keypair signer.
+      const result = await vaultClient.withdraw(activeSigner, {
         shares,
         minAmountA,
         minAmountB
@@ -202,18 +269,18 @@ export const useYieldVault = ({
       setError(err.message);
       throw err;
     }
-  }, [vaultClient, refresh, walletAddress, network]);
+  }, [vaultClient, refresh, activeSigner]);
 
   const harvest = useCallback(async () => {
     try {
       setError(null);
 
-      if (!walletAddress) {
-        throw new Error('Connect a Freighter wallet before harvesting.');
+      if (!activeSigner) {
+        throw new Error('Connect a Freighter wallet or provide a keypair before harvesting.');
       }
 
-      // Sign and submit a real harvest transaction through Freighter.
-      const result = await vaultClient.harvest(createFreighterSigner(network));
+      // Sign and submit a real harvest transaction through the active wallet/keypair signer.
+      const result = await vaultClient.harvest(activeSigner);
 
       // Refresh data after successful harvest
       await refresh();
@@ -223,7 +290,7 @@ export const useYieldVault = ({
       setError(err.message);
       throw err;
     }
-  }, [vaultClient, refresh, walletAddress, network]);
+  }, [vaultClient, refresh, activeSigner]);
 
   const getAPY = useCallback(async () => {
     try {
@@ -268,14 +335,18 @@ export const useYieldVault = ({
     isPaused,
     loading,
     error,
+    metricsLoading,
+    positionLoading,
+    metricsError,
+    positionError,
     refresh,
     deposit,
     withdraw,
     harvest,
     getAPY,
     getTVL,
-    walletAddress,
-    walletConnected: !!walletAddress,
+    walletAddress: resolvedAddress,
+    walletConnected: !!activeSigner || !!walletAddress,
     connecting,
     connect,
     disconnect
@@ -312,14 +383,27 @@ export const useMultipleVaults = ({
 
   const refreshVault = useCallback(async (vaultAddress: string) => {
     try {
-      const vaultClient = new VaultClient(vaultAddress, network);
+      const vaultClient = new VaultClient(vaultAddress, networkConfigFor(network));
       
-      const [info, metrics, position, paused] = await Promise.all([
+      const results = await Promise.allSettled([
         vaultClient.getVaultInfo(),
         vaultClient.getMetrics(),
         vaultClient.getUserPosition(userAddress),
         vaultClient.isPaused()
       ]);
+
+      const errors: string[] = [];
+      const info = results[0].status === 'fulfilled' ? results[0].value : null;
+      if (results[0].status === 'rejected') errors.push(`Vault Info: ${results[0].reason?.message || 'Failed'}`);
+
+      const metrics = results[1].status === 'fulfilled' ? results[1].value : null;
+      if (results[1].status === 'rejected') errors.push(`Metrics: ${results[1].reason?.message || 'Failed'}`);
+
+      const position = results[2].status === 'fulfilled' ? results[2].value : null;
+      if (results[2].status === 'rejected') errors.push(`Position: ${results[2].reason?.message || 'Failed'}`);
+
+      const paused = results[3].status === 'fulfilled' ? results[3].value : false;
+      if (results[3].status === 'rejected') errors.push(`State: ${results[3].reason?.message || 'Failed'}`);
 
       setVaultsData(prev => new Map(prev.set(vaultAddress, {
         info,
@@ -327,7 +411,7 @@ export const useMultipleVaults = ({
         position,
         isPaused: paused,
         loading: false,
-        error: null
+        error: errors.length > 0 ? errors.join('. ') : null
       })));
     } catch (err: any) {
       setVaultsData(prev => new Map(prev.set(vaultAddress, {
@@ -432,17 +516,37 @@ export const useVaultPerformance = (vaultAddress: string, network: 'testnet' | '
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const vaultClient = new VaultClient(vaultAddress, network);
+  const vaultClient = new VaultClient(vaultAddress, networkConfigFor(network));
 
   const trackPerformance = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
 
-      const [apy, tvl] = await Promise.all([
+      const [apyRes, tvlRes] = await Promise.allSettled([
         vaultClient.getAPY(),
         vaultClient.getTVL()
       ]);
+
+      let apy = 0;
+      let tvl = 0n;
+      const errors: string[] = [];
+
+      if (apyRes.status === 'fulfilled') {
+        apy = apyRes.value;
+      } else {
+        errors.push(`APY: ${apyRes.reason?.message || 'Failed'}`);
+      }
+
+      if (tvlRes.status === 'fulfilled') {
+        tvl = tvlRes.value;
+      } else {
+        errors.push(`TVL: ${tvlRes.reason?.message || 'Failed'}`);
+      }
+
+      if (errors.length > 0) {
+        setError(errors.join('. '));
+      }
 
       const timestamp = Date.now();
 
