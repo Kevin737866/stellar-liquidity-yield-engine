@@ -1,5 +1,5 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, i128 as SorobanI128,
+    contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec,
     unwrap::UnwrapOptimized
 };
 
@@ -28,39 +28,50 @@ pub struct RiskEngine;
 
 #[contractimpl]
 impl RiskEngine {
-    /// Calculate impermanent loss given price changes
-    /// Formula: 2 * sqrt(price_ratio) / (1 + price_ratio) - 1
+    /// Calculate impermanent loss given price changes using the standard formula
+    /// `IL = 1 - 2 * sqrt(r) / (1 + r)`, where `r = current / entry`.
+    /// Returns the loss as basis points, capped at 10000 (100%).
+    ///
+    /// The arithmetic is scaled and multiplies-before-dividing so intermediate
+    /// integer division never truncates (previously the result was discontinuous).
     pub fn calculate_impermanent_loss(
         env: Env,
         current_price_ratio: i128, // Scaled by 10000
         entry_price_ratio: i128, // Scaled by 10000
     ) -> u32 {
-        if entry_price_ratio == 0 {
+        if current_price_ratio <= 0 || entry_price_ratio <= 0 {
             return 0;
         }
 
-        // Avoid division by zero and overflow
-        let ratio = if current_price_ratio > 0 {
-            (current_price_ratio as i128 * 10000) / entry_price_ratio as i128
-        } else {
-            0
-        };
+        // r scaled by 10000: (current / entry) * 10000
+        let r_scaled = (current_price_ratio as i128 * 10000) / entry_price_ratio;
 
-        if ratio == 0 {
-            return 0;
+        // sqrt(r) scaled by 10000 = sqrt(r_scaled * 10000)
+        let sqrt_r_scaled = Self::isqrt((r_scaled as u128) * 10000);
+
+        // term = (2 * sqrt(r) / (1 + r)) * 10000
+        let denominator = r_scaled as u128 + 10000;
+        let two_sqrt = sqrt_r_scaled * 2;
+        let term = (two_sqrt * 10000) / denominator;
+
+        // By AM-GM, 1 + r >= 2 * sqrt(r), so term <= 10000 and
+        // `10000 - term` can never underflow. IL rises as price diverges.
+        let il_basis_points = if term >= 10000 { 0 } else { 10000 - term };
+        il_basis_points.min(10000) as u32
+    }
+
+    /// Integer square root (Babylonian), returns floor(sqrt(n)).
+    fn isqrt(n: u128) -> u128 {
+        if n <= 1 {
+            return n;
         }
-
-        // Simplified IL calculation: loss increases with price divergence
-        // IL% ≈ (sqrt(price_ratio) - 1)^2 / price_ratio
-        let ratio_diff = (ratio - 10000).abs();
-        let il_basis_points = (ratio_diff * ratio_diff) / (100 * ratio);
-
-        // Cap at 100% (10000 basis points)
-        if il_basis_points > 10000 {
-            10000
-        } else {
-            il_basis_points as u32
+        let mut x = n;
+        let mut y = (x + 1) / 2;
+        while y < x {
+            x = y;
+            y = (x + n / x) / 2;
         }
+        x
     }
 
     /// Estimate slippage based on pool depth and trade amount
@@ -97,10 +108,8 @@ impl RiskEngine {
         volatility_metrics: VolatilityMetrics,
     ) -> u32 {
         // Adjustment factor: 10000 = full position, scales down with volatility
-        let base_volatility = volatility_metrics.volatility_24h;
-        
-        // Reduce position proportionally to 7-day volatility
-        let volatility_average = (base_volatility as i128 + volatility_metrics.volatility_7d as i128) / 2;
+        // Incorporate both 24h and 7d volatility for a blended adjustment
+        let volatility_average = (volatility_metrics.volatility_24h as i128 + volatility_metrics.volatility_7d as i128) / 2;
         
         // Position multiplier: 10000 * (1 - volatility_avg/50000)
         // If volatility is 50% (5000 bp), reduce position to 50%
@@ -192,5 +201,61 @@ impl RiskEngine {
         let total_cost = gas_cost + fee_amount + entry_fees;
 
         (total_cost, total_fee_bp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use soroban_sdk::Env;
+
+    fn il(env: &Env, current: i128, entry: i128) -> u32 {
+        RiskEngine::calculate_impermanent_loss(env.clone(), current, entry)
+    }
+
+    #[test]
+    fn test_il_no_change_is_zero() {
+        let env = Env::default();
+        // r = 1 => IL = 0
+        assert_eq!(il(&env, 10000, 10000), 0);
+        assert_eq!(il(&env, 20000, 20000), 0);
+    }
+
+    #[test]
+    fn test_il_standard_values() {
+        let env = Env::default();
+        // r = 2 => IL = 1 - 2*sqrt(2)/3 = 5.72% => ~572 bp (allow +-15 due to integer sqrt)
+        let il_2x = il(&env, 20000, 10000);
+        assert!(il_2x >= 560 && il_2x <= 590, "r=2x got {} expected ~572", il_2x);
+
+        // r = 0.5 => symmetric to r=2 => ~572 bp
+        let il_half = il(&env, 5000, 10000);
+        assert!(il_half >= 560 && il_half <= 590, "r=0.5 got {} expected ~572", il_half);
+
+        // r = 4 => IL = 1 - 2*2/5 = 20% => 2000 bp
+        let il_4x = il(&env, 40000, 10000);
+        assert!(il_4x >= 1985 && il_4x <= 2015, "r=4x got {} expected 2000", il_4x);
+
+        // r = 1.5 => IL = 1 - 2*sqrt(1.5)/2.5
+        // sqrt1.5=1.2247 => 2*1.2247/2.5=0.9798 => IL 2.02% => ~202 bp
+        let il_1_5 = il(&env, 15000, 10000);
+        assert!(il_1_5 >= 190 && il_1_5 <= 220, "r=1.5 got {} expected ~202", il_1_5);
+    }
+
+    #[test]
+    fn test_il_zero_or_negative_returns_zero() {
+        let env = Env::default();
+        assert_eq!(il(&env, 0, 10000), 0);
+        assert_eq!(il(&env, 10000, 0), 0);
+        assert_eq!(il(&env, -1000, 10000), 0);
+    }
+
+    #[test]
+    fn test_il_is_monotonic_with_divergence() {
+        let env = Env::default();
+        let il_small = il(&env, 11000, 10000); // r=1.1
+        let il_large = il(&env, 20000, 10000); // r=2
+        assert!(il_large > il_small, "IL should increase with price divergence");
     }
 }

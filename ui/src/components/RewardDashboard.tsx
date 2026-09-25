@@ -63,7 +63,7 @@ interface RewardHistoryEntry {
     type: 'claim' | 'auto_compound' | 'reinvest';
 }
 
-interface SwapQuote {
+export interface SwapQuote {
     inputToken: string;
     outputToken: string;
     inputAmount: string;
@@ -71,6 +71,12 @@ interface SwapQuote {
     minimumOutput: string;
     priceImpactBps: number;
     protocolFee: string;
+}
+
+/** A reward amount selected for conversion. */
+export interface SwapQuoteInput {
+    token: string;
+    amount: string;
 }
 
 interface ClaimResult {
@@ -110,6 +116,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
     onEmergencyWithdraw,
     horizonServer,
     networkPassphrase,
+    onGetQuote,
 }) => {
     // State
     const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -124,6 +131,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
     const [success, setSuccess] = useState<string | null>(null);
     const [swapQuote, setSwapQuote] = useState<SwapQuote | null>(null);
     const [isLoadingQuote, setIsLoadingQuote] = useState<boolean>(false);
+    const [quoteError, setQuoteError] = useState<string | null>(null);
 
     // Calculate total USD value
     const totalUsdValue = useMemo(() => {
@@ -220,31 +228,30 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
     const handleGetQuote = useCallback(async (targetToken: string) => {
         if (selectedStreams.size === 0) return;
 
+        // Without a quote provider there is no real conversion data, so no
+        // estimate is shown - an input-amount echo would misrepresent the swap.
+        if (!onGetQuote) {
+            setSwapQuote(null);
+            setQuoteError(null);
+            return;
+        }
+
         setIsLoadingQuote(true);
+        setSwapQuote(null);
+        setQuoteError(null);
         try {
-            // Calculate total selected amount
-            const totalAmount = pendingRewards
+            const selected: SwapQuoteInput[] = pendingRewards
                 .filter((_, idx) => selectedStreams.has(idx))
-                .reduce((sum, reward) => sum + reward.amount, '0');
+                .map(reward => ({ token: reward.tokenSymbol, amount: reward.amount }));
 
-            // In production, call SDK's getSwapQuote
-            const quote: SwapQuote = {
-                inputToken: 'multiple',
-                outputToken: targetToken,
-                inputAmount: totalAmount,
-                expectedOutput: totalAmount, // Simplified
-                minimumOutput: totalAmount,
-                priceImpactBps: 0,
-                protocolFee: String(BigInt(totalAmount) * BigInt(25) / BigInt(10000))
-            };
-
+            const quote = await onGetQuote(selected, targetToken);
             setSwapQuote(quote);
-        } catch (err) {
-            console.error('Failed to get quote:', err);
+        } catch (err: any) {
+            setQuoteError(err?.message || 'Failed to fetch swap quote');
         } finally {
             setIsLoadingQuote(false);
         }
-    }, [selectedStreams, pendingRewards]);
+    }, [selectedStreams, pendingRewards, onGetQuote]);
 
     // Handle auto-compound config change
     const handleAutoCompoundChange = useCallback(async (token: string, percentage: number, enabled: boolean) => {
@@ -710,7 +717,27 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                 </select>
                             </div>
 
-                            {swapQuote && (
+                            {!onGetQuote && (
+                                <div className="quote-unavailable">
+                                    <FaInfoCircle />
+                                    Swap estimate unavailable - no quote provider configured.
+                                </div>
+                            )}
+
+                            {onGetQuote && isLoadingQuote && (
+                                <div className="quote-unavailable">
+                                    Fetching swap estimate...
+                                </div>
+                            )}
+
+                            {quoteError && (
+                                <div className="quote-error">
+                                    <FaExclamationTriangle />
+                                    {quoteError}
+                                </div>
+                            )}
+
+                            {swapQuote && !isLoadingQuote && (
                                 <div className="quote-details">
                                     <div className="quote-row">
                                         <span>Expected Output:</span>
@@ -722,7 +749,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                     </div>
                                     <div className="quote-row fee">
                                         <span>Protocol Fee (0.25%):</span>
-                                        <span>{formatAmount(swapQuote.protocolFee)} {convertToToken}</span>
+                                        <span>{formatAmount(swapQuote.protocolFee)} {swapQuote.inputToken}</span>
                                     </div>
                                     <div className="quote-row">
                                         <span>Price Impact:</span>
@@ -1295,6 +1322,31 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
           color: #f59e0b;
         }
 
+        .quote-unavailable {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 12px;
+          background: rgba(255, 255, 255, 0.05);
+          border-radius: 8px;
+          margin-bottom: 20px;
+          font-size: 14px;
+          color: #9ca3af;
+        }
+
+        .quote-error {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 12px;
+          background: rgba(220, 38, 38, 0.2);
+          border: 1px solid #dc2626;
+          border-radius: 8px;
+          margin-bottom: 20px;
+          font-size: 14px;
+          color: #fca5a5;
+        }
+
         .modal-actions {
           display: flex;
           gap: 12px;
@@ -1402,6 +1454,11 @@ export interface RewardDashboardProps {
     onEmergencyWithdraw: () => Promise<ClaimResult>;
     horizonServer: any;
     networkPassphrase: string;
+    /**
+     * Optional quote provider. When omitted, the dashboard hides swap
+     * estimates instead of displaying fabricated 1:1 conversions.
+     */
+    onGetQuote?: (input: SwapQuoteInput[], targetToken: string) => Promise<SwapQuote>;
 }
 
 export default RewardDashboard;

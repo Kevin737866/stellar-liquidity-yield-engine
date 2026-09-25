@@ -6,7 +6,10 @@ import {
   PoolInfo,
   TokenInfo,
   PriceData,
-  TimeInterval
+  TimeInterval,
+  PerformanceSnapshot,
+  HarvestEvent,
+  HarvestEfficiencyMetrics
 } from './types';
 
 export class YieldCalculator {
@@ -18,6 +21,17 @@ export class YieldCalculator {
     currentPriceRatio: number,
     timeElapsed: number
   ): ImpermanentLossData {
+    // A non-positive baseline is undefined for the IL formula; return a
+    // zero-damage result instead of NaN/Infinity so callers can render.
+    if (initialPriceRatio <= 0 || currentPriceRatio <= 0) {
+      return {
+        currentPriceRatio,
+        initialPriceRatio,
+        ilPercent: 0,
+        timeElapsed
+      };
+    }
+
     // IL formula: 2 * sqrt(price_ratio) / (1 + price_ratio) - 1
     const priceRatio = currentPriceRatio / initialPriceRatio;
     const sqrtRatio = Math.sqrt(priceRatio);
@@ -43,6 +57,17 @@ export class YieldCalculator {
     },
     timeHorizon: number
   ): ApyProjection {
+    // No historical data to project from — report a zero projection with no
+    // confidence rather than producing NaN averages.
+    if (historicalApy.length === 0) {
+      return {
+        projectedApy: 0,
+        confidence: 0,
+        timeHorizon,
+        factors: ['Historical APY: no data available']
+      };
+    }
+
     // Calculate average historical APY
     const avgHistoricalApy = historicalApy.reduce((sum, apy) => sum + apy, 0) / historicalApy.length;
     
@@ -197,18 +222,23 @@ export class YieldCalculator {
     compoundingFrequency: number, // Times per year
     timeYears: number
   ): { finalAmount: bigint; totalInterest: bigint; effectiveApy: number } {
-    const rate = apy / 10000 / 100; // Convert to decimal
+    // APY arrives in basis points (10000 = 100%); convert to a decimal
+    // fraction for the compounding formula.
+    const rate = apy / 10000;
     const n = compoundingFrequency;
     const t = timeYears;
-    
+
     // Compound interest formula: A = P(1 + r/n)^(nt)
     const compoundFactor = Math.pow(1 + rate / n, n * t);
     const finalAmount = principal * BigInt(Math.floor(compoundFactor * 1000000)) / 1000000n;
     const totalInterest = finalAmount - principal;
-    
-    // Calculate effective APY
-    const effectiveApy = (Math.pow(compoundFactor, 1 / t) - 1) * 10000;
-    
+
+    // Effective APY is undefined for a zero/negative horizon; report 0 so
+    // consumers don't receive NaN from `Math.pow(1, 1/t)`.
+    const effectiveApy = t > 0
+      ? (Math.pow(compoundFactor, 1 / t) - 1) * 10000
+      : 0;
+
     return {
       finalAmount,
       totalInterest,
@@ -390,5 +420,105 @@ export class YieldCalculator {
       bestCaseIl,
       ilDistribution: ilResults
     };
+  }
+
+  /**
+   * Compute the compound APY from a series of `PerformanceSnapshot` records.
+   *
+   * Each snapshot contributes its `apy` (in basis points) weighted by the
+   * elapsed time between consecutive snapshots. If fewer than two snapshots
+   * are provided the raw APY of the single snapshot is returned; an empty
+   * array returns 0.
+   *
+   * Issue #128.
+   */
+  static calculateHistoricalAPY(snapshots: PerformanceSnapshot[]): number {
+    if (snapshots.length === 0) return 0;
+    if (snapshots.length === 1) return snapshots[0].apy;
+
+    // Sort ascending by timestamp so time-weighting is correct.
+    const sorted = [...snapshots].sort((a, b) => a.timestamp - b.timestamp);
+
+    const totalPeriodSeconds =
+      sorted[sorted.length - 1].timestamp - sorted[0].timestamp;
+
+    if (totalPeriodSeconds <= 0) {
+      // All snapshots at the same timestamp — plain average.
+      const avg =
+        sorted.reduce((sum, s) => sum + s.apy, 0) / sorted.length;
+      return Math.round(avg);
+    }
+
+    // Time-weighted compound APY.
+    // For each interval [i, i+1] compute the per-second rate from the
+    // average APY of the two bounding snapshots, then chain-multiply.
+    let compoundFactor = 1;
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const intervalSeconds = sorted[i + 1].timestamp - sorted[i].timestamp;
+      const avgApyBps = (sorted[i].apy + sorted[i + 1].apy) / 2;
+      const annualRate = avgApyBps / 10000; // convert basis points → fraction
+      const intervalYears = intervalSeconds / (365.25 * 24 * 3600);
+      compoundFactor *= Math.pow(1 + annualRate, intervalYears);
+    }
+
+    // Back-convert to annual basis points.
+    const annualisedDecimal = Math.pow(compoundFactor, 1 / (totalPeriodSeconds / (365.25 * 24 * 3600))) - 1;
+    return Math.round(annualisedDecimal * 10000);
+  }
+
+  /**
+   * Compute aggregate harvest efficiency metrics from a list of
+   * `HarvestEvent` records.
+   *
+   * Returns zeros for all fields when the list is empty so callers don't
+   * need to guard against undefined.
+   *
+   * Issue #128.
+   */
+  static calculateHarvestEfficiency(harvests: HarvestEvent[]): HarvestEfficiencyMetrics {
+    if (harvests.length === 0) {
+      return {
+        totalRewards: 0n,
+        totalGas: 0,
+        efficiencyRatio: 0,
+        avgGasPerHarvest: 0
+      };
+    }
+
+    const totalRewards = harvests.reduce(
+      (sum, h) => sum + h.rewardsHarvested,
+      0n
+    );
+    const totalGas = harvests.reduce((sum, h) => sum + h.gasUsed, 0);
+    const efficiencyRatio =
+      totalGas > 0 ? Number(totalRewards) / totalGas : 0;
+    const avgGasPerHarvest = totalGas / harvests.length;
+
+    return {
+      totalRewards,
+      totalGas,
+      efficiencyRatio,
+      avgGasPerHarvest
+    };
+  }
+
+  /**
+   * Compute historical impermanent loss from a series of price ratios.
+   *
+   * Issue #133: replaces simulated projection with actual indexed history
+   * when available.
+   */
+  static computeHistoricalImpermanentLoss(
+    initialPriceRatio: number,
+    priceHistory: Array<{ timestamp: number; priceRatio: number }>
+  ): Array<{ timestamp: number; priceRatio: number; ilPercent: number }> {
+    return priceHistory.map((point) => {
+      const il = this.calculateImpermanentLoss(initialPriceRatio, point.priceRatio, 0);
+      return {
+        timestamp: point.timestamp,
+        priceRatio: point.priceRatio,
+        ilPercent: il.ilPercent,
+      };
+    });
   }
 }

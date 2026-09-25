@@ -1,11 +1,14 @@
 import { 
   Address, 
   Contract, 
+  Keypair,
   SorobanRpc, 
+  Transaction,
   TransactionBuilder, 
   Networks,
   BASE_FEE,
-  xdr
+  xdr,
+  scValToNative
 } from 'stellar-sdk';
 import {
   RebalanceStrategy,
@@ -14,9 +17,11 @@ import {
   PoolAllocation,
   TransactionOptions,
   TransactionResult,
+  TransactionSigner,
   RebalanceError,
   NetworkConfig
 } from './types';
+import { waitForTransaction } from './utils/transaction';
 
 export class RebalancerClient {
   private contract: Contract;
@@ -68,7 +73,7 @@ export class RebalancerClient {
       const result = await this.server.sendTransaction(signedTx);
       
       if (result.status === 'SUCCESS') {
-        const txResult = await this.server.getTransaction(result.hash);
+        const txResult = await waitForTransaction(this.server, result.hash);
         const strategyId = Number(txResult.result!.returnValue);
         
         return {
@@ -172,15 +177,33 @@ export class RebalancerClient {
   }
 
   /**
-   * Execute a rebalance proposal
+   * Execute a rebalance proposal.
+   *
+   * Accepts either a Stellar `Keypair` or an async wallet `TransactionSigner`
+   * (e.g. Freighter). Both paths build the `execute_rebalance` call, sign it
+   * for the configured network, and submit it to the RPC node.
    */
   async executeRebalance(
-    userKeyPair: any,
+    userKeyPair: Keypair | TransactionSigner,
     proposal: RebalanceProposal,
     options?: TransactionOptions
-  ): Promise<TransactionResult & { success: boolean }> {
+  ): Promise<TransactionResult & { executed: boolean }> {
     try {
-      const account = await this.server.getAccount(userKeyPair.publicKey());
+      if (!userKeyPair) {
+        throw new RebalanceError(
+          'A keypair or wallet signer is required to execute a rebalance',
+          'SIGNER_REQUIRED'
+        );
+      }
+
+      const usesWalletSigner =
+        typeof (userKeyPair as TransactionSigner).signTransaction === 'function';
+
+      const publicKey = usesWalletSigner
+        ? await (userKeyPair as TransactionSigner).getPublicKey()
+        : (userKeyPair as Keypair).publicKey();
+
+      const account = await this.server.getAccount(publicKey);
       
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
@@ -189,25 +212,36 @@ export class RebalancerClient {
         .addOperation(
           this.contract.call(
             'execute_rebalance',
-            userKeyPair.publicKey(),
+            // Matches the string-argument style used throughout this client.
+            publicKey as any,
             this.formatRebalanceProposal(proposal)
           )
         )
         .setTimeout(options?.timeout || 30)
         .build();
 
-      const signedTx = userKeyPair.sign(tx);
+      let signedTx: Transaction;
+      if (usesWalletSigner) {
+        signedTx = await (userKeyPair as TransactionSigner).signTransaction(
+          tx,
+          this.getNetworkPassphrase()
+        );
+      } else {
+        tx.sign(userKeyPair as Keypair);
+        signedTx = tx;
+      }
+
       const result = await this.server.sendTransaction(signedTx);
       
       if (result.status === 'SUCCESS') {
-        const txResult = await this.server.getTransaction(result.hash);
-        const success = Boolean(txResult.result!.returnValue);
+        const txResult = await waitForTransaction(this.server, result.hash);
+        const executed = Boolean(txResult.result!.returnValue);
         
         return {
           hash: result.hash,
           success: true,
           gasUsed: 0,
-          success: success
+          executed
         };
       } else {
         return {
@@ -215,7 +249,7 @@ export class RebalancerClient {
           success: false,
           gasUsed: 0,
           error: result.errorResult,
-          success: false
+          executed: false
         };
       }
     } catch (error: any) {
@@ -507,102 +541,83 @@ export class RebalancerClient {
     };
   }
 
+  /**
+   * Parse a vector of `RebalanceProposal` structs using `scValToNative`.
+   *
+   * The contract encodes each proposal as a struct; `scValToNative` converts
+   * the outer vector to an array and each struct to an object with snake_case
+   * keys, mapping i128s to bigints and u64s/u32s to numbers.
+   */
   private parseRebalanceProposals(returnValue: xdr.ScVal): RebalanceProposal[] {
-    // Parse the ScVal array into RebalanceProposal array
-    const proposals: RebalanceProposal[] = [];
-    const data = returnValue.array()?.val || [];
-    
-    for (const item of data) {
-      const proposalData = item.object()?.val || [];
-      proposals.push({
-        fromPool: new Address(proposalData[0]?.toString() || ''),
-        toPool: new Address(proposalData[1]?.toString() || ''),
-        amountA: BigInt(proposalData[2]?.toString() || '0'),
-        amountB: BigInt(proposalData[3]?.toString() || '0'),
-        expectedApyImprovement: Number(proposalData[4] || 0),
-        estimatedGasCost: BigInt(proposalData[5]?.toString() || '0'),
-        timestamp: Number(proposalData[6] || 0)
-      });
-    }
-    
-    return proposals;
+    const data = scValToNative(returnValue) as any[];
+
+    return data.map((item) => ({
+      fromPool: new Address(item.from_pool),
+      toPool: new Address(item.to_pool),
+      amountA: BigInt(item.amount_a),
+      amountB: BigInt(item.amount_b),
+      expectedApyImprovement: Number(item.expected_apy_improvement),
+      estimatedGasCost: BigInt(item.estimated_gas_cost),
+      timestamp: Number(item.timestamp)
+    }));
   }
 
   private parseStrategies(returnValue: xdr.ScVal): RebalanceStrategy[] {
-    // Parse the ScVal array into RebalanceStrategy array
-    const strategies: RebalanceStrategy[] = [];
-    const data = returnValue.array()?.val || [];
-    
-    for (const item of data) {
-      const strategyData = item.object()?.val || [];
-      strategies.push({
-        strategyId: Number(strategyData[0] || 0),
-        name: strategyData[1]?.toString() || '',
-        riskLevel: Number(strategyData[2] || 0),
-        minApyThreshold: Number(strategyData[3] || 0),
-        maxIlRisk: Number(strategyData[4] || 0),
-        rebalanceFrequency: Number(strategyData[5] || 0),
-        allocations: this.parseAllocations(strategyData[6] || new xdr.ScVal(xdr.ScValType.scvVec([])))
-      });
-    }
-    
-    return strategies;
+    const data = scValToNative(returnValue) as any[];
+
+    return data.map((strategy) => ({
+      strategyId: Number(strategy.strategy_id),
+      name: strategy.name,
+      riskLevel: Number(strategy.risk_level),
+      minApyThreshold: Number(strategy.min_apy_threshold),
+      maxIlRisk: Number(strategy.max_il_risk),
+      rebalanceFrequency: Number(strategy.rebalance_frequency),
+      allocations: this.parseAllocationsValue(strategy.allocations)
+    }));
   }
 
   private parseStrategy(returnValue: xdr.ScVal): RebalanceStrategy {
-    // Parse the ScVal into RebalanceStrategy structure
-    const data = returnValue.object()?.val || [];
+    const data = scValToNative(returnValue) as any;
     return {
-      strategyId: Number(data[0] || 0),
-      name: data[1]?.toString() || '',
-      riskLevel: Number(data[2] || 0),
-      minApyThreshold: Number(data[3] || 0),
-      maxIlRisk: Number(data[4] || 0),
-      rebalanceFrequency: Number(data[5] || 0),
-      allocations: this.parseAllocations(data[6] || new xdr.ScVal(xdr.ScValType.scvVec([])))
+      strategyId: Number(data.strategy_id),
+      name: data.name,
+      riskLevel: Number(data.risk_level),
+      minApyThreshold: Number(data.min_apy_threshold),
+      maxIlRisk: Number(data.max_il_risk),
+      rebalanceFrequency: Number(data.rebalance_frequency),
+      allocations: this.parseAllocationsValue(data.allocations)
     };
   }
 
   private parseAllocations(returnValue: xdr.ScVal): PoolAllocation[] {
-    // Parse the ScVal array into PoolAllocation array
-    const allocations: PoolAllocation[] = [];
-    const data = returnValue.array()?.val || [];
-    
-    for (const item of data) {
-      const allocData = item.object()?.val || [];
-      allocations.push({
-        poolId: new Address(allocData[0]?.toString() || ''),
-        tokenA: new Address(allocData[1]?.toString() || ''),
-        tokenB: new Address(allocData[2]?.toString() || ''),
-        allocationPercent: Number(allocData[3] || 0),
-        targetApy: Number(allocData[4] || 0),
-        currentApy: Number(allocData[5] || 0),
-        impermanentLossRisk: Number(allocData[6] || 0)
-      });
-    }
-    
-    return allocations;
+    const data = scValToNative(returnValue) as any[];
+    return this.parseAllocationsValue(data);
+  }
+
+  private parseAllocationsValue(allocations: any[]): PoolAllocation[] {
+    return allocations.map((alloc) => ({
+      poolId: new Address(alloc.pool_id),
+      tokenA: new Address(alloc.token_a),
+      tokenB: new Address(alloc.token_b),
+      allocationPercent: Number(alloc.allocation_percent),
+      targetApy: Number(alloc.target_apy),
+      currentApy: Number(alloc.current_apy),
+      impermanentLossRisk: Number(alloc.impermanent_loss_risk)
+    }));
   }
 
   private parseHistory(returnValue: xdr.ScVal): RebalanceHistory[] {
-    // Parse the ScVal array into RebalanceHistory array
-    const history: RebalanceHistory[] = [];
-    const data = returnValue.array()?.val || [];
-    
-    for (const item of data) {
-      const historyData = item.object()?.val || [];
-      history.push({
-        timestamp: Number(historyData[0] || 0),
-        fromPool: new Address(historyData[1]?.toString() || ''),
-        toPool: new Address(historyData[2]?.toString() || ''),
-        amountMoved: BigInt(historyData[3]?.toString() || '0'),
-        apyBefore: Number(historyData[4] || 0),
-        apyAfter: Number(historyData[5] || 0),
-        success: Boolean(historyData[6] || false)
-      });
-    }
-    
-    return history;
+    const data = scValToNative(returnValue) as any[];
+
+    return data.map((item) => ({
+      timestamp: Number(item.timestamp),
+      fromPool: new Address(item.from_pool),
+      toPool: new Address(item.to_pool),
+      amountMoved: BigInt(item.amount_moved),
+      apyBefore: Number(item.apy_before),
+      apyAfter: Number(item.apy_after),
+      success: Boolean(item.success)
+    }));
   }
 
   private calculateRiskAssessment(proposals: RebalanceProposal[], marketConditions: any): number {
