@@ -7,6 +7,8 @@ import {
     Asset,
     Networks
 } from 'stellar-sdk';
+import { VaultClient } from './vaultClient';
+import { VaultClientConfig } from './types';
 
 /**
  * Reward stream information
@@ -143,6 +145,14 @@ class BigIntString {
     }
 }
 
+export interface RewardsSDKConfig {
+    horizonServer: HorizonServer;
+    networkPassphrase: string;
+    rewardDistributor: string;
+    swapRouter: string;
+    networkConfig: VaultClientConfig;
+}
+
 /**
  * Rewards SDK for interacting with multi-reward yield farming
  */
@@ -151,17 +161,15 @@ export class RewardsSDK {
     private networkPassphrase: string;
     private rewardDistributor: Address;
     private swapRouter: Address;
+    private networkConfig: VaultClientConfig;
+    private vaultClients = new Map<string, VaultClient>();
 
-    constructor(config: {
-        horizonServer: HorizonServer;
-        networkPassphrase: string;
-        rewardDistributor: string;
-        swapRouter: string;
-    }) {
+    constructor(config: RewardsSDKConfig) {
         this.horizonServer = config.horizonServer;
         this.networkPassphrase = config.networkPassphrase;
         this.rewardDistributor = new Address(config.rewardDistributor);
         this.swapRouter = new Address(config.swapRouter);
+        this.networkConfig = config.networkConfig;
     }
 
     /**
@@ -199,7 +207,6 @@ export class RewardsSDK {
         prices?: TokenPrices
     ): Promise<PendingRewards> {
         try {
-            // Get user's vault shares (mock for now)
             const userShares = await this.getUserShares(vault, user);
 
             if (BigIntString.isZero(userShares)) {
@@ -866,13 +873,17 @@ export class RewardsSDK {
         ];
     }
 
-    /**
-     * Get user's shares in a vault (mock implementation)
-     */
     private async getUserShares(vault: string, user: string): Promise<string> {
-        // In production, query vault contract
-        // For now, return mock shares
-        return '1000000000'; // 1000 shares with 6 decimals
+        const vaultKey = vault;
+        let vaultClient = this.vaultClients.get(vaultKey);
+
+        if (!vaultClient) {
+            vaultClient = new VaultClient(vault, this.networkConfig);
+            this.vaultClients.set(vaultKey, vaultClient);
+        }
+
+        const position = await vaultClient.getUserPosition(new Address(user));
+        return position.shares.toString();
     }
 
     /**
@@ -921,12 +932,7 @@ let rewardsSDKInstance: RewardsSDK | null = null;
 /**
  * Get or create RewardsSDK instance
  */
-export function getRewardsSDK(config: {
-    horizonServer: HorizonServer;
-    networkPassphrase: string;
-    rewardDistributor: string;
-    swapRouter: string;
-}): RewardsSDK {
+export function getRewardsSDK(config: RewardsSDKConfig): RewardsSDK {
     if (!rewardsSDKInstance) {
         rewardsSDKInstance = new RewardsSDK(config);
     }

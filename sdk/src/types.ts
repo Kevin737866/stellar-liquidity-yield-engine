@@ -290,6 +290,8 @@ export interface NetworkConfig {
   };
 }
 
+export type VaultClientConfig = Pick<NetworkConfig, 'network' | 'sorobanRpcUrl'>;
+
 export interface VaultConfig {
   vaultAddress: Address;
   tokenA: Address;

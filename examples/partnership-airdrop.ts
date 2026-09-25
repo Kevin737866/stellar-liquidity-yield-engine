@@ -73,6 +73,10 @@ class PartnershipAirdrop {
             networkPassphrase: CONFIG.networkPassphrase,
             rewardDistributor: CONFIG.rewardDistributor,
             swapRouter: CONFIG.swapRouter,
+            networkConfig: {
+                network: 'testnet',
+                sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
+            },
         });
 
         this.vaultClient = new VaultClient({

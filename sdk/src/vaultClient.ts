@@ -18,7 +18,7 @@ import {
   TransactionOptions,
   TransactionResult,
   VaultError,
-  NetworkConfig,
+  VaultClientConfig,
   PerformanceSnapshot,
   HarvestEvent,
   ILSnapshot
@@ -28,13 +28,13 @@ import { waitForTransaction } from './utils/transaction';
 export class VaultClient {
   private contract: Contract;
   private server: SorobanRpc.Server;
-  private networkConfig: NetworkConfig;
+  private networkConfig: VaultClientConfig;
 
   constructor(
-    vaultAddress: Address,
-    networkConfig: NetworkConfig
+    vaultAddress: string | Address,
+    networkConfig: VaultClientConfig
   ) {
-    this.contract = new Contract(vaultAddress);
+    this.contract = new Contract(vaultAddress.toString());
     this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
     this.networkConfig = networkConfig;
   }
