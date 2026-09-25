@@ -686,6 +686,10 @@ export class GovernanceSDK {
    * Queue a successful proposal for execution
    */
   async queueProposal(proposalId: number): Promise<Transaction> {
+    if (!this.keypair) {
+      throw new Error('Keypair required');
+    }
+
     const transaction = await this.buildTransaction(
       GOVERNANCE_CONTRACT_ADDRESS,
       'queue',
@@ -701,6 +705,10 @@ export class GovernanceSDK {
    * Execute a queued proposal
    */
   async executeProposal(proposalId: number): Promise<Transaction> {
+    if (!this.keypair) {
+      throw new Error('Keypair required');
+    }
+
     const transaction = await this.buildTransaction(
       GOVERNANCE_CONTRACT_ADDRESS,
       'execute',
@@ -716,6 +724,10 @@ export class GovernanceSDK {
    * Cancel a proposal
    */
   async cancelProposal(proposalId: number): Promise<Transaction> {
+    if (!this.keypair) {
+      throw new Error('Keypair required');
+    }
+
     const transaction = await this.buildTransaction(
       GOVERNANCE_CONTRACT_ADDRESS,
       'cancel',
