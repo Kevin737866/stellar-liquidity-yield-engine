@@ -258,15 +258,14 @@ export interface TransactionOptions {
   skipConfirmation?: boolean;
 }
 
-/**
- * A signing abstraction that lets `VaultClient` submit real transactions
- * through browser wallets such as Freighter, which expose an async
- * `getPublicKey()` and sign transactions via `signTransaction()` rather than
- * holding a local `Keypair`.
- */
-export interface TransactionSigner {
-  getPublicKey(): Promise<string> | string;
-  signTransaction(tx: Transaction, networkPassphrase: string): Promise<Transaction> | Transaction;
+// Vault Client Options
+export interface VaultClientOptions {
+  /**
+   * Public key of the account used as the source for read-only
+   * `simulateTransaction` queries (e.g. the caller's own address).
+   * Defaults to a freshly generated test account.
+   */
+  simulationSource?: string;
 }
 
 export interface TransactionResult {
