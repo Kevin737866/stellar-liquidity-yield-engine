@@ -107,5 +107,16 @@ export function createGovernanceClient(
   return new GovernanceSDK(config.sorobanRpcUrl, networkPassphrase, options.keypair);
 }
 
-// Version
-export const VERSION = '0.2.0';
+// Version - single source of truth from package.json
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+export const VERSION: string = (() => {
+  try {
+    return require('../../package.json').version;
+  } catch {
+    try {
+      return require('../package.json').version;
+    } catch {
+      return '0.1.0';
+    }
+  }
+})();

@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
-import { Shield, Zap, Target, TrendingUp, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Shield, Zap, Target, TrendingUp, AlertTriangle, CheckCircle, RefreshCw } from 'lucide-react';
 import { YieldStrategy, RiskLevel } from 'stellar-liquidity-yield-engine-sdk';
 import { StrategyRegistryClient } from 'stellar-liquidity-yield-engine-sdk';
 
@@ -12,10 +12,18 @@ interface StrategySelectorProps {
   onStrategySelect?: (strategy: YieldStrategy) => void;
   selectedStrategy?: YieldStrategy | null;
   network?: 'testnet' | 'mainnet';
+  registryAddress?: string;
 }
 
-/** Build a minimal NetworkConfig for the registry client from a network string. */
-function networkConfigFor(network: 'testnet' | 'mainnet') {
+/** Build a minimal NetworkConfig for the registry client from a network string and optional registry address. */
+function networkConfigFor(network: 'testnet' | 'mainnet', registryAddress?: string) {
+  const envAddress =
+    typeof process !== 'undefined'
+      ? process.env?.NEXT_PUBLIC_STRATEGY_REGISTRY_CONTRACT_ID ||
+        process.env?.STRATEGY_REGISTRY_CONTRACT_ID ||
+        ''
+      : '';
+
   return {
     network,
     horizonUrl:
@@ -30,15 +38,45 @@ function networkConfigFor(network: 'testnet' | 'mainnet') {
       yieldEngine: '',
       rewardDistributor: '',
       rebalanceEngine: '',
-      strategyRegistry: '',
+      strategyRegistry: registryAddress || envAddress,
     },
   };
 }
 
+export const StrategySelectorSkeleton: React.FC = () => (
+  <Card className="w-full max-w-4xl mx-auto animate-pulse" data-testid="strategy-selector-skeleton">
+    <CardHeader>
+      <div className="h-7 w-56 bg-gray-200 rounded"></div>
+    </CardHeader>
+    <CardContent className="space-y-4">
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="p-4 border-2 border-gray-100 rounded-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 bg-gray-200 rounded-full"></div>
+              <div className="space-y-1.5">
+                <div className="h-5 w-40 bg-gray-200 rounded"></div>
+                <div className="h-3 w-64 bg-gray-200 rounded"></div>
+              </div>
+            </div>
+            <div className="h-6 w-20 bg-gray-200 rounded-full"></div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2">
+            {[1, 2, 3, 4].map((j) => (
+              <div key={j} className="h-10 bg-gray-100 rounded"></div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </CardContent>
+  </Card>
+);
+
 export const StrategySelector: React.FC<StrategySelectorProps> = ({
   onStrategySelect,
   selectedStrategy,
-  network = 'testnet'
+  network = 'testnet',
+  registryAddress,
 }) => {
   const [strategies, setStrategies] = useState<YieldStrategy[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46,7 +84,7 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
 
   useEffect(() => {
     loadStrategies();
-  }, [network]);
+  }, [network, registryAddress]);
 
   /**
    * Fetch active strategies from the strategy registry via the SDK.
@@ -61,7 +99,7 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
       setLoading(true);
       setError(null);
 
-      const registryClient = new StrategyRegistryClient(networkConfigFor(network));
+      const registryClient = new StrategyRegistryClient(networkConfigFor(network, registryAddress));
       const activeStrategies = await registryClient.fetchActiveStrategies();
       setStrategies(activeStrategies);
     } catch (err: any) {
@@ -112,16 +150,7 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
   };
 
   if (loading) {
-    return (
-      <Card className="w-full max-w-4xl mx-auto">
-        <CardContent className="p-6">
-          <div className="flex items-center justify-center h-32 gap-3">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            <span className="text-gray-500">Loading strategies…</span>
-          </div>
-        </CardContent>
-      </Card>
-    );
+    return <StrategySelectorSkeleton />;
   }
 
   return (
@@ -271,9 +300,20 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
 
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-md p-3">
-            <div className="flex items-center gap-2 text-sm text-red-600">
-              <AlertTriangle className="h-4 w-4" />
-              {error}
+            <div className="flex items-center justify-between gap-2 text-sm text-red-600">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                <span>{error}</span>
+              </div>
+              <Button
+                onClick={() => loadStrategies()}
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs border-red-300 text-red-700 hover:bg-red-100 gap-1 flex-shrink-0"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Retry
+              </Button>
             </div>
           </div>
         )}
