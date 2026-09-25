@@ -1,6 +1,7 @@
 // Main exports for the Stellar Liquidity Yield Engine SDK
 
-import { Networks } from 'stellar-sdk';
+import { Keypair, Networks } from 'stellar-sdk';
+import { GovernanceSDK } from './governance';
 
 export * from './types';
 export { VaultClient } from './vaultClient';
@@ -88,10 +89,22 @@ export function createRebalancerClient(network: 'testnet' | 'mainnet' = 'testnet
   return new RebalancerClient(config);
 }
 
-export function createGovernanceClient(network: 'testnet' | 'mainnet' = 'testnet') {
+export interface CreateGovernanceClientOptions {
+  /**
+   * Optional signer for governance transactions. The client can be created
+   * without one (read-only calls still work); call `setKeypair()` later or
+   * pass the keypair here to enable signing.
+   */
+  keypair?: Keypair;
+}
+
+export function createGovernanceClient(
+  network: 'testnet' | 'mainnet' = 'testnet',
+  options: CreateGovernanceClientOptions = {},
+): GovernanceSDK {
   const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
   const networkPassphrase = network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
-  return new GovernanceSDK(config.sorobanRpcUrl, networkPassphrase);
+  return new GovernanceSDK(config.sorobanRpcUrl, networkPassphrase, options.keypair);
 }
 
 // Version
