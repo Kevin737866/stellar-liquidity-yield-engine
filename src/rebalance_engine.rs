@@ -73,8 +73,7 @@ pub struct ArbitrageOpportunity {
 pub struct ArbitrageThresholds {
     pub min_apy_delta: u32, // Minimum APY difference to trigger rebalance (basis points)
     pub max_il_tolerance: u32, // Maximum acceptable IL (basis points)
-    pub cooldown_period: u64, // Seconds between rebalances per vault
-    pub last_rebalance_time: u64, // Timestamp of last rebalance
+    pub cooldown_period: u64, // Seconds between rebalances, applied per vault
 }
 
 #[contract]
@@ -95,6 +94,14 @@ impl RebalanceEngine {
         // Initialize empty history
         let history: Vec<RebalanceHistory> = Vec::new(&env);
         env.storage().instance().set(&Symbol::new(&env, "history"), &history);
+
+        // Per-vault rebalance cooldowns (Issue #109). The cooldown is keyed by
+        // vault so one vault rebalancing never blocks another.
+        let last_rebalance_times: Map<Address, u64> = Map::new(&env);
+        env.storage().instance().set(
+            &Symbol::new(&env, "vault_last_rebalance_times"),
+            &last_rebalance_times,
+        );
     }
 
     /// Create a new rebalance strategy
@@ -108,7 +115,7 @@ impl RebalanceEngine {
         rebalance_frequency: u64,
         allocations: Vec<PoolAllocation>,
     ) -> u32 {
-        Self::require_admin(&env, admin);
+        Self::require_admin(&env, admin.clone());
         Self::require_not_paused(&env);
         Self::validate_allocations(&allocations);
 
@@ -116,7 +123,7 @@ impl RebalanceEngine {
         
         let strategy = RebalanceStrategy {
             strategy_id,
-            name,
+            name: name.clone(),
             risk_level,
             min_apy_threshold,
             max_il_risk,
@@ -187,7 +194,7 @@ impl RebalanceEngine {
         let mut proposals: Vec<RebalanceProposal> = Vec::new(&env);
 
         // Analyze each allocation in the strategy
-        for allocation in strategy.allocations {
+        for allocation in strategy.allocations.iter() {
             let current_apy = allocation.current_apy;
             let target_apy = allocation.target_apy;
 
@@ -578,13 +585,12 @@ impl RebalanceEngine {
         max_il_tolerance: u32,
         cooldown_period: u64,
     ) {
-        Self::require_admin(&env, admin);
+        Self::require_admin(&env, admin.clone());
         
         let thresholds = ArbitrageThresholds {
             min_apy_delta,
             max_il_tolerance,
             cooldown_period,
-            last_rebalance_time: 0u64,
         };
         
         env.storage().instance().set(&Symbol::new(&env, "arbitrage_thresholds"), &thresholds);
@@ -604,7 +610,6 @@ impl RebalanceEngine {
                 min_apy_delta: 200u32, // Default 2%
                 max_il_tolerance: 100u32, // Default 1%
                 cooldown_period: 86400u64, // Default 24 hours
-                last_rebalance_time: 0u64,
             })
     }
 
@@ -684,6 +689,54 @@ impl RebalanceEngine {
         (total_cost, net_profit, is_profitable)
     }
 
+    // ============ PER-VAULT REBALANCE COOLDOWN (Issue #109) ============
+
+    /// Timestamp of the last successful rebalance for a vault, or 0 if the vault
+    /// has never rebalanced.
+    pub fn get_vault_last_rebalance_time(env: Env, vault_id: Address) -> u64 {
+        Self::get_last_rebalance_times(env).get(vault_id).unwrap_or(0u64)
+    }
+
+    /// Seconds until the vault is allowed to rebalance again. Returns 0 when the
+    /// vault has never rebalanced or its cooldown has already expired.
+    pub fn get_vault_cooldown_remaining(env: Env, vault_id: Address) -> u64 {
+        let last = match Self::get_last_rebalance_times(env.clone()).get(vault_id) {
+            Some(last) => last,
+            None => return 0,
+        };
+
+        let elapsed = env.ledger().timestamp().saturating_sub(last);
+        let cooldown = Self::get_arbitrage_thresholds(env).cooldown_period;
+        cooldown.saturating_sub(elapsed)
+    }
+
+    /// True while the vault is still inside its own cooldown window.
+    pub fn is_vault_in_cooldown(env: Env, vault_id: Address) -> bool {
+        Self::get_vault_cooldown_remaining(env, vault_id) > 0
+    }
+
+    /// Internal: the per-vault cooldown map
+    fn get_last_rebalance_times(env: Env) -> Map<Address, u64> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "vault_last_rebalance_times"))
+            .unwrap_or(Map::new(&env))
+    }
+
+    /// Internal: record a successful rebalance for this vault only
+    fn record_vault_rebalance(env: &Env, vault_id: Address) {
+        let mut times = Self::get_last_rebalance_times(env.clone());
+        times.set(vault_id.clone(), env.ledger().timestamp());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "vault_last_rebalance_times"), &times);
+
+        env.events().publish(
+            (Symbol::new(env, "vault_rebalanced"), vault_id),
+            (env.ledger().timestamp(),),
+        );
+    }
+
     /// Execute atomic flash rebalance: withdraw → swap → deposit in single transaction
     /// Cooldown is tracked per vault so one vault's rebalance does not block others.
     pub fn execute_flash_rebalance(
@@ -695,19 +748,8 @@ impl RebalanceEngine {
     ) -> bool {
         Self::require_not_paused(&env);
 
-        // Check per-vault cooldown
-        let thresholds = Self::get_arbitrage_thresholds(env.clone());
-        let last_rebalance_times: Map<Address, u64> = env
-            .storage()
-            .instance()
-            .get(&Symbol::new(&env, "vault_last_rebalance_times"))
-            .unwrap_or(Map::new(&env));
-
-        let vault_last_time = last_rebalance_times.get(vault_id.clone()).unwrap_or(0u64);
-        let time_since_last = env.ledger().timestamp() - vault_last_time;
-
         // Enforce cooldown per vault to prevent churn
-        if time_since_last < thresholds.cooldown_period {
+        if Self::is_vault_in_cooldown(env.clone(), vault_id.clone()) {
             return false;
         }
 
@@ -748,10 +790,8 @@ impl RebalanceEngine {
         );
 
         if deposited {
-            // Update per-vault last rebalance timestamp
-            let mut times = last_rebalance_times;
-            times.set(vault_id, env.ledger().timestamp());
-            env.storage().instance().set(&Symbol::new(&env, "vault_last_rebalance_times"), &times);
+            // Update this vault's cooldown only; other vaults stay free to rebalance.
+            Self::record_vault_rebalance(&env, vault_id);
         }
 
         deposited
@@ -786,7 +826,11 @@ mod tests {
     extern crate std;
     use super::*;
     use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::Ledger as _;
+    use soroban_sdk::token::StellarAssetClient;
     use soroban_sdk::{Env, Symbol, Vec};
+
+    use crate::YieldVault;
 
     fn il(env: &Env, current: i128, entry: i128) -> u32 {
         let pool = Address::generate(env);
@@ -862,5 +906,182 @@ mod tests {
         assert_eq!(page.len(), 0);
         let overflow = client.get_history_paginated(&10, &5);
         assert_eq!(overflow.len(), 0);
+    }
+
+    // ============ PER-VAULT COOLDOWN TESTS (Issue #109) ============
+
+    const T0: u64 = 1_000_000;
+    const COOLDOWN: u64 = 3600;
+
+    /// Register a real vault whose pool is a Stellar Asset Contract, so the flash
+    /// rebalance legs can actually move tokens instead of being mocked away.
+    fn register_vault(env: &Env, admin: &Address) -> Address {
+        let pool = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_a = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_b = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+
+        let vault_id = env.register_contract(None, YieldVault);
+        YieldVaultClient::new(env, &vault_id).initialize(
+            admin,
+            &Symbol::new(env, "Vault"),
+            &token_a,
+            &token_b,
+            &pool,
+            &1,
+            &0,
+            &0,
+            &0,
+            admin,
+        );
+
+        // Fund the pool so the withdraw leg can pay out.
+        StellarAssetClient::new(env, &pool).mint(&pool, &1_000_000i128);
+
+        vault_id
+    }
+
+    fn opportunity(env: &Env, target: &Address) -> ArbitrageOpportunity {
+        ArbitrageOpportunity {
+            pool_id: target.clone(),
+            current_apy: 500,
+            projected_apy: 1500,
+            il_risk: 50,
+            net_profit: 1_000_000,
+            apy_delta: 1000,
+            recommended: true,
+        }
+    }
+
+    /// The engine withdraws the source token and deposits the destination token.
+    /// There is no swap router behind the deposit leg yet, so the engine is
+    /// stocked with the destination token - otherwise the deposit leg reverts on
+    /// a zero balance and the cooldown bookkeeping is never reached.
+    fn stock_engine(env: &Env, engine_id: &Address, token: &Address) {
+        StellarAssetClient::new(env, token).mint(engine_id, &1_000_000i128);
+    }
+
+    #[test]
+    fn test_cooldown_is_tracked_per_vault() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = T0);
+
+        let admin = Address::generate(&env);
+        let engine_id = env.register_contract(None, RebalanceEngine);
+        let client = RebalanceEngineClient::new(&env, &engine_id);
+        client.initialize(&admin);
+        client.set_rebalance_thresholds(&admin, &200, &100, &COOLDOWN);
+
+        let vault_a = register_vault(&env, &admin);
+        let vault_b = register_vault(&env, &admin);
+        let target = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        stock_engine(&env, &engine_id, &target);
+        let caller = Address::generate(&env);
+        let opp = opportunity(&env, &target);
+
+        // Fresh vaults are not in cooldown.
+        assert_eq!(client.get_vault_last_rebalance_time(&vault_a), 0);
+        assert_eq!(client.get_vault_cooldown_remaining(&vault_a), 0);
+        assert!(!client.is_vault_in_cooldown(&vault_a));
+
+        assert!(client.execute_flash_rebalance(&caller, &vault_a, &opp, &1000));
+        assert_eq!(client.get_vault_last_rebalance_time(&vault_a), T0);
+        assert_eq!(client.get_vault_cooldown_remaining(&vault_a), COOLDOWN);
+        assert!(client.is_vault_in_cooldown(&vault_a));
+
+        // The same vault is blocked from churning.
+        assert!(!client.execute_flash_rebalance(&caller, &vault_a, &opp, &1000));
+
+        // A different vault is completely unaffected by vault A's cooldown.
+        assert!(!client.is_vault_in_cooldown(&vault_b));
+        assert!(client.execute_flash_rebalance(&caller, &vault_b, &opp, &1000));
+        assert!(client.is_vault_in_cooldown(&vault_b));
+        assert_eq!(client.get_vault_last_rebalance_time(&vault_b), T0);
+        assert_eq!(client.get_vault_cooldown_remaining(&vault_b), COOLDOWN);
+
+        // Vault A's own timestamp is untouched by vault B rebalancing.
+        assert_eq!(client.get_vault_last_rebalance_time(&vault_a), T0);
+
+        // Once vault A's own cooldown expires it can rebalance again.
+        env.ledger().with_mut(|li| li.timestamp = T0 + COOLDOWN);
+        assert!(!client.is_vault_in_cooldown(&vault_a));
+        assert!(client.execute_flash_rebalance(&caller, &vault_a, &opp, &1000));
+        assert_eq!(
+            client.get_vault_last_rebalance_time(&vault_a),
+            T0 + COOLDOWN
+        );
+    }
+
+    #[test]
+    fn test_cooldown_countdown_uses_each_vault_own_clock() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = T0);
+
+        let admin = Address::generate(&env);
+        let engine_id = env.register_contract(None, RebalanceEngine);
+        let client = RebalanceEngineClient::new(&env, &engine_id);
+        client.initialize(&admin);
+        client.set_rebalance_thresholds(&admin, &200, &100, &COOLDOWN);
+
+        let vault_a = register_vault(&env, &admin);
+        let target = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        stock_engine(&env, &engine_id, &target);
+        let caller = Address::generate(&env);
+        let opp = opportunity(&env, &target);
+
+        assert!(client.execute_flash_rebalance(&caller, &vault_a, &opp, &1000));
+
+        env.ledger().with_mut(|li| li.timestamp = T0 + COOLDOWN - 1);
+        assert_eq!(client.get_vault_cooldown_remaining(&vault_a), 1);
+        assert!(client.is_vault_in_cooldown(&vault_a));
+        assert!(!client.execute_flash_rebalance(&caller, &vault_a, &opp, &1000));
+
+        env.ledger().with_mut(|li| li.timestamp = T0 + COOLDOWN);
+        assert_eq!(client.get_vault_cooldown_remaining(&vault_a), 0);
+        assert!(!client.is_vault_in_cooldown(&vault_a));
+    }
+
+    #[test]
+    fn test_paused_engine_blocks_flash_rebalance() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().with_mut(|li| li.timestamp = T0);
+
+        let admin = Address::generate(&env);
+        let engine_id = env.register_contract(None, RebalanceEngine);
+        let client = RebalanceEngineClient::new(&env, &engine_id);
+        client.initialize(&admin);
+        client.set_rebalance_thresholds(&admin, &200, &100, &COOLDOWN);
+
+        let vault = register_vault(&env, &admin);
+        let target = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let caller = Address::generate(&env);
+        let opp = opportunity(&env, &target);
+
+        client.pause(&admin);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.execute_flash_rebalance(&caller, &vault, &opp, &1000);
+        }));
+
+        assert!(
+            result.is_err(),
+            "paused engine must reject flash rebalances"
+        );
+        // The failed attempt must not have started a cooldown.
+        assert!(!client.is_vault_in_cooldown(&vault));
     }
 }
