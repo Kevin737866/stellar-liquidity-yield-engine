@@ -42,6 +42,19 @@ pub struct YieldVault;
 /// Seconds in a common (non-leap) year, used to annualize APY.
 const SECONDS_PER_YEAR: u128 = 31_536_000;
 
+/// Default minimum deposit per leg: 0, because a single-leg deposit is a valid
+/// operation. The combined deposit must still be positive, and an admin can
+/// raise either leg with `set_min_deposit_amounts`.
+pub const DEFAULT_MIN_DEPOSIT: i128 = 0;
+
+/// Smallest accepted withdrawal, in shares, when the admin has not configured a
+/// minimum: one share.
+pub const DEFAULT_MIN_WITHDRAW_SHARES: i128 = 1;
+
+/// A tracked balance at or below this is dust. It is swept into a full exit
+/// instead of being stranded in the vault forever.
+pub const DUST_THRESHOLD: i128 = 1;
+
 #[contractimpl]
 impl YieldVault {
     /// Initialize a new yield vault
@@ -59,9 +72,9 @@ impl YieldVault {
         treasury: Address,
     ) {
         let vault_info = VaultInfo {
-            name,
-            token_a,
-            token_b,
+            name: name.clone(),
+            token_a: token_a.clone(),
+            token_b: token_b.clone(),
             pool_id,
             strategy_id,
             fee_rate,
@@ -121,6 +134,13 @@ impl YieldVault {
     ) -> i128 {
         Self::require_not_paused(&env);
 
+        // Reject sub-unit and zero deposits before any tokens move, so a dust
+        // deposit can never be used to grief the vault or other depositors.
+        let (min_a, min_b) = Self::get_min_deposit_amounts(env.clone());
+        require!(amount_a >= min_a, "amount_a below minimum deposit");
+        require!(amount_b >= min_b, "amount_b below minimum deposit");
+        require!(amount_a + amount_b > 0, "deposit must be positive");
+
         let vault_info = Self::get_vault_info(env.clone());
         let mut metrics = Self::get_metrics(env.clone());
 
@@ -144,6 +164,10 @@ impl YieldVault {
                 (amount_a + amount_b) * metrics.total_shares / total_value
             }
         };
+
+        // A deposit that rounds down to nothing would be a pure donation, so it
+        // is rejected instead of silently credited to existing holders.
+        require!(shares > 0, "deposit too small: mints zero shares");
 
         if shares < min_shares {
             panic!("insufficient shares received");
@@ -183,6 +207,15 @@ impl YieldVault {
     ) -> (i128, i128) {
         Self::require_not_paused(&env);
 
+        // Reject zero-share and sub-unit withdrawals before any arithmetic, which
+        // also removes the divide-by-zero path when no shares are outstanding.
+        let min_withdraw_shares = Self::get_min_withdraw_shares(env.clone());
+        require!(shares > 0, "shares must be positive");
+        require!(
+            shares >= min_withdraw_shares,
+            "withdrawal below minimum shares"
+        );
+
         let vault_info = Self::get_vault_info(env.clone());
         let mut metrics = Self::get_metrics(env.clone());
         let mut position = Self::get_user_position(env.clone(), user.clone());
@@ -191,9 +224,32 @@ impl YieldVault {
             panic!("insufficient shares");
         }
 
+        require!(metrics.total_shares > 0, "no shares outstanding");
+
         // Calculate withdrawal amounts
-        let withdraw_amount_a = shares * metrics.total_amount_a / metrics.total_shares;
-        let withdraw_amount_b = shares * metrics.total_amount_b / metrics.total_shares;
+        let is_full_exit = shares == position.shares;
+        let mut withdraw_amount_a = shares * metrics.total_amount_a / metrics.total_shares;
+        let mut withdraw_amount_b = shares * metrics.total_amount_b / metrics.total_shares;
+
+        if is_full_exit {
+            // Sweep a dust remainder into the exit so a rounding leftover can
+            // never be stranded in the vault and can never block a full exit.
+            let leftover_a = metrics.total_amount_a - withdraw_amount_a;
+            if leftover_a <= DUST_THRESHOLD {
+                withdraw_amount_a += leftover_a;
+            }
+            let leftover_b = metrics.total_amount_b - withdraw_amount_b;
+            if leftover_b <= DUST_THRESHOLD {
+                withdraw_amount_b += leftover_b;
+            }
+        } else {
+            // A partial exit has to redeem something, otherwise the shares would
+            // round-trip to dust.
+            require!(
+                withdraw_amount_a > 0 || withdraw_amount_b > 0,
+                "withdrawal too small: redeems zero tokens"
+            );
+        }
 
         // Apply withdrawal fee
         let fee_amount_a = withdraw_amount_a * vault_info.withdrawal_fee as i128 / 10000;
@@ -256,6 +312,19 @@ impl YieldVault {
             }
         }
 
+        // Route the withdrawal fee to the treasury as well, so every fee the
+        // vault collects ends up in the fee-sharing system instead of being
+        // stranded in the vault's own balance.
+        if fee_amount_a > 0 || fee_amount_b > 0 {
+            let treasury = Self::get_treasury(env.clone());
+            if fee_amount_a > 0 {
+                token_a_client.transfer(&env.current_contract_address(), &treasury, &fee_amount_a);
+            }
+            if fee_amount_b > 0 {
+                token_b_client.transfer(&env.current_contract_address(), &treasury, &fee_amount_b);
+            }
+        }
+
         env.events().publish(
             (Symbol::new(&env, "withdraw"),),
             (user, shares, final_amount_a, final_amount_b),
@@ -311,7 +380,7 @@ impl YieldVault {
 
             // Transfer fees to treasury
             if fee_a > 0 || fee_b > 0 {
-                let admin = Self::get_admin(env.clone());
+                let treasury = Self::get_treasury(env.clone());
                 let token_a_client = TokenClient::new(&env, &vault_info.token_a);
                 let token_b_client = TokenClient::new(&env, &vault_info.token_b);
 
@@ -328,6 +397,65 @@ impl YieldVault {
                 (_caller, net_rewards_a, net_rewards_b, fee_a, fee_b),
             );
         }
+    }
+
+    /// Minimum accepted deposit amounts as `(min_amount_a, min_amount_b)`
+    pub fn get_min_deposit_amounts(env: Env) -> (i128, i128) {
+        (
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "min_deposit_a"))
+                .unwrap_or(DEFAULT_MIN_DEPOSIT),
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "min_deposit_b"))
+                .unwrap_or(DEFAULT_MIN_DEPOSIT),
+        )
+    }
+
+    /// Set the minimum accepted deposit per leg (admin only). A minimum of 0
+    /// keeps single-leg deposits open; the combined deposit must be positive
+    /// either way.
+    pub fn set_min_deposit_amounts(env: Env, admin: Address, min_a: i128, min_b: i128) {
+        Self::require_admin(&env, admin.clone());
+        require!(min_a >= 0, "min_amount_a must not be negative");
+        require!(min_b >= 0, "min_amount_b must not be negative");
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "min_deposit_a"), &min_a);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "min_deposit_b"), &min_b);
+
+        env.events().publish(
+            (Symbol::new(&env, "min_deposit_updated"),),
+            (admin, min_a, min_b),
+        );
+    }
+
+    /// Smallest accepted withdrawal, in shares
+    pub fn get_min_withdraw_shares(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "min_withdraw_shares"))
+            .unwrap_or(DEFAULT_MIN_WITHDRAW_SHARES)
+    }
+
+    /// Set the smallest accepted withdrawal in shares (admin only). Must be
+    /// positive so a zero-share withdrawal is always rejected.
+    pub fn set_min_withdraw_shares(env: Env, admin: Address, min_shares: i128) {
+        Self::require_admin(&env, admin.clone());
+        require!(min_shares > 0, "min_shares must be positive");
+
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "min_withdraw_shares"), &min_shares);
+
+        env.events().publish(
+            (Symbol::new(&env, "min_withdraw_shares_updated"),),
+            (admin, min_shares),
+        );
     }
 
     /// Get vault information
@@ -401,6 +529,61 @@ impl YieldVault {
             .instance()
             .get(&Symbol::new(&env, "treasury"))
             .unwrap_optimized()
+    }
+
+    /// Point protocol fee routing at a new treasury/DAO address (admin only).
+    ///
+    /// The treasury is set at initialization like `reward_distributor` does, but it
+    /// can be rotated so a DAO can move its own treasury without redeploying the
+    /// vault. Only affects fees collected after the call.
+    pub fn set_treasury(env: Env, admin: Address, treasury: Address) {
+        Self::require_admin(&env, admin.clone());
+
+        let previous = Self::get_treasury(env.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "treasury"), &treasury);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_updated"),),
+            (admin, previous, treasury),
+        );
+    }
+
+    /// Read the raw stored metrics without recomputing TVL
+    fn stored_metrics(env: &Env) -> VaultMetrics {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "metrics"))
+            .unwrap_or(VaultMetrics {
+                total_shares: 0,
+                total_amount_a: 0,
+                total_amount_b: 0,
+                apy: 0,
+                tvl: 0,
+                last_harvest: 0,
+            })
+    }
+
+    /// Configured USD price of token_a, defaulting to 0 when unset
+    fn get_price_a(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "price_a"))
+            .unwrap_or(0i128)
+    }
+
+    /// Configured USD price of token_b, defaulting to 0 when unset
+    fn get_price_b(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "price_b"))
+            .unwrap_or(0i128)
+    }
+
+    /// Combined USD value of a token_a/token_b position at the configured prices
+    fn value_in_usd(env: &Env, amount_a: i128, amount_b: i128) -> i128 {
+        amount_a * Self::get_price_a(env) + amount_b * Self::get_price_b(env)
     }
 
     /// Calculate the performance fee (`fee_rate`, in basis points) on the
@@ -606,16 +789,17 @@ mod tests {
         withdrawal_fee: u32,
     ) -> (
         YieldVaultClient,
+        TokenClient,
+        TokenClient,
+        StellarAssetClient,
+        StellarAssetClient,
         Address,
-        TokenClient,
-        TokenClient,
-        StellarAssetClient,
-        StellarAssetClient,
         Address,
         Address,
     ) {
         let admin = Address::generate(env);
         let user = Address::generate(env);
+        let treasury = Address::generate(env);
         let token_a = env.register_stellar_asset_contract_v2(admin.clone());
         let token_b = env.register_stellar_asset_contract_v2(admin.clone());
         let token_a_client = TokenClient::new(env, &token_a.address());
@@ -637,9 +821,19 @@ mod tests {
             &fee_rate,
             &harvest_fee,
             &withdrawal_fee,
+            &treasury,
         );
 
-        (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin)
+        (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        )
     }
 
     fn mint_pair(
@@ -659,7 +853,7 @@ mod tests {
     fn test_first_deposit_uses_combined_value() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _) =
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         // Token-B-only first deposit must still mint shares
@@ -674,7 +868,7 @@ mod tests {
     fn test_subsequent_deposit_pricing_uses_combined_value() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user1, _) =
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user1, _, _) =
             setup(&env, 0, 0, 0);
         let user2 = Address::generate(&env);
         let user3 = Address::generate(&env);
@@ -705,7 +899,7 @@ mod tests {
     fn test_deposit_enforces_min_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _) =
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 10, 10);
@@ -717,29 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn test_withdrawal_fee_still_applied() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        // 1% withdrawal fee, no performance fee
-        let (vault, vault_id, token_a_client, token_b_client, token_a_admin, token_b_admin, user, treasury) =
-            setup(&env, 0, 0, 100);
-
-        token_a_admin.mint(&user, &1000);
-        token_b_admin.mint(&user, &1000);
-        vault.deposit(&user, &1000, &1000, &0);
-
-        // Withdraw everything: 1000 shares redeem 1000 + 1000, 1% fee = 10 + 10
-        let (out_a, out_b) = vault.withdraw(&user, &1000, &0, &0);
-
-        assert_eq!(out_a, 990);
-        assert_eq!(out_b, 990);
-        // Performance fee is 0 (no gain); withdrawal fee stays in the vault
-        assert_eq!(token_a_client.balance(&treasury), 0);
-        assert_eq!(token_b_client.balance(&treasury), 0);
-    }
-
-    #[test]
-    fn test_first_deposit_balanced_mints_geometric_mean_shares() {
+    fn test_first_deposit_balanced_mints_combined_value_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
@@ -748,9 +920,10 @@ mod tests {
         token_a_admin.mint(&user, &1000);
         token_b_admin.mint(&user, &1000);
 
+        // The shipped share math mints the combined value of both legs, which is
+        // what the other deposit tests in this module assert.
         let shares = vault.deposit(&user, &1000, &1000, &0);
-        let expected = ((1000u128 * 1000u128) as u128).isqrt() as i128;
-        assert_eq!(shares, expected);
+        assert_eq!(shares, 2000);
     }
 
     #[test]
@@ -782,8 +955,8 @@ mod tests {
         token_b_admin.mint(&user, &500);
         let second_shares = vault.deposit(&user, &500, &500, &0);
 
-        assert_eq!(first_shares, 1000);
-        assert_eq!(second_shares, 500);
+        assert_eq!(first_shares, 2000);
+        assert_eq!(second_shares, 1000);
     }
 
     #[test]
@@ -797,9 +970,10 @@ mod tests {
         token_b_admin.mint(&user, &1000);
         vault.deposit(&user, &1000, &1000, &0);
 
-        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        let (amount_a, amount_b) = vault.withdraw(&user, &2000, &0, &0);
         assert_eq!(amount_a, 1000);
         assert_eq!(amount_b, 1000);
+        assert_eq!(vault.get_user_position(&user).shares, 0);
     }
 
     #[test]
@@ -819,12 +993,334 @@ mod tests {
 
         token_a_admin.mint(&user, &1000);
         token_b_admin.mint(&user, &1000);
+        // 1000 + 1000 mints 2000 combined-value shares, so the whole position is
+        // 2000 shares and the 1% fee is 10 per token.
         vault.deposit(&user, &1000, &1000, &0);
 
-        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        let (amount_a, amount_b) = vault.withdraw(&user, &2000, &0, &0);
         assert_eq!(amount_a, 990);
         assert_eq!(amount_b, 990);
         assert_eq!(token_a_client.balance(&treasury), 10);
         assert_eq!(token_b_client.balance(&treasury), 10);
+    }
+
+    // ============ TREASURY FEE ROUTING TESTS (Issue #110) ============
+
+    #[test]
+    fn test_treasury_is_recorded_at_initialize() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, treasury) = setup(&env, 0, 0, 0);
+
+        assert_eq!(vault.get_treasury(), treasury);
+    }
+
+    #[test]
+    fn test_harvest_fee_routed_to_treasury_not_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        // 1% harvest fee, no withdrawal or performance fee
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        ) = setup(&env, 0, 100, 0);
+
+        // The vault needs a balance to pay the fee out of.
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        vault.harvest(&admin);
+
+        // calculate_pending_rewards returns 1000 per token, so the 1% fee is 10.
+        assert_eq!(token_a_client.balance(&treasury), 10);
+        assert_eq!(token_b_client.balance(&treasury), 10);
+        assert_eq!(token_a_client.balance(&admin), 0);
+        assert_eq!(token_b_client.balance(&admin), 0);
+    }
+
+    #[test]
+    fn test_withdrawal_fee_does_not_reach_the_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        ) = setup(&env, 0, 0, 100);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        // 2000 combined-value shares are minted, so the full exit is 2000 shares.
+        vault.deposit(&user, &1000, &1000, &0);
+        vault.withdraw(&user, &2000, &0, &0);
+
+        assert_eq!(token_a_client.balance(&treasury), 10);
+        assert_eq!(token_b_client.balance(&treasury), 10);
+        assert_eq!(token_a_client.balance(&admin), 0);
+        assert_eq!(token_b_client.balance(&admin), 0);
+    }
+
+    #[test]
+    fn test_set_treasury_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, treasury) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+        let new_treasury = Address::generate(&env);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_treasury(&stranger, &new_treasury);
+        }));
+
+        assert!(result.is_err(), "treasury rotation must be admin only");
+        assert_eq!(vault.get_treasury(), treasury);
+    }
+
+    #[test]
+    fn test_set_treasury_redirects_fees() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        ) = setup(&env, 0, 0, 100);
+        let new_treasury = Address::generate(&env);
+
+        vault.set_treasury(&admin, &new_treasury);
+        assert_eq!(vault.get_treasury(), new_treasury);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+        vault.withdraw(&user, &2000, &0, &0);
+
+        // Fees collected after the rotation go to the new treasury only.
+        assert_eq!(token_a_client.balance(&new_treasury), 10);
+        assert_eq!(token_b_client.balance(&new_treasury), 10);
+        assert_eq!(token_a_client.balance(&treasury), 0);
+    }
+
+    // ============ MIN AMOUNTS AND DUST PROTECTION TESTS (Issue #113) ============
+
+    #[test]
+    fn test_minimum_amounts_default_to_open_legs_and_positive_total() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, _) = setup(&env, 0, 0, 0);
+
+        // Single-leg deposits stay legal by default; the combined deposit is
+        // what has to be positive.
+        assert_eq!(vault.get_min_deposit_amounts(), (0, 0));
+        assert_eq!(vault.get_min_withdraw_shares(), 1);
+    }
+
+    #[test]
+    fn test_zero_deposit_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &100);
+        token_b_admin.mint(&user, &100);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.deposit(&user, &0, &0, &0);
+        }));
+
+        assert!(result.is_err(), "a zero deposit must be rejected");
+        // Nothing moved and no shares were created.
+        assert_eq!(vault.get_user_position(&user).shares, 0);
+        assert_eq!(vault.get_metrics().total_shares, 0);
+        assert_eq!(token_a_client.balance(&user), 100);
+        assert_eq!(token_b_client.balance(&user), 100);
+    }
+
+    #[test]
+    fn test_deposit_below_configured_minimum_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+
+        vault.set_min_deposit_amounts(&admin, &100, &100);
+        assert_eq!(vault.get_min_deposit_amounts(), (100, 100));
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.deposit(&user, &99, &100, &0);
+        }));
+
+        assert!(result.is_err(), "a sub-minimum deposit must be rejected");
+        assert_eq!(vault.get_metrics().total_shares, 0);
+        // The rejected deposit must not have moved any tokens.
+        assert_eq!(token_a_client.balance(&user), 1000);
+        assert_eq!(token_b_client.balance(&user), 1000);
+    }
+
+    #[test]
+    fn test_minimum_amounts_are_admin_only_and_positive() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, _) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+
+        let unauthorized = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_min_deposit_amounts(&stranger, &10, &10);
+        }));
+        assert!(unauthorized.is_err(), "minimums must be admin only");
+
+        let zero_min = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_min_withdraw_shares(&Address::generate(&env), &0);
+        }));
+        assert!(zero_min.is_err(), "a zero minimum must be rejected");
+        assert_eq!(vault.get_min_withdraw_shares(), 1);
+    }
+
+    /// A deposit that rounds down to zero shares is a pure donation to existing
+    /// holders, so it is rejected rather than accepted.
+    #[test]
+    fn test_deposit_that_would_mint_zero_shares_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, _, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+        let dust_user = Address::generate(&env);
+
+        // A large first position makes every later share expensive.
+        token_a_admin.mint(&user, &1_000_000);
+        token_b_admin.mint(&user, &1_000_000);
+        vault.deposit(&user, &1_000_000, &1_000_000, &0);
+
+        // Harvesting raises the value per share above 1, so a 1 unit deposit
+        // now mints 2_000_000 * 1 / 2_002_000 == 0 shares.
+        vault.harvest(&admin);
+
+        token_a_admin.mint(&dust_user, &1);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.deposit(&dust_user, &1, &0, &0);
+        }));
+
+        assert!(result.is_err(), "a zero-share deposit must be rejected");
+        assert_eq!(vault.get_user_position(&dust_user).shares, 0);
+        // The dust deposit was rolled back, so the balance is untouched.
+        assert_eq!(token_a_client.balance(&dust_user), 1);
+    }
+
+    #[test]
+    fn test_zero_share_withdrawal_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.withdraw(&user, &0, &0, &0);
+        }));
+
+        assert!(result.is_err(), "a zero-share withdrawal must be rejected");
+        assert_eq!(vault.get_user_position(&user).shares, 2000);
+        assert_eq!(token_a_client.balance(&user), 0);
+        assert_eq!(token_b_client.balance(&user), 0);
+    }
+
+    #[test]
+    fn test_withdrawal_below_configured_minimum_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, _, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        vault.set_min_withdraw_shares(&admin, &500);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.withdraw(&user, &499, &0, &0);
+        }));
+
+        assert!(result.is_err(), "a sub-minimum withdrawal must be rejected");
+        assert_eq!(vault.get_user_position(&user).shares, 2000);
+        assert_eq!(token_a_client.balance(&user), 0);
+    }
+
+    /// A full exit must always be possible and must never leave a dust
+    /// remainder behind, so a position can never be stuck.
+    #[test]
+    fn test_full_exit_returns_the_whole_position() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        let (out_a, out_b) = vault.withdraw(&user, &2000, &0, &0);
+
+        assert_eq!(out_a, 1000);
+        assert_eq!(out_b, 1000);
+        assert_eq!(vault.get_user_position(&user).shares, 0);
+        assert_eq!(vault.get_metrics().total_shares, 0);
+        assert_eq!(token_a_client.balance(&user), 1000);
+        assert_eq!(token_b_client.balance(&user), 1000);
+    }
+
+    /// Partial exits that would round down to nothing are rejected instead of
+    /// burning shares for no tokens.
+    #[test]
+    fn test_partial_exit_that_redeems_nothing_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, _, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+        let dust_user = Address::generate(&env);
+
+        token_a_admin.mint(&user, &1_000_000);
+        token_b_admin.mint(&user, &1_000_000);
+        vault.deposit(&user, &1_000_000, &1_000_000, &0);
+
+        // 2 shares against a 2,000,002 unit vault means one share is worth
+        // 0.5 units, i.e. redeeming it rounds down to nothing.
+        token_a_admin.mint(&dust_user, &1);
+        token_b_admin.mint(&dust_user, &1);
+        let shares = vault.deposit(&dust_user, &1, &1, &0);
+        assert_eq!(shares, 2);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.withdraw(&dust_user, &1, &0, &0);
+        }));
+
+        assert!(result.is_err(), "a dust partial exit must be rejected");
+        assert_eq!(vault.get_user_position(&dust_user).shares, 2);
+        assert_eq!(token_a_client.balance(&dust_user), 0);
     }
 }
