@@ -17,17 +17,32 @@ import {
 import { Keypair, Networks } from 'stellar-sdk';
 
 // ===== Configuration =====
+/**
+ * Contract addresses come from the environment. There are no placeholder
+ * defaults: a placeholder is not a deployable Stellar ID, so any call built
+ * against one would fail during signature verification.
+ */
+function requiredContractId(envVar: string): string {
+  const value = process.env[envVar];
+  if (!value) {
+    throw new Error(
+      `Missing required contract ID: set ${envVar} to the address printed by ` +
+        '`soroban contract deploy` before running this example.'
+    );
+  }
+  return value;
+}
+
 const CONFIG = {
   network: Networks.TESTNET,
   horizonUrl: 'https://horizon-testnet.stellar.org',
   rpcUrl: 'https://soroban-testnet.stellar.org',
-  
+
   // Contract addresses (update with actual deployed addresses)
-  governanceContract: 'GOV_TOKEN_CONTRACT_ADDRESS',
-  votingEscrow: 'VE_TOKEN_CONTRACT_ADDRESS',
-  stakingContract: 'STAKING_CONTRACT_ADDRESS',
-  feeDistributor: 'FEE_DISTRIBUTOR_ADDRESS',
-  timelock: 'TIMELOCK_CONTRACT_ADDRESS',
+  get governanceContract() { return requiredContractId('GOVERNANCE_CONTRACT'); },
+  get votingEscrow() { return requiredContractId('VOTING_ESCROW_CONTRACT'); },
+  get stakingContract() { return requiredContractId('STAKING_CONTRACT'); },
+  get feeDistributor() { return requiredContractId('FEE_DISTRIBUTOR_CONTRACT'); },
 };
 
 // ===== Initialize SDK =====

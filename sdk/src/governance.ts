@@ -16,10 +16,90 @@ import {
 } from 'stellar-sdk';
 
 // ===== Configuration =====
-const GOVERNANCE_CONTRACT_ADDRESS = process.env.GOVERNANCE_CONTRACT || 'GOV_TOKEN_CONTRACT_ADDRESS';
-const VOTING_ESCROW_CONTRACT_ADDRESS = process.env.VOTING_ESCROW_CONTRACT || 'VE_TOKEN_CONTRACT_ADDRESS';
-const STAKING_CONTRACT_ADDRESS = process.env.STAKING_CONTRACT || 'STAKING_CONTRACT_ADDRESS';
-const FEE_DISTRIBUTOR_CONTRACT_ADDRESS = process.env.FEE_DISTRIBUTOR_CONTRACT || 'FEE_DISTRIBUTOR_ADDRESS';
+
+/**
+ * Governance contract addresses are read from the environment (or passed to the
+ * `GovernanceSDK` constructor) and are never defaulted to a placeholder string.
+ * A placeholder is not a deployable Stellar ID, so every call made against one
+ * fails during signature verification — the client would fail late and with an
+ * opaque error. Requiring a real address instead surfaces the misconfiguration
+ * immediately, naming the variable that has to be set.
+ */
+const GOVERNANCE_CONTRACTS = [
+  {
+    role: 'governance',
+    envVar: 'GOVERNANCE_CONTRACT',
+    label: 'governance contract',
+  },
+  {
+    role: 'votingEscrow',
+    envVar: 'VOTING_ESCROW_CONTRACT',
+    label: 'voting escrow contract',
+  },
+  {
+    role: 'staking',
+    envVar: 'STAKING_CONTRACT',
+    label: 'staking contract',
+  },
+  {
+    role: 'feeDistributor',
+    envVar: 'FEE_DISTRIBUTOR_CONTRACT',
+    label: 'fee distributor contract',
+  },
+] as const;
+
+export type GovernanceContractRole = (typeof GOVERNANCE_CONTRACTS)[number]['role'];
+
+/**
+ * Deployed contract IDs, keyed by role. Any role left out falls back to its
+ * environment variable, and is only required by the calls that need it.
+ */
+export type GovernanceContracts = Partial<Record<GovernanceContractRole, string>>;
+
+/**
+ * Stellar IDs are 56 base32 characters (RFC 4648 alphabet `A-Z2-7`) with a
+ * version byte: `G` for accounts, `C` for contracts.
+ */
+const STELLAR_ID_PATTERN = /^[GC][A-Z2-7]{55}$/;
+
+/**
+ * Resolve and validate configured contract addresses. A missing address is
+ * allowed here and reported by {@link GovernanceSDK.requireContractAddress} at
+ * the point of use, so a client that only touches one contract does not require
+ * all four; a present-but-invalid address is rejected right away, because that
+ * is always a mistake.
+ */
+function resolveContractAddresses(overrides: GovernanceContracts): GovernanceContracts {
+  const resolved: GovernanceContracts = {};
+
+  for (const { role, envVar, label } of GOVERNANCE_CONTRACTS) {
+    const override = overrides[role];
+    const fromEnv = process.env[envVar];
+    const value = override !== undefined ? override : fromEnv;
+
+    if (value === undefined) {
+      continue;
+    }
+
+    const source = override !== undefined ? `contracts.${role}` : envVar;
+    const address = value.trim();
+
+    if (address === '') {
+      throw new Error(`${source} is set but empty: provide the deployed ${label} ID.`);
+    }
+    if (!STELLAR_ID_PATTERN.test(address)) {
+      throw new Error(
+        `${source} ("${address}") is not a valid Stellar ${label} ID. ` +
+          'Expected 56 base32 characters starting with G (account) or C (contract), ' +
+          "as printed by `soroban contract deploy`."
+      );
+    }
+
+    resolved[role] = address;
+  }
+
+  return resolved;
+}
 
 // ===== Type Definitions =====
 
@@ -107,15 +187,23 @@ export class GovernanceSDK {
   private server: SorobanRpc.Server;
   private networkPassphrase: string;
   private keypair?: Keypair;
+  private contractAddresses: GovernanceContracts;
 
+  /**
+   * @param contracts Deployed contract IDs, keyed by role. Anything omitted
+   *   falls back to its environment variable. Roles that end up unconfigured
+   *   are reported by name when a call actually needs them.
+   */
   constructor(
     sorobanRpcUrl: string,
     networkPassphrase: string,
-    keypair?: Keypair
+    keypair?: Keypair,
+    contracts: GovernanceContracts = {}
   ) {
     this.server = new SorobanRpc.Server(sorobanRpcUrl);
     this.networkPassphrase = networkPassphrase;
     this.keypair = keypair;
+    this.contractAddresses = resolveContractAddresses(contracts);
   }
 
   /**
@@ -139,6 +227,27 @@ export class GovernanceSDK {
     return this.networkPassphrase;
   }
 
+  /**
+   * The deployed contract ID configured for `role`.
+   *
+   * Throws when the role is unconfigured, naming the environment variable to
+   * set. There is no placeholder fallback: an unset variable has to fail here
+   * rather than produce a call that can never be signed.
+   */
+  private requireContractAddress(role: GovernanceContractRole): string {
+    const address = this.contractAddresses[role];
+
+    if (!address) {
+      const { envVar, label } = GOVERNANCE_CONTRACTS.find((c) => c.role === role)!;
+      throw new Error(
+        `No ${label} address configured: set ${envVar} to a real deployed Stellar ` +
+          `contract ID, or pass contracts.${role} to the GovernanceSDK constructor.`
+      );
+    }
+
+    return address;
+  }
+
   // ===== Token Functions =====
 
   /**
@@ -147,7 +256,7 @@ export class GovernanceSDK {
   async getTokenBalance(address: string): Promise<bigint> {
     try {
       const result = await this.simulateCall(
-        GOVERNANCE_CONTRACT_ADDRESS,
+        this.requireContractAddress('governance'),
         'balance',
         { addr: address }
       );
@@ -164,7 +273,7 @@ export class GovernanceSDK {
   async getTotalSupply(): Promise<bigint> {
     try {
       const result = await this.simulateCall(
-        GOVERNANCE_CONTRACT_ADDRESS,
+        this.requireContractAddress('governance'),
         'total_supply',
         {}
       );
@@ -184,7 +293,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      GOVERNANCE_CONTRACT_ADDRESS,
+      this.requireContractAddress('governance'),
       'transfer',
       {
         from: this.keypair.publicKey(),
@@ -205,7 +314,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      GOVERNANCE_CONTRACT_ADDRESS,
+      this.requireContractAddress('governance'),
       'delegate',
       {
         from: this.keypair.publicKey(),
@@ -237,7 +346,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      VOTING_ESCROW_CONTRACT_ADDRESS,
+      this.requireContractAddress('votingEscrow'),
       'create_lock',
       {
         user: this.keypair.publicKey(),
@@ -258,7 +367,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      VOTING_ESCROW_CONTRACT_ADDRESS,
+      this.requireContractAddress('votingEscrow'),
       'increase_lock',
       {
         user: this.keypair.publicKey(),
@@ -278,7 +387,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      VOTING_ESCROW_CONTRACT_ADDRESS,
+      this.requireContractAddress('votingEscrow'),
       'extend_lock',
       {
         user: this.keypair.publicKey(),
@@ -298,7 +407,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      VOTING_ESCROW_CONTRACT_ADDRESS,
+      this.requireContractAddress('votingEscrow'),
       'withdraw',
       {
         user: this.keypair.publicKey()
@@ -319,7 +428,7 @@ export class GovernanceSDK {
 
     try {
       const result = await this.simulateCall(
-        VOTING_ESCROW_CONTRACT_ADDRESS,
+        this.requireContractAddress('votingEscrow'),
         'get_voting_power',
         { user: addr }
       );
@@ -341,7 +450,7 @@ export class GovernanceSDK {
 
     try {
       const result = await this.simulateCall(
-        VOTING_ESCROW_CONTRACT_ADDRESS,
+        this.requireContractAddress('votingEscrow'),
         'get_boosted_balance',
         { user: addr }
       );
@@ -363,7 +472,7 @@ export class GovernanceSDK {
 
     try {
       const result = await this.simulateCall(
-        VOTING_ESCROW_CONTRACT_ADDRESS,
+        this.requireContractAddress('votingEscrow'),
         'get_boost_multiplier',
         { user: addr }
       );
@@ -385,7 +494,7 @@ export class GovernanceSDK {
 
     try {
       const result = await this.simulateCall(
-        VOTING_ESCROW_CONTRACT_ADDRESS,
+        this.requireContractAddress('votingEscrow'),
         'get_lock_info',
         { user: addr }
       );
@@ -418,7 +527,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      VOTING_ESCROW_CONTRACT_ADDRESS,
+      this.requireContractAddress('votingEscrow'),
       'delegate',
       {
         from: this.keypair.publicKey(),
@@ -441,7 +550,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      STAKING_CONTRACT_ADDRESS,
+      this.requireContractAddress('staking'),
       'stake',
       {
         user: this.keypair.publicKey(),
@@ -461,7 +570,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      STAKING_CONTRACT_ADDRESS,
+      this.requireContractAddress('staking'),
       'unstake',
       {
         user: this.keypair.publicKey(),
@@ -481,7 +590,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      STAKING_CONTRACT_ADDRESS,
+      this.requireContractAddress('staking'),
       'claim_rewards',
       {
         user: this.keypair.publicKey()
@@ -502,7 +611,7 @@ export class GovernanceSDK {
 
     try {
       const result = await this.simulateCall(
-        STAKING_CONTRACT_ADDRESS,
+        this.requireContractAddress('staking'),
         'pending_rewards',
         { user: addr }
       );
@@ -524,7 +633,7 @@ export class GovernanceSDK {
 
     try {
       const result = await this.simulateCall(
-        STAKING_CONTRACT_ADDRESS,
+        this.requireContractAddress('staking'),
         'get_stake_balance',
         { user: addr }
       );
@@ -546,7 +655,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      FEE_DISTRIBUTOR_CONTRACT_ADDRESS,
+      this.requireContractAddress('feeDistributor'),
       'claim_week',
       {
         user: this.keypair.publicKey(),
@@ -593,7 +702,7 @@ export class GovernanceSDK {
 
     try {
       const result = await this.simulateCall(
-        FEE_DISTRIBUTOR_CONTRACT_ADDRESS,
+        this.requireContractAddress('feeDistributor'),
         'get_claimable_fees',
         { user: addr }
       );
@@ -610,7 +719,7 @@ export class GovernanceSDK {
   async getTotalFeesCollected(): Promise<bigint> {
     try {
       const result = await this.simulateCall(
-        FEE_DISTRIBUTOR_CONTRACT_ADDRESS,
+        this.requireContractAddress('feeDistributor'),
         'get_total_fees_collected',
         {}
       );
@@ -649,7 +758,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      GOVERNANCE_CONTRACT_ADDRESS,
+      this.requireContractAddress('governance'),
       'propose',
       {
         proposer: this.keypair.publicKey(),
@@ -682,7 +791,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      GOVERNANCE_CONTRACT_ADDRESS,
+      this.requireContractAddress('governance'),
       'vote',
       {
         voter: this.keypair.publicKey(),
@@ -705,7 +814,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      GOVERNANCE_CONTRACT_ADDRESS,
+      this.requireContractAddress('governance'),
       'queue',
       {
         proposal_id: proposalId
@@ -724,7 +833,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      GOVERNANCE_CONTRACT_ADDRESS,
+      this.requireContractAddress('governance'),
       'execute',
       {
         proposal_id: proposalId
@@ -743,7 +852,7 @@ export class GovernanceSDK {
     }
 
     const transaction = await this.buildTransaction(
-      GOVERNANCE_CONTRACT_ADDRESS,
+      this.requireContractAddress('governance'),
       'cancel',
       {
         proposal_id: proposalId
@@ -759,25 +868,25 @@ export class GovernanceSDK {
   async getProposal(proposalId: number): Promise<GovernanceProposal> {
     try {
       const result = await this.simulateCall(
-        GOVERNANCE_CONTRACT_ADDRESS,
+        this.requireContractAddress('governance'),
         'get_proposal',
         { proposal_id: proposalId }
       );
 
       const stateRaw = await this.simulateCall(
-        GOVERNANCE_CONTRACT_ADDRESS,
+        this.requireContractAddress('governance'),
         'get_proposal_state',
         { proposal_id: proposalId }
       );
 
       const hasQuorum = await this.simulateCall(
-        GOVERNANCE_CONTRACT_ADDRESS,
+        this.requireContractAddress('governance'),
         'has_quorum',
         { proposal_id: proposalId }
       );
 
       const hasPassed = await this.simulateCall(
-        GOVERNANCE_CONTRACT_ADDRESS,
+        this.requireContractAddress('governance'),
         'has_passed',
         { proposal_id: proposalId }
       );
@@ -866,10 +975,10 @@ export class GovernanceSDK {
   async getProtocolParameters(): Promise<ProtocolParameters> {
     try {
       const [performanceFee, withdrawalFee, rebalanceThreshold, insuranceReserve] = await Promise.all([
-        this.simulateCall(GOVERNANCE_CONTRACT_ADDRESS, 'get_performance_fee', {}),
-        this.simulateCall(GOVERNANCE_CONTRACT_ADDRESS, 'get_withdrawal_fee', {}),
-        this.simulateCall(GOVERNANCE_CONTRACT_ADDRESS, 'get_rebalance_threshold', {}),
-        this.simulateCall(GOVERNANCE_CONTRACT_ADDRESS, 'get_insurance_reserve_target', {})
+        this.simulateCall(this.requireContractAddress('governance'), 'get_performance_fee', {}),
+        this.simulateCall(this.requireContractAddress('governance'), 'get_withdrawal_fee', {}),
+        this.simulateCall(this.requireContractAddress('governance'), 'get_rebalance_threshold', {}),
+        this.simulateCall(this.requireContractAddress('governance'), 'get_insurance_reserve_target', {})
       ]);
 
       return {
@@ -892,7 +1001,7 @@ export class GovernanceSDK {
     newValue: number
   ): Promise<Transaction> {
     const callData: CallData[] = [{
-      contractAddress: GOVERNANCE_CONTRACT_ADDRESS,
+      contractAddress: this.requireContractAddress('governance'),
       functionName: `set_${parameter}`,
       args: [newValue]
     }];

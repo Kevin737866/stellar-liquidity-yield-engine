@@ -26,6 +26,8 @@ export {
   type LockInfo,
   type FeeDistribution,
   type ProtocolParameters,
+  type GovernanceContracts,
+  type GovernanceContractRole,
   calculateVotingPower,
   calculateBoostMultiplier,
   formatVotingPower,
