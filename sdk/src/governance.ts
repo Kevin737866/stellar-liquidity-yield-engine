@@ -16,6 +16,15 @@ import {
 } from 'stellar-sdk';
 
 // ===== Configuration =====
+
+/**
+ * Boost is expressed in basis points against a 1.0x base, so 10000 == no boost.
+ * Any cap applied to a boost value must sit at or above this base, otherwise
+ * every lock duration clamps to the same number and the boost stops
+ * responding to lock length entirely.
+ */
+const BOOST_BASE_BPS = 10_000;
+
 const GOVERNANCE_CONTRACT_ADDRESS = process.env.GOVERNANCE_CONTRACT || 'GOV_TOKEN_CONTRACT_ADDRESS';
 const VOTING_ESCROW_CONTRACT_ADDRESS = process.env.VOTING_ESCROW_CONTRACT || 'VE_TOKEN_CONTRACT_ADDRESS';
 const STAKING_CONTRACT_ADDRESS = process.env.STAKING_CONTRACT || 'STAKING_CONTRACT_ADDRESS';
@@ -1022,14 +1031,20 @@ export function calculateVotingPower(
 
 /**
  * Calculate boost multiplier
+ *
+ * Returns the boost in basis points against a 1.0x base (`BOOST_BASE_BPS`).
+ * Longer locks earn a larger boost, up to `GOVERNANCE_CONSTANTS.MAX_BOOST_MULTIPLIER`
+ * (2.5x). The cap is derived from that constant so it can never be set below
+ * the base, which would flatten the result to a single value.
  */
 export function calculateBoostMultiplier(
   lockDuration: number,
   maxDuration: number = 4 * 365 * 24 * 60 * 60
 ): number {
-  const durationFactor = (lockDuration / maxDuration) * 10000;
-  const boost = 10000 + (durationFactor * 1500 / 10000);
-  return Math.min(boost, 2500); // Cap at 2.5x
+  const durationFactor = (lockDuration / maxDuration) * BOOST_BASE_BPS;
+  const boost = BOOST_BASE_BPS + (durationFactor * 1500 / BOOST_BASE_BPS);
+  const maxBoostBps = GOVERNANCE_CONSTANTS.MAX_BOOST_MULTIPLIER * BOOST_BASE_BPS;
+  return Math.min(boost, maxBoostBps);
 }
 
 /**
