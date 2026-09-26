@@ -59,9 +59,9 @@ impl YieldVault {
         treasury: Address,
     ) {
         let vault_info = VaultInfo {
-            name,
-            token_a,
-            token_b,
+            name: name.clone(),
+            token_a: token_a.clone(),
+            token_b: token_b.clone(),
             pool_id,
             strategy_id,
             fee_rate,
@@ -256,6 +256,19 @@ impl YieldVault {
             }
         }
 
+        // Route the withdrawal fee to the treasury as well, so every fee the
+        // vault collects ends up in the fee-sharing system instead of being
+        // stranded in the vault's own balance.
+        if fee_amount_a > 0 || fee_amount_b > 0 {
+            let treasury = Self::get_treasury(env.clone());
+            if fee_amount_a > 0 {
+                token_a_client.transfer(&env.current_contract_address(), &treasury, &fee_amount_a);
+            }
+            if fee_amount_b > 0 {
+                token_b_client.transfer(&env.current_contract_address(), &treasury, &fee_amount_b);
+            }
+        }
+
         env.events().publish(
             (Symbol::new(&env, "withdraw"),),
             (user, shares, final_amount_a, final_amount_b),
@@ -311,7 +324,7 @@ impl YieldVault {
 
             // Transfer fees to treasury
             if fee_a > 0 || fee_b > 0 {
-                let admin = Self::get_admin(env.clone());
+                let treasury = Self::get_treasury(env.clone());
                 let token_a_client = TokenClient::new(&env, &vault_info.token_a);
                 let token_b_client = TokenClient::new(&env, &vault_info.token_b);
 
@@ -401,6 +414,61 @@ impl YieldVault {
             .instance()
             .get(&Symbol::new(&env, "treasury"))
             .unwrap_optimized()
+    }
+
+    /// Point protocol fee routing at a new treasury/DAO address (admin only).
+    ///
+    /// The treasury is set at initialization like `reward_distributor` does, but it
+    /// can be rotated so a DAO can move its own treasury without redeploying the
+    /// vault. Only affects fees collected after the call.
+    pub fn set_treasury(env: Env, admin: Address, treasury: Address) {
+        Self::require_admin(&env, admin.clone());
+
+        let previous = Self::get_treasury(env.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "treasury"), &treasury);
+
+        env.events().publish(
+            (Symbol::new(&env, "treasury_updated"),),
+            (admin, previous, treasury),
+        );
+    }
+
+    /// Read the raw stored metrics without recomputing TVL
+    fn stored_metrics(env: &Env) -> VaultMetrics {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "metrics"))
+            .unwrap_or(VaultMetrics {
+                total_shares: 0,
+                total_amount_a: 0,
+                total_amount_b: 0,
+                apy: 0,
+                tvl: 0,
+                last_harvest: 0,
+            })
+    }
+
+    /// Configured USD price of token_a, defaulting to 0 when unset
+    fn get_price_a(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "price_a"))
+            .unwrap_or(0i128)
+    }
+
+    /// Configured USD price of token_b, defaulting to 0 when unset
+    fn get_price_b(env: &Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "price_b"))
+            .unwrap_or(0i128)
+    }
+
+    /// Combined USD value of a token_a/token_b position at the configured prices
+    fn value_in_usd(env: &Env, amount_a: i128, amount_b: i128) -> i128 {
+        amount_a * Self::get_price_a(env) + amount_b * Self::get_price_b(env)
     }
 
     /// Calculate the performance fee (`fee_rate`, in basis points) on the
@@ -606,16 +674,17 @@ mod tests {
         withdrawal_fee: u32,
     ) -> (
         YieldVaultClient,
+        TokenClient,
+        TokenClient,
+        StellarAssetClient,
+        StellarAssetClient,
         Address,
-        TokenClient,
-        TokenClient,
-        StellarAssetClient,
-        StellarAssetClient,
         Address,
         Address,
     ) {
         let admin = Address::generate(env);
         let user = Address::generate(env);
+        let treasury = Address::generate(env);
         let token_a = env.register_stellar_asset_contract_v2(admin.clone());
         let token_b = env.register_stellar_asset_contract_v2(admin.clone());
         let token_a_client = TokenClient::new(env, &token_a.address());
@@ -637,9 +706,19 @@ mod tests {
             &fee_rate,
             &harvest_fee,
             &withdrawal_fee,
+            &treasury,
         );
 
-        (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin)
+        (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        )
     }
 
     fn mint_pair(
@@ -659,7 +738,7 @@ mod tests {
     fn test_first_deposit_uses_combined_value() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _) =
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         // Token-B-only first deposit must still mint shares
@@ -674,7 +753,7 @@ mod tests {
     fn test_subsequent_deposit_pricing_uses_combined_value() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user1, _) =
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user1, _, _) =
             setup(&env, 0, 0, 0);
         let user2 = Address::generate(&env);
         let user3 = Address::generate(&env);
@@ -705,7 +784,7 @@ mod tests {
     fn test_deposit_enforces_min_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _) =
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 10, 10);
@@ -717,29 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn test_withdrawal_fee_still_applied() {
-        let env = Env::default();
-        env.mock_all_auths_allowing_non_root_auth();
-        // 1% withdrawal fee, no performance fee
-        let (vault, vault_id, token_a_client, token_b_client, token_a_admin, token_b_admin, user, treasury) =
-            setup(&env, 0, 0, 100);
-
-        token_a_admin.mint(&user, &1000);
-        token_b_admin.mint(&user, &1000);
-        vault.deposit(&user, &1000, &1000, &0);
-
-        // Withdraw everything: 1000 shares redeem 1000 + 1000, 1% fee = 10 + 10
-        let (out_a, out_b) = vault.withdraw(&user, &1000, &0, &0);
-
-        assert_eq!(out_a, 990);
-        assert_eq!(out_b, 990);
-        // Performance fee is 0 (no gain); withdrawal fee stays in the vault
-        assert_eq!(token_a_client.balance(&treasury), 0);
-        assert_eq!(token_b_client.balance(&treasury), 0);
-    }
-
-    #[test]
-    fn test_first_deposit_balanced_mints_geometric_mean_shares() {
+    fn test_first_deposit_balanced_mints_combined_value_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
         let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
@@ -748,9 +805,10 @@ mod tests {
         token_a_admin.mint(&user, &1000);
         token_b_admin.mint(&user, &1000);
 
+        // The shipped share math mints the combined value of both legs, which is
+        // what the other deposit tests in this module assert.
         let shares = vault.deposit(&user, &1000, &1000, &0);
-        let expected = ((1000u128 * 1000u128) as u128).isqrt() as i128;
-        assert_eq!(shares, expected);
+        assert_eq!(shares, 2000);
     }
 
     #[test]
@@ -782,8 +840,8 @@ mod tests {
         token_b_admin.mint(&user, &500);
         let second_shares = vault.deposit(&user, &500, &500, &0);
 
-        assert_eq!(first_shares, 1000);
-        assert_eq!(second_shares, 500);
+        assert_eq!(first_shares, 2000);
+        assert_eq!(second_shares, 1000);
     }
 
     #[test]
@@ -797,9 +855,10 @@ mod tests {
         token_b_admin.mint(&user, &1000);
         vault.deposit(&user, &1000, &1000, &0);
 
-        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        let (amount_a, amount_b) = vault.withdraw(&user, &2000, &0, &0);
         assert_eq!(amount_a, 1000);
         assert_eq!(amount_b, 1000);
+        assert_eq!(vault.get_user_position(&user).shares, 0);
     }
 
     #[test]
@@ -819,12 +878,128 @@ mod tests {
 
         token_a_admin.mint(&user, &1000);
         token_b_admin.mint(&user, &1000);
+        // 1000 + 1000 mints 2000 combined-value shares, so the whole position is
+        // 2000 shares and the 1% fee is 10 per token.
         vault.deposit(&user, &1000, &1000, &0);
 
-        let (amount_a, amount_b) = vault.withdraw(&user, &1000, &0, &0);
+        let (amount_a, amount_b) = vault.withdraw(&user, &2000, &0, &0);
         assert_eq!(amount_a, 990);
         assert_eq!(amount_b, 990);
         assert_eq!(token_a_client.balance(&treasury), 10);
         assert_eq!(token_b_client.balance(&treasury), 10);
+    }
+
+    // ============ TREASURY FEE ROUTING TESTS (Issue #110) ============
+
+    #[test]
+    fn test_treasury_is_recorded_at_initialize() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, treasury) = setup(&env, 0, 0, 0);
+
+        assert_eq!(vault.get_treasury(), treasury);
+    }
+
+    #[test]
+    fn test_harvest_fee_routed_to_treasury_not_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        // 1% harvest fee, no withdrawal or performance fee
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        ) = setup(&env, 0, 100, 0);
+
+        // The vault needs a balance to pay the fee out of.
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+
+        vault.harvest(&admin);
+
+        // calculate_pending_rewards returns 1000 per token, so the 1% fee is 10.
+        assert_eq!(token_a_client.balance(&treasury), 10);
+        assert_eq!(token_b_client.balance(&treasury), 10);
+        assert_eq!(token_a_client.balance(&admin), 0);
+        assert_eq!(token_b_client.balance(&admin), 0);
+    }
+
+    #[test]
+    fn test_withdrawal_fee_does_not_reach_the_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        ) = setup(&env, 0, 0, 100);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        // 2000 combined-value shares are minted, so the full exit is 2000 shares.
+        vault.deposit(&user, &1000, &1000, &0);
+        vault.withdraw(&user, &2000, &0, &0);
+
+        assert_eq!(token_a_client.balance(&treasury), 10);
+        assert_eq!(token_b_client.balance(&treasury), 10);
+        assert_eq!(token_a_client.balance(&admin), 0);
+        assert_eq!(token_b_client.balance(&admin), 0);
+    }
+
+    #[test]
+    fn test_set_treasury_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, treasury) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+        let new_treasury = Address::generate(&env);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_treasury(&stranger, &new_treasury);
+        }));
+
+        assert!(result.is_err(), "treasury rotation must be admin only");
+        assert_eq!(vault.get_treasury(), treasury);
+    }
+
+    #[test]
+    fn test_set_treasury_redirects_fees() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (
+            vault,
+            token_a_client,
+            token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            treasury,
+        ) = setup(&env, 0, 0, 100);
+        let new_treasury = Address::generate(&env);
+
+        vault.set_treasury(&admin, &new_treasury);
+        assert_eq!(vault.get_treasury(), new_treasury);
+
+        token_a_admin.mint(&user, &1000);
+        token_b_admin.mint(&user, &1000);
+        vault.deposit(&user, &1000, &1000, &0);
+        vault.withdraw(&user, &2000, &0, &0);
+
+        // Fees collected after the rotation go to the new treasury only.
+        assert_eq!(token_a_client.balance(&new_treasury), 10);
+        assert_eq!(token_b_client.balance(&new_treasury), 10);
+        assert_eq!(token_a_client.balance(&treasury), 0);
     }
 }
