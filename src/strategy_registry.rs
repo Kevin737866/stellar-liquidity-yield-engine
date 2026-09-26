@@ -943,4 +943,92 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history.get(1).unwrap().net_apy, 3_000);
     }
+
+    #[test]
+    fn test_register_rejects_out_of_range_risk_level() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, creator, client) = setup(&env);
+
+        for risk_level in [0u32, 4u32, u32::MAX] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.register_strategy(
+                    &creator,
+                    &Symbol::new(&env, "OutOfRange"),
+                    &Symbol::new(&env, "Risk_level_outside_1_3"),
+                    &risk_level,
+                    &1_000i128,
+                    &500_000i128,
+                    &fee_structure(),
+                    &strategy_parameters(&env),
+                );
+            }));
+            expect_panic(result);
+
+            // The rejected registration must not persist a strategy.
+            assert_eq!(client.get_strategy_count(), 0u32);
+        }
+    }
+
+    #[test]
+    fn test_register_accepts_documented_risk_level_bounds() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, creator, client) = setup(&env);
+
+        let conservative = client.register_strategy(
+            &creator,
+            &Symbol::new(&env, "Conservative"),
+            &Symbol::new(&env, "Risk_level_1"),
+            &1,
+            &1_000i128,
+            &500_000i128,
+            &fee_structure(),
+            &strategy_parameters(&env),
+        );
+        let aggressive = client.register_strategy(
+            &creator,
+            &Symbol::new(&env, "Aggressive"),
+            &Symbol::new(&env, "Risk_level_3"),
+            &3,
+            &1_000i128,
+            &500_000i128,
+            &fee_structure(),
+            &strategy_parameters(&env),
+        );
+
+        assert_eq!(client.get_strategy(&conservative).risk_level, 1u32);
+        assert_eq!(client.get_strategy(&aggressive).risk_level, 3u32);
+        assert_eq!(client.get_strategy_count(), 2u32);
+    }
+
+    #[test]
+    fn test_update_rejects_out_of_range_risk_level() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, creator, client) = setup(&env);
+
+        let strategy_id = register(&env, &client, &creator);
+        assert_eq!(client.get_strategy(&strategy_id).risk_level, 2u32);
+
+        for risk_level in [0u32, 4u32, u32::MAX] {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.update_strategy(
+                    &creator,
+                    &strategy_id,
+                    &Symbol::new(&env, "OutOfRange"),
+                    &Symbol::new(&env, "Risk_level_outside_1_3"),
+                    &risk_level,
+                    &1_000i128,
+                    &500_000i128,
+                    &fee_structure(),
+                    &strategy_parameters(&env),
+                );
+            }));
+            expect_panic(result);
+
+            // The stored strategy keeps its original risk level.
+            assert_eq!(client.get_strategy(&strategy_id).risk_level, 2u32);
+        }
+    }
 }
