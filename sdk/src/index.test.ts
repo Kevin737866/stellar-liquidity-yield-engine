@@ -2,6 +2,7 @@ import { Keypair, Networks } from 'stellar-sdk';
 import {
   createGovernanceClient,
   GovernanceSDK,
+  VERSION,
 } from './index';
 import {
   DEFAULT_GOVERNANCE_CONTRACTS,
@@ -95,5 +96,14 @@ describe('createGovernanceClient', () => {
     >) {
       expect(isContractConfigured(client.getContracts()[role])).toBe(false);
     }
+  });
+});
+
+describe('VERSION', () => {
+  it('matches package.json version as single source of truth', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const packageJson = require('../../package.json');
+    expect(VERSION).toBe(packageJson.version);
+    expect(VERSION).toBe('0.1.0');
   });
 });
