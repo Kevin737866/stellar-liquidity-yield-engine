@@ -1,4 +1,4 @@
-import { Address } from 'stellar-sdk';
+import { Address, Transaction } from 'stellar-sdk';
 
 // Vault Types
 export interface VaultInfo {
@@ -209,12 +209,63 @@ export interface FeeRevenue {
   totalFees: bigint;
 }
 
+// Arbitrage Strategy Types
+export interface ArbitrageThresholds {
+  minApyDelta: number; // Minimum APY difference to trigger rebalance (basis points)
+  maxIlTolerance: number; // Maximum acceptable IL (basis points)
+  cooldownPeriod: number; // Seconds between rebalances per vault
+  lastRebalanceTime: number; // Timestamp of last rebalance
+}
+
+export interface RiskAssessment {
+  poolId: Address;
+  impermanentLossRisk: number; // Basis points
+  estimatedSlippage: number; // Basis points
+  volatilityScore: number; // 0-100
+  circuitBreakerTriggered: boolean;
+  timestamp: number;
+}
+
+export interface VolatilityMetrics {
+  priceCorrelation: number; // -10000 to 10000 (percentage)
+  volatility24h: number; // Basis points
+  volatility7d: number; // Basis points
+}
+
+export interface ArbitrageOpportunity {
+  poolId: Address;
+  currentApy: number; // Basis points
+  projectedApy: number; // Basis points after rebalance
+  ilRisk: number; // Basis points
+  netProfit: bigint; // In native token units
+  apyDelta: number; // Difference in basis points
+  recommended: boolean;
+}
+
+export interface RebalanceResult {
+  timestamp: number;
+  success: boolean;
+  opportunity?: ArbitrageOpportunity;
+  profit?: bigint;
+  message: string;
+}
+
 // Transaction Types
 export interface TransactionOptions {
   gasLimit?: number;
   gasPrice?: number;
   timeout?: number;
   skipConfirmation?: boolean;
+}
+
+// Vault Client Options
+export interface VaultClientOptions {
+  /**
+   * Public key of the account used as the source for read-only
+   * `simulateTransaction` queries (e.g. the caller's own address).
+   * Defaults to a freshly generated test account.
+   */
+  simulationSource?: string;
 }
 
 export interface TransactionResult {
@@ -230,13 +281,42 @@ export interface NetworkConfig {
   network: 'testnet' | 'mainnet' | 'futurenet';
   horizonUrl: string;
   sorobanRpcUrl: string;
+  /**
+   * Deployed contract IDs (C-strings) for the engine contracts.
+   *
+   * These are plain strings rather than `stellar-sdk` `Address` instances:
+   * `new Contract(id)` accepts a string, `Contract.fromAddress` is not used
+   * here, and an unconfigured deployment legitimately has no ID yet. Clients
+   * treat an empty string as "not configured" instead of constructing a
+   * placeholder `Address`, which is what previously forced callers to cast
+   * their config with `as NetworkConfig`.
+   */
   contracts: {
-    yieldEngine: Address;
-    rewardDistributor: Address;
-    rebalanceEngine: Address;
-    strategyRegistry: Address;
+    yieldEngine: string;
+    rewardDistributor: string;
+    rebalanceEngine: string;
+    strategyRegistry: string;
   };
 }
+
+/**
+ * Async wallet signer, e.g. a Freighter-backed signer.
+ *
+ * Passed anywhere the SDK accepts `Keypair | TransactionSigner`. The SDK
+ * detects the shape by the presence of `signTransaction`, so a `Keypair`
+ * never has to implement this interface.
+ */
+export interface TransactionSigner {
+  /** Resolve the signer's account address. */
+  getPublicKey(): Promise<string>;
+  /** Sign `transaction` for `networkPassphrase` and return the signed tx. */
+  signTransaction(
+    transaction: Transaction,
+    networkPassphrase: string
+  ): Promise<Transaction>;
+}
+
+export type VaultClientConfig = Pick<NetworkConfig, 'network' | 'sorobanRpcUrl'>;
 
 export interface VaultConfig {
   vaultAddress: Address;
@@ -289,6 +369,68 @@ export interface PaginationOptions {
   limit?: number;
   offset?: number;
   order?: 'asc' | 'desc';
+}
+
+// Performance History Types (Issue #128)
+
+/**
+ * A snapshot of vault performance at a point in time, derived from harvest
+ * events. Used by `VaultClient.getPerformanceHistory()`.
+ */
+export interface PerformanceSnapshot {
+  /** Unix timestamp (seconds) when the snapshot was recorded */
+  timestamp: number;
+  /** APY in basis points at the time of the snapshot */
+  apy: number;
+  /** Total value locked at the time of the snapshot */
+  tvl: bigint;
+  /** Amount harvested in this event (in smallest token units) */
+  harvestAmount: bigint;
+}
+
+/**
+ * A single raw harvest event returned by `VaultClient.getHarvestHistory()`.
+ */
+export interface HarvestEvent {
+  /** Unix timestamp (seconds) of the harvest */
+  timestamp: number;
+  /** Total rewards collected during this harvest */
+  rewardsHarvested: bigint;
+  /** Gas units consumed by this harvest transaction */
+  gasUsed: number;
+  /** Transaction hash of the harvest */
+  txHash: string;
+}
+
+/**
+ * An impermanent loss snapshot derived from on-chain price data.
+ * Returned by `VaultClient.getILHistory()`.
+ */
+export interface ILSnapshot {
+  /** Unix timestamp (seconds) of the measurement */
+  timestamp: number;
+  /** IL as a percentage (negative means loss) */
+  ilPercent: number;
+  /** Token B / Token A price ratio at this point in time */
+  priceRatio: number;
+}
+
+/**
+ * Aggregate harvest efficiency metrics computed by
+ * `YieldCalculator.calculateHarvestEfficiency()`.
+ */
+export interface HarvestEfficiencyMetrics {
+  /** Sum of all rewards harvested across all events */
+  totalRewards: bigint;
+  /** Sum of all gas used across all harvest events */
+  totalGas: number;
+  /**
+   * Ratio of rewards to gas cost. Higher is better.
+   * Computed as: Number(totalRewards) / totalGas (or 0 when totalGas === 0)
+   */
+  efficiencyRatio: number;
+  /** Average gas consumed per individual harvest */
+  avgGasPerHarvest: number;
 }
 
 // Event Types

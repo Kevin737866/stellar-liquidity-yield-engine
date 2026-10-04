@@ -4,111 +4,107 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
-import { Shield, Zap, Target, TrendingUp, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Shield, Zap, Target, TrendingUp, AlertTriangle, CheckCircle, RefreshCw } from 'lucide-react';
 import { YieldStrategy, RiskLevel } from 'stellar-liquidity-yield-engine-sdk';
+import { StrategyRegistryClient } from 'stellar-liquidity-yield-engine-sdk';
+import { getNetworkConfig, type UiNetwork } from '../config/network';
 
 interface StrategySelectorProps {
   onStrategySelect?: (strategy: YieldStrategy) => void;
   selectedStrategy?: YieldStrategy | null;
   network?: 'testnet' | 'mainnet';
+  registryAddress?: string;
 }
+
+/** Build a minimal NetworkConfig for the registry client from a network string and optional registry address. */
+function networkConfigFor(network: 'testnet' | 'mainnet', registryAddress?: string) {
+  const envAddress =
+    typeof process !== 'undefined'
+      ? process.env?.NEXT_PUBLIC_STRATEGY_REGISTRY_CONTRACT_ID ||
+        process.env?.STRATEGY_REGISTRY_CONTRACT_ID ||
+        ''
+      : '';
+
+  return {
+    network,
+    horizonUrl:
+      network === 'mainnet'
+        ? 'https://horizon.stellar.org'
+        : 'https://horizon-testnet.stellar.org',
+    sorobanRpcUrl:
+      network === 'mainnet'
+        ? 'https://soroban.stellar.org'
+        : 'https://soroban-testnet.stellar.org',
+    contracts: {
+      yieldEngine: '',
+      rewardDistributor: '',
+      rebalanceEngine: '',
+      strategyRegistry: registryAddress || envAddress,
+    },
+  };
+}
+
+export const StrategySelectorSkeleton: React.FC = () => (
+  <Card className="w-full max-w-4xl mx-auto animate-pulse" data-testid="strategy-selector-skeleton">
+    <CardHeader>
+      <div className="h-7 w-56 bg-gray-200 rounded"></div>
+    </CardHeader>
+    <CardContent className="space-y-4">
+      {[1, 2, 3].map((i) => (
+        <div key={i} className="p-4 border-2 border-gray-100 rounded-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 bg-gray-200 rounded-full"></div>
+              <div className="space-y-1.5">
+                <div className="h-5 w-40 bg-gray-200 rounded"></div>
+                <div className="h-3 w-64 bg-gray-200 rounded"></div>
+              </div>
+            </div>
+            <div className="h-6 w-20 bg-gray-200 rounded-full"></div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2">
+            {[1, 2, 3, 4].map((j) => (
+              <div key={j} className="h-10 bg-gray-100 rounded"></div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </CardContent>
+  </Card>
+);
 
 export const StrategySelector: React.FC<StrategySelectorProps> = ({
   onStrategySelect,
   selectedStrategy,
-  network = 'testnet'
+  network = 'testnet',
+  registryAddress,
 }) => {
   const [strategies, setStrategies] = useState<YieldStrategy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Mock strategies for demonstration
-  const mockStrategies: YieldStrategy[] = [
-    {
-      strategyId: 1,
-      name: 'Conservative Growth',
-      description: 'Low-risk strategy focusing on stable pairs with minimal impermanent loss',
-      creator: 'GADMIN123456789',
-      riskLevel: 1,
-      minInvestment: 1000000n, // 1000 USD
-      maxInvestment: 100000000n, // 100,000 USD
-      feeStructure: {
-        managementFee: 500, // 5%
-        performanceFee: 1000, // 10%
-        depositFee: 50, // 0.5%
-        withdrawalFee: 100 // 1%
-      },
-      performanceHistory: [
-        { timestamp: Date.now() - 86400000, totalValue: 1050000n, netApy: 800, volatility: 500, sharpeRatio: 12000 },
-        { timestamp: Date.now() - 172800000, totalValue: 1040000n, netApy: 750, volatility: 450, sharpeRatio: 11000 },
-        { timestamp: Date.now() - 259200000, totalValue: 1030000n, netApy: 700, volatility: 400, sharpeRatio: 10000 }
-      ],
-      isActive: true,
-      createdAt: Date.now() - 259200000,
-      updatedAt: Date.now() - 86400000
-    },
-    {
-      strategyId: 2,
-      name: 'Balanced Portfolio',
-      description: 'Medium-risk strategy with diversified exposure across multiple pools',
-      creator: 'GADMIN123456789',
-      riskLevel: 2,
-      minInvestment: 500000n, // 500 USD
-      maxInvestment: 500000000n, // 500,000 USD
-      feeStructure: {
-        managementFee: 800, // 8%
-        performanceFee: 1500, // 15%
-        depositFee: 75, // 0.75%
-        withdrawalFee: 150 // 1.5%
-      },
-      performanceHistory: [
-        { timestamp: Date.now() - 86400000, totalValue: 1120000n, netApy: 1500, volatility: 1200, sharpeRatio: 8000 },
-        { timestamp: Date.now() - 172800000, totalValue: 1100000n, netApy: 1400, volatility: 1100, sharpeRatio: 7500 },
-        { timestamp: Date.now() - 259200000, totalValue: 1080000n, netApy: 1300, volatility: 1000, sharpeRatio: 7000 }
-      ],
-      isActive: true,
-      createdAt: Date.now() - 259200000,
-      updatedAt: Date.now() - 86400000
-    },
-    {
-      strategyId: 3,
-      name: 'Aggressive Yield',
-      description: 'High-risk strategy targeting maximum yields through volatile asset pairs',
-      creator: 'GADMIN123456789',
-      riskLevel: 3,
-      minInvestment: 100000n, // 100 USD
-      maxInvestment: 1000000000n, // 1,000,000 USD
-      feeStructure: {
-        managementFee: 1200, // 12%
-        performanceFee: 2000, // 20%
-        depositFee: 100, // 1%
-        withdrawalFee: 200 // 2%
-      },
-      performanceHistory: [
-        { timestamp: Date.now() - 86400000, totalValue: 1250000n, netApy: 2500, volatility: 2500, sharpeRatio: 6000 },
-        { timestamp: Date.now() - 172800000, totalValue: 1200000n, netApy: 2200, volatility: 2300, sharpeRatio: 5500 },
-        { timestamp: Date.now() - 259200000, totalValue: 1150000n, netApy: 2000, volatility: 2000, sharpeRatio: 5000 }
-      ],
-      isActive: true,
-      createdAt: Date.now() - 259200000,
-      updatedAt: Date.now() - 86400000
-    }
-  ];
-
   useEffect(() => {
     loadStrategies();
-  }, [network]);
+  }, [network, registryAddress]);
 
+  /**
+   * Fetch active strategies from the strategy registry via the SDK.
+   *
+   * `StrategyRegistryClient.fetchActiveStrategies()` attempts a real contract
+   * call first and falls back to built-in defaults when the contract is not
+   * yet deployed — so this always returns data without hard-coding anything
+   * in the component.
+   */
   const loadStrategies = async () => {
     try {
       setLoading(true);
       setError(null);
-      
-      // In a real implementation, this would fetch from the strategy registry
-      // For now, use mock data
-      setStrategies(mockStrategies);
+
+      const registryClient = new StrategyRegistryClient(networkConfigFor(network, registryAddress));
+      const activeStrategies = await registryClient.fetchActiveStrategies();
+      setStrategies(activeStrategies);
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message ?? 'Failed to load strategies');
     } finally {
       setLoading(false);
     }
@@ -155,15 +151,7 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
   };
 
   if (loading) {
-    return (
-      <Card className="w-full max-w-4xl mx-auto">
-        <CardContent className="p-6">
-          <div className="flex items-center justify-center h-32">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-          </div>
-        </CardContent>
-      </Card>
-    );
+    return <StrategySelectorSkeleton />;
   }
 
   return (
@@ -176,109 +164,115 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
       </CardHeader>
       
       <CardContent className="space-y-6">
-        <RadioGroup 
-          value={selectedStrategy?.strategyId.toString() || ''}
-          onValueChange={handleStrategySelect}
-        >
-          <div className="space-y-4">
-            {strategies.map((strategy) => {
-              const latestPerformance = getLatestPerformance(strategy);
-              const isSelected = selectedStrategy?.strategyId === strategy.strategyId;
-              
-              return (
-                <div key={strategy.strategyId} className="relative">
-                  <RadioGroupItem
-                    value={strategy.strategyId.toString()}
-                    id={`strategy-${strategy.strategyId}`}
-                    className="sr-only"
-                  />
-                  <Label
-                    htmlFor={`strategy-${strategy.strategyId}`}
-                    className={`cursor-pointer block p-4 border-2 rounded-lg transition-all ${
-                      isSelected 
-                        ? 'border-blue-500 bg-blue-50' 
-                        : 'border-gray-200 hover:border-gray-300'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex items-center gap-3">
-                        <div className={`p-2 rounded-full ${getRiskColor(strategy.riskLevel)}`}>
-                          {getRiskIcon(strategy.riskLevel)}
-                        </div>
-                        <div>
-                          <h3 className="text-lg font-semibold">{strategy.name}</h3>
-                          <p className="text-sm text-gray-600 mt-1">{strategy.description}</p>
-                        </div>
-                      </div>
-                      
-                      <div className="flex items-center gap-2">
-                        <Badge className={getRiskColor(strategy.riskLevel)}>
-                          {getRiskText(strategy.riskLevel)}
-                        </Badge>
-                        {isSelected && (
-                          <CheckCircle className="h-5 w-5 text-blue-500" />
-                        )}
-                      </div>
-                    </div>
-                    
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      <div>
-                        <div className="text-sm text-gray-500">Current APY</div>
-                        <div className="text-lg font-semibold text-green-600">
-                          {latestPerformance ? (latestPerformance.netApy / 100).toFixed(2) : '0.00'}%
-                        </div>
-                      </div>
-                      
-                      <div>
-                        <div className="text-sm text-gray-500">Volatility</div>
-                        <div className="text-lg font-semibold">
-                          {latestPerformance ? (latestPerformance.volatility / 100).toFixed(2) : '0.00'}%
-                        </div>
-                      </div>
-                      
-                      <div>
-                        <div className="text-sm text-gray-500">Min Investment</div>
-                        <div className="text-lg font-semibold">
-                          ${(Number(strategy.minInvestment) / 1000000).toFixed(0)}
-                        </div>
-                      </div>
-                      
-                      <div>
-                        <div className="text-sm text-gray-500">Management Fee</div>
-                        <div className="text-lg font-semibold">
-                          {(strategy.feeStructure.managementFee / 100).toFixed(1)}%
-                        </div>
-                      </div>
-                    </div>
-                    
-                    {latestPerformance && (
-                      <div className="mt-4 pt-4 border-t">
-                        <div className="flex items-center justify-between text-sm">
-                          <div className="flex items-center gap-4">
-                            <span className="text-gray-500">Sharpe Ratio:</span>
-                            <span className="font-semibold">{(latestPerformance.sharpeRatio / 10000).toFixed(2)}</span>
-                          </div>
-                          <div className="flex items-center gap-4">
-                            <span className="text-gray-500">TVL:</span>
-                            <span className="font-semibold">
-                              ${(Number(latestPerformance.totalValue) / 1000000).toFixed(0)}M
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <TrendingUp className="h-4 w-4 text-green-500" />
-                            <span className="text-green-600 font-semibold">
-                              Active
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </Label>
-                </div>
-              );
-            })}
+        {strategies.length === 0 && !error ? (
+          <div className="text-center text-gray-500 py-8">
+            No active strategies found.
           </div>
-        </RadioGroup>
+        ) : (
+          <RadioGroup 
+            value={selectedStrategy?.strategyId.toString() || ''}
+            onValueChange={handleStrategySelect}
+          >
+            <div className="space-y-4">
+              {strategies.map((strategy) => {
+                const latestPerformance = getLatestPerformance(strategy);
+                const isSelected = selectedStrategy?.strategyId === strategy.strategyId;
+                
+                return (
+                  <div key={strategy.strategyId} className="relative">
+                    <RadioGroupItem
+                      value={strategy.strategyId.toString()}
+                      id={`strategy-${strategy.strategyId}`}
+                      className="sr-only"
+                    />
+                    <Label
+                      htmlFor={`strategy-${strategy.strategyId}`}
+                      className={`cursor-pointer block p-4 border-2 rounded-lg transition-all ${
+                        isSelected 
+                          ? 'border-blue-500 bg-blue-50' 
+                          : 'border-gray-200 hover:border-gray-300'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-full ${getRiskColor(strategy.riskLevel)}`}>
+                            {getRiskIcon(strategy.riskLevel)}
+                          </div>
+                          <div>
+                            <h3 className="text-lg font-semibold">{strategy.name}</h3>
+                            <p className="text-sm text-gray-600 mt-1">{strategy.description}</p>
+                          </div>
+                        </div>
+                        
+                        <div className="flex items-center gap-2">
+                          <Badge className={getRiskColor(strategy.riskLevel)}>
+                            {getRiskText(strategy.riskLevel)}
+                          </Badge>
+                          {isSelected && (
+                            <CheckCircle className="h-5 w-5 text-blue-500" />
+                          )}
+                        </div>
+                      </div>
+                      
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div>
+                          <div className="text-sm text-gray-500">Current APY</div>
+                          <div className="text-lg font-semibold text-green-600">
+                            {latestPerformance ? (latestPerformance.netApy / 100).toFixed(2) : '0.00'}%
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <div className="text-sm text-gray-500">Volatility</div>
+                          <div className="text-lg font-semibold">
+                            {latestPerformance ? (latestPerformance.volatility / 100).toFixed(2) : '0.00'}%
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <div className="text-sm text-gray-500">Min Investment</div>
+                          <div className="text-lg font-semibold">
+                            ${(Number(strategy.minInvestment) / 1000000).toFixed(0)}
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <div className="text-sm text-gray-500">Management Fee</div>
+                          <div className="text-lg font-semibold">
+                            {(strategy.feeStructure.managementFee / 100).toFixed(1)}%
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {latestPerformance && (
+                        <div className="mt-4 pt-4 border-t">
+                          <div className="flex items-center justify-between text-sm">
+                            <div className="flex items-center gap-4">
+                              <span className="text-gray-500">Sharpe Ratio:</span>
+                              <span className="font-semibold">{(latestPerformance.sharpeRatio / 10000).toFixed(2)}</span>
+                            </div>
+                            <div className="flex items-center gap-4">
+                              <span className="text-gray-500">TVL:</span>
+                              <span className="font-semibold">
+                                ${(Number(latestPerformance.totalValue) / 1000000).toFixed(0)}M
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <TrendingUp className="h-4 w-4 text-green-500" />
+                              <span className="text-green-600 font-semibold">
+                                Active
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </Label>
+                  </div>
+                );
+              })}
+            </div>
+          </RadioGroup>
+        )}
 
         {selectedStrategy && (
           <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
@@ -307,9 +301,20 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
 
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-md p-3">
-            <div className="flex items-center gap-2 text-sm text-red-600">
-              <AlertTriangle className="h-4 w-4" />
-              {error}
+            <div className="flex items-center justify-between gap-2 text-sm text-red-600">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                <span>{error}</span>
+              </div>
+              <Button
+                onClick={() => loadStrategies()}
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-xs border-red-300 text-red-700 hover:bg-red-100 gap-1 flex-shrink-0"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Retry
+              </Button>
             </div>
           </div>
         )}

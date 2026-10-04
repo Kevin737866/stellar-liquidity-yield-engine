@@ -12,10 +12,11 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "stellar-sdk": "^12.0.0",
-    "axios": "^1.6.0"
+    "axios": "^1.6.0",
+    "stellar-sdk": "^12.0.0"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
@@ -33,5 +34,8 @@
     "soroban"
   ],
   "author": "Stellar Yield Engine Team",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
 }

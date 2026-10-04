@@ -1,0 +1,54 @@
+# .emdfile — Stellar Liquidity Yield Engine conventions
+
+This file documents the conventions new code must follow. It is read by the
+CI pipeline and by agents (opencode/copilot/claude) to enforce consistency.
+
+## Directory layout
+
+- `ui/` — Next.js 14 UI (app/ dir mandatory).  `ui/tsconfig.json` must exist.
+- `sdk/` — TypeScript SDK (cdylib only).  `sdk/src/governance.ts` is the
+  governance contract + SDK client.  All new code must match the `#[contract]`
+  / `#[contractimpl]` macro style (Rust 2021, soroban-sdk 22.0.0).
+- `examples/` — Reference scripts; not production code.
+- `tests/` — Rust integration tests; `cargo test --all-features` is the gate.
+
+## UI (`ui/`)
+
+- Must have `ui/tsconfig.json` with `moduleResolution: "bundler"` and paths
+  mapping `stellar-liquidity-yield-engine-sdk` to `../sdk/src/index.ts`.
+- Compile gate: `npm run build` inside `ui/` (equivalent to `next build`).
+- `ui/.env.example` lists every `NEXT_PUBLIC_*` variable; every one is optional
+  and falls back to public testnet defaults.  No hardcoded RPC URLs or contract
+  IDs are allowed in UI source — use `src/config/network.ts` instead.
+- `src/config/network.ts` is the single source of truth for network config; every
+  UI module imports from it, never reads `process.env` directly.
+- Dead imports (`import ... from 'stellar-liquidity-yield-engine-sdk'` without a
+  path alias) will cause `next build` to fail.  Add path mappings in
+  `ui/tsconfig.json`.
+
+## SDK (`sdk/`)
+
+- Rust: `edition = "2021"`, `soroban-sdk = "22.0.0"`, `crate-type = ["cdylib"]`.
+- All contract structs use `#[contracttype] #[derive(Clone, Debug, Eq, PartialEq)]`.
+- New helpers must be exported from `sdk/src/governance.ts` and re-exported from
+  `sdk/src/index.ts`.
+- Decimal-aware formatting lives in `sdk/src/governance.ts`:
+  - `DEFAULT_TOKEN_DECIMALS` (= 7 for SAC tokens).
+  - `formatAmount(amount, decimals)` — display string, trims trailing zeros.
+  - `parseStroops(value, decimals)` — exact string→bigint, no float round-trip.
+- New contract IDs must be injectable via the `GovernanceSDK` constructor (see
+  `GovernanceContracts` interface).  Callers that do not supply them get an
+  explicit error rather than silently targeting a placeholder address.
+
+## Git
+
+- Feature branches: `fix/<ticket-num>-<short-desc>`.
+- Commits must reference the issue numbers: `Closes #101 / #102 / #103`.
+- `npm run build` (root) must not introduce new `error TS` lines beyond the
+  pre-existing baseline (currently 103).
+
+## CI
+
+- `cargo fmt --all -- --check` · `cargo clippy --all-targets --all-features -- -D warnings` · `cargo test --all-features` (Rust).
+- `npm run build` inside `ui/` (Next.js build + type‑check).
+- `npm test` (Jest: 57 original + new amounts tests).
