@@ -14,17 +14,15 @@ mod yield_vault;
 mod rebalance_engine;
 mod reward_distributor;
 mod strategy_registry;
-mod swap_router;
-mod risk_engine;
-mod governance;
+mod il_insurance;
+mod actuary;
 
 pub use yield_vault::*;
 pub use rebalance_engine::*;
 pub use reward_distributor::*;
 pub use strategy_registry::*;
-pub use swap_router::*;
-pub use risk_engine::*;
-pub use governance::*;
+pub use il_insurance::*;
+pub use actuary::*;
 
 #[contract]
 pub struct StellarLiquidityYieldEngine;
