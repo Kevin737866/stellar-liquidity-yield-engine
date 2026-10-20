@@ -4,6 +4,7 @@ import { WriteRateLimiter } from './utils/rateLimiter';
 
 export interface Opportunity {
   pool_id: string;
+  quote_timestamp: number; // Milliseconds since epoch
   current_apy: number; // Basis points
   projected_apy: number; // Basis points
   il_risk: number; // Basis points
@@ -15,6 +16,7 @@ export interface Opportunity {
 
 export interface PoolMetrics {
   pool_id: string;
+  quote_timestamp: number; // Milliseconds since epoch
   current_apy: number;
   total_liquidity: bigint;
   reserve_a: bigint;
@@ -252,6 +254,7 @@ export class ArbitrageScanner {
 
       return {
         pool_id: pool.id,
+        quote_timestamp: Date.now(),
         current_apy: estimate_apy,
         total_liquidity,
         reserve_a,
@@ -294,6 +297,7 @@ export class ArbitrageScanner {
 
         opportunities.push({
           pool_id: pool.pool_id,
+          quote_timestamp: pool.quote_timestamp,
           current_apy: currentVaultApy,
           projected_apy: pool.current_apy,
           il_risk: pool.volatility_24h,

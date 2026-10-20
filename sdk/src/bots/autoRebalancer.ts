@@ -3,6 +3,8 @@ import { LedgerHeadSource, RpcLagMonitor, RpcLagOptions, RpcLagReport } from '..
 import { SorobanRpc } from 'stellar-sdk';
 import axios from 'axios';
 
+const DEFAULT_MAX_QUOTE_AGE_MS = 30_000;
+
 export interface RebalancerConfig {
   vaultAddress: string;
   currentPoolId: string;
@@ -14,6 +16,8 @@ export interface RebalancerConfig {
   discordWebhookUrl?: string;
   riskTolerance: number; // 1-10
   maxPositionSize: bigint;
+  /** Maximum age of a market quote before the keeper declines to act. */
+  maxQuoteAgeMs?: number;
   /**
    * RPC ledger-head source. When set, the keeper checks the node's head against
    * the last ledger it processed and warns before acting on stale data.
@@ -165,6 +169,23 @@ export class AutoRebalancer {
           success: false,
           opportunity: bestOpportunity,
           message: `Simulation shows negative profit: ${simulation.netProfit}`,
+        });
+        return results;
+      }
+
+      const quoteAgeMs = Date.now() - bestOpportunity.quote_timestamp;
+      const maxQuoteAgeMs = this.config.maxQuoteAgeMs ?? DEFAULT_MAX_QUOTE_AGE_MS;
+      if (
+        !Number.isFinite(bestOpportunity.quote_timestamp) ||
+        quoteAgeMs < 0 ||
+        quoteAgeMs > maxQuoteAgeMs
+      ) {
+        results.push({
+          timestamp: Date.now(),
+          success: false,
+          opportunity: bestOpportunity,
+          message: `Quote is stale (${quoteAgeMs} ms old; maximum ${maxQuoteAgeMs} ms)`,
+          lag,
         });
         return results;
       }

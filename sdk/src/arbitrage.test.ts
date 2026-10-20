@@ -185,6 +185,7 @@ describe('ArbitrageScanner volatility integration', () => {
       .mockResolvedValue([
         {
           pool_id: 'low-vol-pool',
+          quote_timestamp: Date.now(),
           current_apy: 1200,
           total_liquidity: BigInt(3000),
           reserve_a: BigInt(1000),
@@ -195,6 +196,7 @@ describe('ArbitrageScanner volatility integration', () => {
         },
         {
           pool_id: 'high-vol-pool',
+          quote_timestamp: Date.now(),
           current_apy: 5000,
           total_liquidity: BigInt(3000),
           reserve_a: BigInt(1000),

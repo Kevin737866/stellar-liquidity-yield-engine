@@ -177,6 +177,7 @@ class ArbitrageBacktester {
 
     return {
       pool_id: `pool_${pool.date.replace(/-/g, '_')}`,
+      quote_timestamp: Date.now(),
       current_apy: this.config.currentVaultApy,
       projected_apy: pool.apy,
       il_risk: ilRisk,
