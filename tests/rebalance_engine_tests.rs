@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Symbol, Vec as SorobanVec, testutils::Address as _};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec as SorobanVec};
 use stellar_liquidity_yield_engine::{RebalanceEngine, RebalanceEngineClient};
 
 fn main() {}
@@ -48,10 +48,19 @@ mod tests {
 
         let proposals = client.analyze_rebalance_opportunities(&strategy_id);
 
-        assert!(proposals.len() > 0, "Expected proposals when current_apy < target_apy - threshold");
+        assert!(
+            proposals.len() > 0,
+            "Expected proposals when current_apy < target_apy - threshold"
+        );
         let proposal = proposals.get(0).unwrap();
-        assert!(proposal.expected_apy_improvement > 0, "Expected positive APY improvement");
-        assert!(proposal.estimated_gas_cost > 0, "Expected positive gas cost");
+        assert!(
+            proposal.expected_apy_improvement > 0,
+            "Expected positive APY improvement"
+        );
+        assert!(
+            proposal.estimated_gas_cost > 0,
+            "Expected positive gas cost"
+        );
     }
 
     #[test]
@@ -62,7 +71,7 @@ mod tests {
         let strategy_id = create_test_strategy(&env, &client, &admin);
 
         let proposals = client.analyze_rebalance_opportunities(&strategy_id);
-        
+
         // With current implementation, proposals are generated when current_apy < target_apy - min_apy_threshold
         // The mock returns 1500 APY, target is 2000, threshold is 200, so 1500 < 1800 = true, proposals generated
         // This test verifies the threshold logic
@@ -78,7 +87,7 @@ mod tests {
         let vault_pool_id = Address::generate(env);
         let vault_current_apy = 1000;
         let mut available_pools = SorobanVec::new(&env);
-        
+
         // Pool that meets minimum APY delta
         available_pools.push_back(stellar_liquidity_yield_engine::PoolAllocation {
             pool_id: Address::generate(&env),
@@ -90,9 +99,13 @@ mod tests {
             impermanent_loss_risk: 50,
         });
 
-        let opportunities = client.scan_opportunities(&vault_pool_id, vault_current_apy, available_pools);
-        
-        assert!(opportunities.len() > 0, "Expected opportunities meeting threshold");
+        let opportunities =
+            client.scan_opportunities(&vault_pool_id, vault_current_apy, available_pools);
+
+        assert!(
+            opportunities.len() > 0,
+            "Expected opportunities meeting threshold"
+        );
         let opp = opportunities.get(0).unwrap();
         assert!(opp.apy_delta >= 200, "Expected APY delta >= min threshold");
         assert!(opp.il_risk <= 100, "Expected IL risk within tolerance");
@@ -182,7 +195,10 @@ mod tests {
         }
 
         let history = client.get_history(&10000);
-        assert!(history.len() <= 1000, "History should be capped at 1000 entries");
+        assert!(
+            history.len() <= 1000,
+            "History should be capped at 1000 entries"
+        );
     }
 
     #[test]

@@ -213,7 +213,9 @@ impl YieldVault {
         metrics.total_amount_a += amount_a;
         metrics.total_amount_b += amount_b;
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
 
         env.events().publish(
             (Symbol::new(&env, "deposit"),),
@@ -322,7 +324,9 @@ impl YieldVault {
         metrics.total_amount_a -= withdraw_amount_a;
         metrics.total_amount_b -= withdraw_amount_b;
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
 
         // Transfer tokens to user
         let token_a_client = TokenClient::new(&env, &vault_info.token_a);
@@ -391,14 +395,15 @@ impl YieldVault {
 
             // Derive an annualized APY from this harvest's yield (net rewards vs the
             // vault's value before reinvestment) over the elapsed wall-clock time.
-            let elapsed = env.ledger().timestamp().saturating_sub(metrics.last_harvest);
+            let elapsed = env
+                .ledger()
+                .timestamp()
+                .saturating_sub(metrics.last_harvest);
             let prev_value = metrics.tvl;
             let reward_value = Self::value_in_usd(&env, net_rewards_a, net_rewards_b);
             if elapsed > 0 && prev_value > 0 && reward_value > 0 {
                 // yield_bp = reward_value / prev_value * seconds_per_year / elapsed * 10000
-                let apy_bp = reward_value as u128
-                    * SECONDS_PER_YEAR
-                    * 10000u128
+                let apy_bp = reward_value as u128 * SECONDS_PER_YEAR * 10000u128
                     / (prev_value as u128 * elapsed as u128);
                 // Cap at 100,000% APY to keep the value sane.
                 metrics.apy = apy_bp.min(1000_0000) as u32;
@@ -412,7 +417,9 @@ impl YieldVault {
             // Recompute TVL from the reinvested balances.
             metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
 
-            env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "metrics"), &metrics);
 
             // Transfer fees to treasury
             if fee_a > 0 || fee_b > 0 {
@@ -557,11 +564,17 @@ impl YieldVault {
             panic!("negative price");
         }
 
-        env.storage().instance().set(&Symbol::new(&env, "price_a"), &price_a);
-        env.storage().instance().set(&Symbol::new(&env, "price_b"), &price_b);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "price_a"), &price_a);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "price_b"), &price_b);
 
         let metrics = Self::get_metrics(env.clone());
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
 
         env.events().publish(
             (Symbol::new(&env, "prices_updated"),),
@@ -908,7 +921,15 @@ mod tests {
             setup(&env, 0, 0, 0);
 
         // Token-B-only first deposit must still mint shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 0, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            0,
+            100,
+        );
         let shares = vault.deposit(&user, &0, &100, &0);
 
         assert_eq!(shares, 100);
@@ -925,17 +946,41 @@ mod tests {
         let user3 = Address::generate(&env);
 
         // First deposit: 100 A + 100 B -> 200 shares (1:1 combined value)
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user1, 100, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user1,
+            100,
+            100,
+        );
         let shares1 = vault.deposit(&user1, &100, &100, &0);
         assert_eq!(shares1, 200);
 
         // Token-B-only deposit: 100 B out of 200 total value -> 100 shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user2, 0, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user2,
+            0,
+            100,
+        );
         let shares2 = vault.deposit(&user2, &0, &100, &0);
         assert_eq!(shares2, 100);
 
         // Mixed deposit: 50 A + 50 B out of 200 total value -> 100 shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user3, 50, 50);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user3,
+            50,
+            50,
+        );
         let shares3 = vault.deposit(&user3, &50, &50, &0);
         assert_eq!(shares3, 100);
 
@@ -953,7 +998,15 @@ mod tests {
         let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 10, 10);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            10,
+            10,
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             vault.deposit(&user, &10, &10, &100);
         }));
@@ -1179,7 +1232,15 @@ mod tests {
             setup(&env, 0, 0, 0);
 
         env.ledger().set_timestamp(1_000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 1000, 1000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
         vault.deposit(&user, &1000, &1000, &0);
         assert_eq!(vault.get_user_position(&user).last_harvest, 1_000);
 
@@ -1191,7 +1252,10 @@ mod tests {
             position.last_harvest, 5_500,
             "withdraw must stamp the withdrawing user's last harvest"
         );
-        assert_eq!(position.shares, 1500, "partial exit keeps the remaining shares");
+        assert_eq!(
+            position.shares, 1500,
+            "partial exit keeps the remaining shares"
+        );
     }
 
     #[test]
@@ -1202,7 +1266,15 @@ mod tests {
             setup(&env, 0, 0, 0);
 
         env.ledger().set_timestamp(1_000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 1000, 1000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
         vault.deposit(&user, &1000, &1000, &0);
 
         env.ledger().set_timestamp(9_000);
@@ -1223,8 +1295,24 @@ mod tests {
         let other = Address::generate(&env);
 
         env.ledger().set_timestamp(1_000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 1000, 1000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &other, 100, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &other,
+            100,
+            100,
+        );
         vault.deposit(&user, &1000, &1000, &0);
         vault.deposit(&other, &100, &100, &0);
 
@@ -1276,107 +1364,97 @@ mod tests {
     // does not resolve. Wrapping them in an inherent impl keeps them compiled
     // and callable from tests without exposing them as contract entrypoints.
     impl YieldVault {
-    /// One-click deposit + insurance purchase.
-    ///
-    /// Deposits tokens into the vault and simultaneously purchases an insurance
-    /// policy covering the deposit against impermanent loss.
-    /// Returns (shares_minted, policy_id).
-    pub fn deposit_with_insurance(
-        env: Env,
-        user: Address,
-        amount_a: i128,
-        amount_b: i128,
-        min_shares: i128,
-        coverage_period: u64,
-        current_price_ratio_scaled: i128,
-        historical_volatility_bps: u32,
-        pool_correlation_bps: u32,
-        auto_renew: bool,
-        insurance_contract: Address,
-        reserve_token: Address,
-    ) -> (i128, u64) {
-        Self::require_not_paused(&env);
+        /// One-click deposit + insurance purchase.
+        ///
+        /// Deposits tokens into the vault and simultaneously purchases an insurance
+        /// policy covering the deposit against impermanent loss.
+        /// Returns (shares_minted, policy_id).
+        pub fn deposit_with_insurance(
+            env: Env,
+            user: Address,
+            amount_a: i128,
+            amount_b: i128,
+            min_shares: i128,
+            coverage_period: u64,
+            current_price_ratio_scaled: i128,
+            historical_volatility_bps: u32,
+            pool_correlation_bps: u32,
+            auto_renew: bool,
+            insurance_contract: Address,
+            reserve_token: Address,
+        ) -> (i128, u64) {
+            Self::require_not_paused(&env);
 
-        // Step 1: Standard deposit
-        let shares = Self::deposit(
-            env.clone(),
-            user.clone(),
-            amount_a,
-            amount_b,
-            min_shares,
-        );
+            // Step 1: Standard deposit
+            let shares = Self::deposit(env.clone(), user.clone(), amount_a, amount_b, min_shares);
 
-        // Step 2: Purchase insurance covering deposit amount_a as proxy for coverage
-        // The coverage amount is the value of token_a deposited (simplified)
-        use crate::il_insurance::ILInsurance;
-        let policy_id = ILInsurance::purchase_insurance(
-            env.clone(),
-            user.clone(),
-            amount_a,
-            coverage_period,
-            current_price_ratio_scaled,
-            historical_volatility_bps,
-            pool_correlation_bps,
-            auto_renew,
-            reserve_token,
-        );
+            // Step 2: Purchase insurance covering deposit amount_a as proxy for coverage
+            // The coverage amount is the value of token_a deposited (simplified)
+            use crate::il_insurance::ILInsurance;
+            let policy_id = ILInsurance::purchase_insurance(
+                env.clone(),
+                user.clone(),
+                amount_a,
+                coverage_period,
+                current_price_ratio_scaled,
+                historical_volatility_bps,
+                pool_correlation_bps,
+                auto_renew,
+                reserve_token,
+            );
 
-        env.events().publish(
-            (Symbol::new(&env, "insured_deposit"), user),
-            (shares, policy_id, amount_a, coverage_period),
-        );
+            env.events().publish(
+                (Symbol::new(&env, "insured_deposit"), user),
+                (shares, policy_id, amount_a, coverage_period),
+            );
 
-        (shares, policy_id)
-    }
-
-    /// Returns the effective APY net of insurance premium cost.
-    ///
-    /// insured_apy = vault_apy - annualised_premium_cost_bps
-    /// where annualised_premium_cost = (premium_bps / coverage_days) * 365
-    pub fn get_insured_apy(
-        env: Env,
-        coverage_period_days: u32,
-        premium_bps: u32,
-    ) -> i32 {
-        let metrics = Self::get_metrics(env);
-        let vault_apy = metrics.apy as i32;
-
-        if coverage_period_days == 0 {
-            return vault_apy;
+            (shares, policy_id)
         }
 
-        // Annualise the premium: (premium_bps / coverage_days) * 365
-        let annualised_premium_bps = (premium_bps as i32 * 365) / coverage_period_days as i32;
+        /// Returns the effective APY net of insurance premium cost.
+        ///
+        /// insured_apy = vault_apy - annualised_premium_cost_bps
+        /// where annualised_premium_cost = (premium_bps / coverage_days) * 365
+        pub fn get_insured_apy(env: Env, coverage_period_days: u32, premium_bps: u32) -> i32 {
+            let metrics = Self::get_metrics(env);
+            let vault_apy = metrics.apy as i32;
 
-        vault_apy - annualised_premium_bps
-    }
+            if coverage_period_days == 0 {
+                return vault_apy;
+            }
 
-    /// Check if a policy is eligible for auto-renewal and return the renewal premium.
-    /// Auto-renewal extends coverage using harvested yield from the user's position.
-    /// Returns (eligible, estimated_premium) – both zero if not eligible.
-    pub fn check_auto_renewal_eligibility(
-        env: Env,
-        user: Address,
-        min_yield_threshold: i128,
-    ) -> (bool, i128) {
-        let position = Self::get_user_position(env.clone(), user.clone());
-        let metrics = Self::get_metrics(env);
+            // Annualise the premium: (premium_bps / coverage_days) * 365
+            let annualised_premium_bps = (premium_bps as i32 * 365) / coverage_period_days as i32;
 
-        // Estimate accrued yield for the user's share of the vault
-        if metrics.total_shares == 0 {
-            return (false, 0);
+            vault_apy - annualised_premium_bps
         }
-        let user_share_of_total = position.shares * 10000 / metrics.total_shares;
-        let estimated_yield_a =
-            metrics.total_amount_a * user_share_of_total / 10000 - position.deposited_amount_a;
 
-        if estimated_yield_a >= min_yield_threshold {
-            // Estimated premium for 30-day renewal at base rate (0.5%)
-            let renewal_premium = position.deposited_amount_a * 50 / 10000;
-            (true, renewal_premium)
-        } else {
-            (false, 0)
+        /// Check if a policy is eligible for auto-renewal and return the renewal premium.
+        /// Auto-renewal extends coverage using harvested yield from the user's position.
+        /// Returns (eligible, estimated_premium) – both zero if not eligible.
+        pub fn check_auto_renewal_eligibility(
+            env: Env,
+            user: Address,
+            min_yield_threshold: i128,
+        ) -> (bool, i128) {
+            let position = Self::get_user_position(env.clone(), user.clone());
+            let metrics = Self::get_metrics(env);
+
+            // Estimate accrued yield for the user's share of the vault
+            if metrics.total_shares == 0 {
+                return (false, 0);
+            }
+            let user_share_of_total = position.shares * 10000 / metrics.total_shares;
+            let estimated_yield_a =
+                metrics.total_amount_a * user_share_of_total / 10000 - position.deposited_amount_a;
+
+            if estimated_yield_a >= min_yield_threshold {
+                // Estimated premium for 30-day renewal at base rate (0.5%)
+                let renewal_premium = position.deposited_amount_a * 50 / 10000;
+                (true, renewal_premium)
+            } else {
+                (false, 0)
+            }
         }
-    }
     }
 }

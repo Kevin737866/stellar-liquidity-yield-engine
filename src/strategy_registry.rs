@@ -137,8 +137,11 @@ impl StrategyRegistry {
     ) -> u32 {
         Self::require_not_paused(&env);
         require!(min_investment > 0, "min investment must be positive");
-        require!(max_investment >= min_investment, "max investment must be greater than or equal to min investment");
-        
+        require!(
+            max_investment >= min_investment,
+            "max investment must be greater than or equal to min investment"
+        );
+
         let strategy_id = Self::get_next_strategy_id(&env);
         let current_time = env.ledger().timestamp();
 
@@ -161,7 +164,10 @@ impl StrategyRegistry {
         let mut strategies = Self::get_strategies_map(&env);
         // Validate risk_level bounds (1-3) per issue #118
         require!(risk_level >= 1 && risk_level <= 3, "risk_level must be 1-3");
-        require!(strategies.get(strategy_id).is_none(), "strategy id collision");
+        require!(
+            strategies.get(strategy_id).is_none(),
+            "strategy id collision"
+        );
         strategies.set(strategy_id, strategy.clone());
         env.storage()
             .instance()
@@ -231,8 +237,11 @@ impl StrategyRegistry {
     ) {
         Self::require_not_paused(&env);
         require!(min_investment > 0, "min investment must be positive");
-        require!(max_investment >= min_investment, "max investment must be greater than or equal to min investment");
-        
+        require!(
+            max_investment >= min_investment,
+            "max investment must be greater than or equal to min investment"
+        );
+
         let mut strategies = Self::get_strategies_map(&env);
         let strategy = strategies
             .get(strategy_id)
@@ -418,13 +427,22 @@ impl StrategyRegistry {
     }
 
     /// Get active strategies paginated
-    pub fn get_active_strategies_paginated(env: Env, limit: u32, offset: u32) -> Vec<YieldStrategy> {
+    pub fn get_active_strategies_paginated(
+        env: Env,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<YieldStrategy> {
         let active = Self::get_active_strategies(env.clone());
         Self::paginate_vec(env.clone(), active, limit, offset)
     }
 
     /// Get strategies by risk paginated
-    pub fn get_strategies_by_risk_paginated(env: Env, risk_level: u32, limit: u32, offset: u32) -> Vec<YieldStrategy> {
+    pub fn get_strategies_by_risk_paginated(
+        env: Env,
+        risk_level: u32,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<YieldStrategy> {
         let filtered = Self::get_strategies_by_risk(env.clone(), risk_level);
         Self::paginate_vec(env.clone(), filtered, limit, offset)
     }
@@ -434,7 +452,12 @@ impl StrategyRegistry {
         Self::get_strategies_map(&env).len()
     }
 
-    fn paginate_vec(env: Env, vec: Vec<YieldStrategy>, limit: u32, offset: u32) -> Vec<YieldStrategy> {
+    fn paginate_vec(
+        env: Env,
+        vec: Vec<YieldStrategy>,
+        limit: u32,
+        offset: u32,
+    ) -> Vec<YieldStrategy> {
         if limit == 0 || offset as usize >= vec.len() as usize {
             return Vec::new(&env);
         }

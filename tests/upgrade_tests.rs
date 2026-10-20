@@ -12,9 +12,7 @@
 //! it: the point of the feature is that the wasm hash is applied by the host, so
 //! a test that stubs that out would prove nothing.
 
-use soroban_sdk::{
-    testutils::Address as _, Address, Bytes, BytesN, Env, Symbol, Vec,
-};
+use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, Symbol, Vec};
 use stellar_liquidity_yield_engine::{
     Actuary, ActuaryClient, ILInsurance, ILInsuranceClient, MultiRewardDistributor,
     MultiRewardDistributorClient, RebalanceEngine, RebalanceEngineClient,
@@ -64,21 +62,11 @@ fn remove_storage_version(env: &Env, contract_id: &Address) {
 }
 
 /// Deploy `contract` and run `initialize` on it.
-fn with_engine(
-    env: &Env,
-) -> (
-    StellarLiquidityYieldEngineClient,
-    Address,
-    Address,
-) {
+fn with_engine(env: &Env) -> (StellarLiquidityYieldEngineClient, Address, Address) {
     let admin = Address::generate(env);
     let contract_id = env.register_contract(None, StellarLiquidityYieldEngine);
     let client = StellarLiquidityYieldEngineClient::new(env, &contract_id);
-    client.initialize(
-        &admin,
-        &Address::generate(env),
-        &Address::generate(env),
-    );
+    client.initialize(&admin, &Address::generate(env), &Address::generate(env));
     (client, admin, contract_id)
 }
 
@@ -101,23 +89,15 @@ fn with_vault(env: &Env) -> (YieldVaultClient, Address, Address) {
     (client, admin, contract_id)
 }
 
-fn with_distributor(
-    env: &Env,
-) -> (MultiRewardDistributorClient, Address, Address) {
+fn with_distributor(env: &Env) -> (MultiRewardDistributorClient, Address, Address) {
     let admin = Address::generate(env);
     let contract_id = env.register_contract(None, MultiRewardDistributor);
     let client = MultiRewardDistributorClient::new(env, &contract_id);
-    client.initialize(
-        &admin,
-        &Address::generate(env),
-        &Address::generate(env),
-    );
+    client.initialize(&admin, &Address::generate(env), &Address::generate(env));
     (client, admin, contract_id)
 }
 
-fn with_rebalance_engine(
-    env: &Env,
-) -> (RebalanceEngineClient, Address, Address) {
+fn with_rebalance_engine(env: &Env) -> (RebalanceEngineClient, Address, Address) {
     let admin = Address::generate(env);
     let contract_id = env.register_contract(None, RebalanceEngine);
     let client = RebalanceEngineClient::new(env, &contract_id);
@@ -166,8 +146,14 @@ fn test_every_contract_records_its_storage_version_on_initialize() {
         with_rebalance_engine(&env).0.get_storage_version(),
         EXPECTED_VERSION
     );
-    assert_eq!(with_registry(&env).0.get_storage_version(), EXPECTED_VERSION);
-    assert_eq!(with_insurance(&env).0.get_storage_version(), EXPECTED_VERSION);
+    assert_eq!(
+        with_registry(&env).0.get_storage_version(),
+        EXPECTED_VERSION
+    );
+    assert_eq!(
+        with_insurance(&env).0.get_storage_version(),
+        EXPECTED_VERSION
+    );
     assert_eq!(with_actuary(&env).0.get_storage_version(), EXPECTED_VERSION);
 }
 
@@ -220,7 +206,9 @@ fn test_upgrade_is_admin_only() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
     let stranger = Address::generate(&env);
-    let wasm_hash = env.deployer().upload_contract_wasm(empty_contract_wasm(&env));
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(empty_contract_wasm(&env));
 
     let (engine, ..) = with_engine(&env);
     let (vault, ..) = with_vault(&env);
@@ -274,7 +262,9 @@ fn test_upgrade_swaps_the_contract_code() {
 
     assert_eq!(client.get_storage_version(), EXPECTED_VERSION);
 
-    let empty_hash = env.deployer().upload_contract_wasm(empty_contract_wasm(&env));
+    let empty_hash = env
+        .deployer()
+        .upload_contract_wasm(empty_contract_wasm(&env));
     client.upgrade(&admin, &empty_hash);
 
     // The new code has no entrypoints, so every call now fails while the
@@ -294,7 +284,9 @@ fn test_upgrade_publishes_an_event() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
     let (client, admin, _) = with_vault(&env);
-    let wasm_hash = env.deployer().upload_contract_wasm(empty_contract_wasm(&env));
+    let wasm_hash = env
+        .deployer()
+        .upload_contract_wasm(empty_contract_wasm(&env));
 
     client.upgrade(&admin, &wasm_hash);
 

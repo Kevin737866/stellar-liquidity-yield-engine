@@ -1,6 +1,6 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Symbol,
-    token::TokenClient, unwrap::UnwrapOptimized,
+    contract, contractimpl, contracttype, token::TokenClient, unwrap::UnwrapOptimized, Address,
+    Env, Symbol,
 };
 
 /// Duration options for coverage period in seconds
@@ -134,20 +134,18 @@ impl ILInsurance {
 
         // Duration factor: scale premium by sqrt of time ratio vs 30d baseline
         // result is scaled by 1000
-        let duration_factor = Self::sqrt_scaled(
-            (coverage_period as i128 * 1000) / COVERAGE_30D as i128,
-        );
+        let duration_factor =
+            Self::sqrt_scaled((coverage_period as i128 * 1000) / COVERAGE_30D as i128);
 
         // Volatility adjustment
         let vol_factor = historical_volatility_bps as i128;
 
         // Correlation reduces effective IL
-        let correlation_adjusted =
-            vol_factor * (10000 - pool_correlation_bps as i128) / 10000;
+        let correlation_adjusted = vol_factor * (10000 - pool_correlation_bps as i128) / 10000;
 
         // Base effective rate in basis points
-        let mut effective_rate_bps = BASE_PREMIUM_BPS as i128
-            + (correlation_adjusted * duration_factor / 100_000);
+        let mut effective_rate_bps =
+            BASE_PREMIUM_BPS as i128 + (correlation_adjusted * duration_factor / 100_000);
 
         // Dynamic pricing: if reserve ratio < 150%, increase premiums
         let reserve_ratio = Self::compute_reserve_ratio(&reserve);
@@ -213,11 +211,7 @@ impl ILInsurance {
 
         // Transfer premium from buyer to reserve
         let token_client = TokenClient::new(&env, &reserve_token);
-        token_client.transfer(
-            &buyer,
-            &env.current_contract_address(),
-            &premium_amount,
-        );
+        token_client.transfer(&buyer, &env.current_contract_address(), &premium_amount);
 
         // Emit policy (increment policy counter)
         let policy_id = Self::next_policy_id(&env);
@@ -321,11 +315,7 @@ impl ILInsurance {
 
         if payout > 0 {
             let token_client = TokenClient::new(&env, &policy.coverage_token);
-            token_client.transfer(
-                &env.current_contract_address(),
-                &claimant,
-                &payout,
-            );
+            token_client.transfer(&env.current_contract_address(), &claimant, &payout);
 
             reserve.total_claims_paid += payout;
             reserve.current_reserve -= payout;
@@ -447,20 +437,10 @@ mod test {
         let env = Env::default();
         let coverage_amount = 1_000_000i128;
 
-        let quote_7d = ILInsurance::calculate_premium(
-            env.clone(),
-            coverage_amount,
-            COVERAGE_7D,
-            8000,
-            5000,
-        );
-        let quote_90d = ILInsurance::calculate_premium(
-            env,
-            coverage_amount,
-            COVERAGE_90D,
-            8000,
-            5000,
-        );
+        let quote_7d =
+            ILInsurance::calculate_premium(env.clone(), coverage_amount, COVERAGE_7D, 8000, 5000);
+        let quote_90d =
+            ILInsurance::calculate_premium(env, coverage_amount, COVERAGE_90D, 8000, 5000);
 
         assert!(quote_90d.premium_amount >= quote_7d.premium_amount);
     }
@@ -470,20 +450,10 @@ mod test {
         let env = Env::default();
         let coverage_amount = 1_000_000i128;
 
-        let quote_low_vol = ILInsurance::calculate_premium(
-            env.clone(),
-            coverage_amount,
-            COVERAGE_30D,
-            2000,
-            5000,
-        );
-        let quote_high_vol = ILInsurance::calculate_premium(
-            env,
-            coverage_amount,
-            COVERAGE_30D,
-            10000,
-            5000,
-        );
+        let quote_low_vol =
+            ILInsurance::calculate_premium(env.clone(), coverage_amount, COVERAGE_30D, 2000, 5000);
+        let quote_high_vol =
+            ILInsurance::calculate_premium(env, coverage_amount, COVERAGE_30D, 10000, 5000);
 
         assert!(quote_high_vol.premium_amount >= quote_low_vol.premium_amount);
     }
@@ -513,4 +483,3 @@ mod test {
         assert!(result2 >= 63 && result2 <= 64);
     }
 }
-

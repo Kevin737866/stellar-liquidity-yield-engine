@@ -281,12 +281,7 @@ impl MultiRewardDistributor {
     /// indefinitely again. Extending a deadline is the way to reopen a stream
     /// that already expired, since claims are rejected on comparison with the
     /// current ledger time rather than on a stored "expired" flag.
-    pub fn set_claim_deadline(
-        env: Env,
-        admin: Address,
-        stream_index: u32,
-        claim_deadline: u64,
-    ) {
+    pub fn set_claim_deadline(env: Env, admin: Address, stream_index: u32, claim_deadline: u64) {
         Self::require_admin(&env, admin.clone());
 
         let mut streams = Self::get_streams(&env);
@@ -1415,8 +1410,7 @@ mod tests {
         env.mock_all_auths_allowing_non_root_auth();
         env.ledger().set_timestamp(1_000);
 
-        let (_admin, _treasury, client, _token_admin, token_client) =
-            setup_stream(&env, 1_000, 0);
+        let (_admin, _treasury, client, _token_admin, token_client) = setup_stream(&env, 1_000, 0);
         assert_eq!(client.get_stream(&0).claim_deadline, 0);
 
         let user = Address::generate(&env);
@@ -1481,8 +1475,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
 
-        let (admin, _treasury, client, _token_admin, _token_client) =
-            setup_stream(&env, 1_000, 0);
+        let (admin, _treasury, client, _token_admin, _token_client) = setup_stream(&env, 1_000, 0);
 
         let err = client
             .try_set_claim_deadline(&admin, &7, &10_000)
