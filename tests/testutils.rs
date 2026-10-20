@@ -10,11 +10,7 @@ pub fn setup_rebalance_engine(env: &Env) -> (RebalanceEngineClient, Address) {
     (client, admin)
 }
 
-pub fn create_strategy(
-    env: &Env,
-    client: &RebalanceEngineClient,
-    admin: &Address,
-) -> u32 {
+pub fn create_strategy(env: &Env, client: &RebalanceEngineClient, admin: &Address) -> u32 {
     let token_a = Address::generate(env);
     let token_b = Address::generate(env);
     let mut allocations = SorobanVec::new(env);

@@ -5,7 +5,9 @@
 /// - Risk-adjusted pricing: premiums > expected payouts + 10% reserve margin
 /// - Dynamic pricing based on reserve pool health
 /// - Governance: community-adjustable pricing model coefficients
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, unwrap::UnwrapOptimized};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, unwrap::UnwrapOptimized, Address, Env, Symbol,
+};
 
 /// Target minimum reserve ratio: 150% (in bps * 100)
 pub const MIN_RESERVE_RATIO_BPS: u32 = 15000;
@@ -132,7 +134,11 @@ impl Actuary {
 
         env.events().publish(
             (Symbol::new(&env, "simulation_updated"), oracle),
-            (annual_volatility_bps, expected_loss_rate_scaled, fair_premium_bps),
+            (
+                annual_volatility_bps,
+                expected_loss_rate_scaled,
+                fair_premium_bps,
+            ),
         );
     }
 
@@ -144,14 +150,11 @@ impl Actuary {
         let params = Self::get_pricing_params(env);
 
         // Apply governance multipliers
-        let adjusted_loss_rate = sim.expected_loss_rate_scaled
-            * params.base_multiplier_bps as i128
-            / 10000;
+        let adjusted_loss_rate =
+            sim.expected_loss_rate_scaled * params.base_multiplier_bps as i128 / 10000;
 
         // Add reserve margin
-        let with_margin = adjusted_loss_rate
-            * (10000 + params.reserve_margin_bps as i128)
-            / 10000;
+        let with_margin = adjusted_loss_rate * (10000 + params.reserve_margin_bps as i128) / 10000;
 
         coverage_amount * with_margin / 1_000_000
     }
@@ -245,10 +248,7 @@ impl Actuary {
     // ─── Private helpers ─────────────────────────────────────────────────────
 
     /// Compute fair premium in bps from expected loss rate
-    fn compute_fair_premium(
-        _annual_volatility_bps: u32,
-        expected_loss_rate_scaled: i128,
-    ) -> u32 {
+    fn compute_fair_premium(_annual_volatility_bps: u32, expected_loss_rate_scaled: i128) -> u32 {
         // fair_premium_bps = expected_loss_rate * 10000 * (1 + 0.10)
         let with_margin = expected_loss_rate_scaled * 11000 / 10000;
         (with_margin / 100) as u32
@@ -313,4 +313,3 @@ mod test {
         assert!(result.is_ok());
     }
 }
-

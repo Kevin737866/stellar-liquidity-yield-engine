@@ -33,10 +33,7 @@ pub const STORAGE_VERSION: u32 = 1;
 /// `0` means "never recorded", which is what a contract deployed before this
 /// module existed reads as.
 pub fn storage_version(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&version_key(env))
-        .unwrap_or(0)
+    env.storage().instance().get(&version_key(env)).unwrap_or(0)
 }
 
 /// Record the storage schema version of the data currently in storage.
