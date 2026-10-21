@@ -657,7 +657,7 @@ impl ProtocolGovernor {
         let snapshot_block = env.ledger().sequence() as u64;
 
         let proposal = GovernanceProposal::new(
-            &e,
+            &env,
             proposer,
             description,
             call_data,

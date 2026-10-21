@@ -10,6 +10,28 @@ import {
 import { VaultClient } from './vaultClient';
 import { VaultClientConfig } from './types';
 
+/** Maximum router slippage tolerance in basis points (1%). */
+export const MAX_SLIPPAGE_BPS = 100;
+
+/**
+ * Reject values that cannot be encoded as the router's bounded u32 basis-point
+ * tolerance. Keeping this check client-side avoids submitting malformed or
+ * overly permissive quote requests; the contract enforces the same limit.
+ */
+export function validateMaxSlippageBps(maxSlippageBps: number): void {
+    if (
+        typeof maxSlippageBps !== 'number' ||
+        !Number.isFinite(maxSlippageBps) ||
+        !Number.isInteger(maxSlippageBps) ||
+        maxSlippageBps < 0 ||
+        maxSlippageBps > MAX_SLIPPAGE_BPS
+    ) {
+        throw new Error(
+            `maxSlippageBps must be an integer within [0, ${MAX_SLIPPAGE_BPS}]`
+        );
+    }
+}
+
 /**
  * Reward stream information
  */
@@ -22,6 +44,25 @@ export interface RewardStreamInfo {
     lastUpdate: number;
     isActive: boolean;
     decimals: number;
+    /**
+     * Unix timestamp (seconds) after which the contract rejects claims for this
+     * stream. `0` means the stream never expires.
+     */
+    claimDeadline: number;
+}
+
+/**
+ * Whether a stream's claim window has closed.
+ *
+ * Mirrors the contract's check (`claim_deadline != 0 && now > claim_deadline`),
+ * so a client can tell a user before building a claim that the contract will
+ * reject with `ClaimDeadlinePassed`.
+ */
+export function isClaimDeadlinePassed(
+    stream: Pick<RewardStreamInfo, 'claimDeadline'>,
+    now: number = Math.floor(Date.now() / 1000)
+): boolean {
+    return stream.claimDeadline !== 0 && now > stream.claimDeadline;
 }
 
 /**
@@ -311,16 +352,28 @@ export class RewardsSDK {
     }> {
         const user = userKeypair.publicKey();
         const { streams, convertTo, maxSlippageBps = 100, enableAutoRetry = false } = options;
+        validateMaxSlippageBps(maxSlippageBps);
 
         // Get pending rewards to validate
         const pending = await this.getPendingRewards(user, vault);
 
         const claimAmounts = new Map<string, string>();
+        const allStreams = await this.getAllStreams();
         for (const idx of streams) {
             const amount = pending.streams.get(idx);
             if (amount) {
-                const stream = (await this.getAllStreams()).find(s => s.index === idx);
+                const stream = allStreams.find(s => s.index === idx);
                 if (stream) {
+                    // The contract refuses expired claims; fail here, naming the
+                    // stream and its deadline, instead of paying a fee for a
+                    // transaction that cannot succeed.
+                    if (isClaimDeadlinePassed(stream)) {
+                        throw new Error(
+                            `Reward stream ${idx} expired at ${stream.claimDeadline}; ` +
+                            'the contract will reject this claim'
+                        );
+                    }
+
                     const current = claimAmounts.get(stream.token) || '0';
                     claimAmounts.set(stream.token, BigIntString.add(current, amount));
                 }
@@ -664,8 +717,9 @@ export class RewardsSDK {
         inputToken: string,
         outputToken: string,
         inputAmount: string,
-        maxSlippageBps?: number
+        maxSlippageBps: number = MAX_SLIPPAGE_BPS
     ): Promise<SwapQuote> {
+        validateMaxSlippageBps(maxSlippageBps);
         // In production, call swap router contract
         const protocolFee = BigIntString.mul(inputAmount, '25'); // 0.25%
 
@@ -849,6 +903,7 @@ export class RewardsSDK {
                 lastUpdate: Math.floor(Date.now() / 1000) - 3600,
                 isActive: true,
                 decimals: 7,
+                claimDeadline: 0, // no deadline
             },
             {
                 index: 1,
@@ -859,6 +914,7 @@ export class RewardsSDK {
                 lastUpdate: Math.floor(Date.now() / 1000) - 3600,
                 isActive: true,
                 decimals: 7,
+                claimDeadline: 0, // no deadline
             },
             {
                 index: 2,
@@ -869,6 +925,7 @@ export class RewardsSDK {
                 lastUpdate: Math.floor(Date.now() / 1000) - 3600,
                 isActive: true,
                 decimals: 7,
+                claimDeadline: 0, // no deadline
             },
         ];
     }

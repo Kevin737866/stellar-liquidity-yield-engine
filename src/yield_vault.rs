@@ -1,6 +1,6 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype, token::TokenClient, unwrap::UnwrapOptimized, Address,
-    Env, Symbol, Vec,
+    Env, Map, Symbol, Vec,
 };
 
 #[contracttype]
@@ -25,6 +25,27 @@ pub struct UserPosition {
     pub deposited_amount_b: i128,
 }
 
+/// An economic-parameter change waiting out its time lock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PendingAdminAction {
+    Prices(i128, i128),
+    MinDepositAmounts(i128, i128),
+    MinWithdrawShares(i128),
+    Treasury(Address),
+    TimelockDelay(u64),
+}
+
+/// A queued change with the timestamp at which it becomes executable.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAction {
+    pub id: u64,
+    pub action: PendingAdminAction,
+    pub proposer: Address,
+    pub executable_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultMetrics {
@@ -44,7 +65,7 @@ const SECONDS_PER_YEAR: u128 = 31_536_000;
 
 /// Default minimum deposit per leg: 0, because a single-leg deposit is a valid
 /// operation. The combined deposit must still be positive, and an admin can
-/// raise either leg with `set_min_deposit_amounts`.
+/// raise either leg through the timelocked `propose_set_min_deposit_amounts`.
 pub const DEFAULT_MIN_DEPOSIT: i128 = 0;
 
 /// Smallest accepted withdrawal, in shares, when the admin has not configured a
@@ -55,6 +76,17 @@ pub const DEFAULT_MIN_WITHDRAW_SHARES: i128 = 1;
 /// instead of being stranded in the vault forever.
 pub const DUST_THRESHOLD: i128 = 1;
 
+/// Default delay applied to admin changes of economic parameters: 48 hours.
+///
+/// This gives depositors and integrators a window to see a pending change - and
+/// to exit - before it takes effect. The admin can change the delay, but only
+/// through the timelock itself, so it cannot be shortened instantly.
+pub const DEFAULT_TIMELOCK_DELAY: u64 = 48 * 60 * 60;
+
+// The contract's entrypoints are exported only when the vault itself is the
+// contract being deployed. The rebalance engine depends on this module's types
+// (and on nothing else here), and a wasm binary cannot export two contracts.
+#[cfg(feature = "yield-vault")]
 #[contractimpl]
 impl YieldVault {
     /// Initialize a new yield vault
@@ -95,6 +127,16 @@ impl YieldVault {
             .instance()
             .set(&Symbol::new(&env, "paused"), &false);
 
+        // Time lock for economic-parameter changes, and the queue of changes
+        // waiting out that delay.
+        env.storage().instance().set(
+            &Symbol::new(&env, "timelock_delay"),
+            &DEFAULT_TIMELOCK_DELAY,
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "next_action_id"), &1u64);
+
         // Emergency multisig state: the emergency signer set starts empty and
         // must be configured by the admin; threshold defaults to 3 approvals.
         env.storage().instance().set(
@@ -122,6 +164,28 @@ impl YieldVault {
             (Symbol::new(&env, "vault_initialized"),),
             (admin, name, token_a, token_b, treasury),
         );
+        // Record the storage schema version of this build; `migrate` moves it
+        // forward after an upgrade swaps the code.
+        crate::upgrade::set_storage_version(&env, crate::upgrade::STORAGE_VERSION);
+    }
+
+    /// Replace this contract's code in place, keeping its address and storage
+    /// (admin only). See [crate::upgrade] and `docs/UPGRADING.md`.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
+        Self::require_admin(&env, admin.clone());
+        crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
+    }
+
+    /// Storage schema version of this contract's stored data.
+    pub fn get_storage_version(env: Env) -> u32 {
+        crate::upgrade::storage_version(&env)
+    }
+
+    /// Adopt the storage schema version of this build (admin only, idempotent).
+    /// Returns the version that was replaced.
+    pub fn migrate(env: Env, admin: Address) -> u32 {
+        Self::require_admin(&env, admin.clone());
+        crate::upgrade::mark_migrated(&env, &admin)
     }
 
     /// Deposit tokens into the vault
@@ -187,7 +251,9 @@ impl YieldVault {
         metrics.total_amount_a += amount_a;
         metrics.total_amount_b += amount_b;
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
 
         env.events().publish(
             (Symbol::new(&env, "deposit"),),
@@ -281,10 +347,14 @@ impl YieldVault {
             panic!("insufficient amount B");
         }
 
-        // Update user position
+        // Update user position. Withdrawing retires the part of the user's
+        // position that was outstanding, so it is also the moment their pending
+        // reward window restarts; record it so the UI can show pending rewards
+        // from the user's own last harvest rather than the vault-wide one.
         position.shares -= shares;
         position.deposited_amount_a -= withdraw_amount_a;
         position.deposited_amount_b -= withdraw_amount_b;
+        position.last_harvest = env.ledger().timestamp();
         env.storage().instance().set(&user, &position);
 
         // Update vault metrics and recompute TVL from the remaining balances.
@@ -292,7 +362,9 @@ impl YieldVault {
         metrics.total_amount_a -= withdraw_amount_a;
         metrics.total_amount_b -= withdraw_amount_b;
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
 
         // Transfer tokens to user
         let token_a_client = TokenClient::new(&env, &vault_info.token_a);
@@ -333,8 +405,14 @@ impl YieldVault {
         (final_amount_a, final_amount_b)
     }
 
-    /// Auto-compound harvest and reinvestment
-    pub fn harvest(env: Env, _caller: Address) {
+    /// Auto-compound harvest and reinvestment.
+    ///
+    /// Harvesting compounds rewards into the vault's balances, which changes the
+    /// value backing every share. The vault-wide `metrics.last_harvest` records
+    /// the last time that happened; the caller's own `last_harvest` is recorded
+    /// too, so a user's pending-reward state is measured from the last harvest
+    /// they participated in instead of a timestamp shared by the whole vault.
+    pub fn harvest(env: Env, caller: Address) {
         Self::require_not_paused(&env);
 
         let vault_info = Self::get_vault_info(env.clone());
@@ -355,14 +433,15 @@ impl YieldVault {
 
             // Derive an annualized APY from this harvest's yield (net rewards vs the
             // vault's value before reinvestment) over the elapsed wall-clock time.
-            let elapsed = env.ledger().timestamp().saturating_sub(metrics.last_harvest);
+            let elapsed = env
+                .ledger()
+                .timestamp()
+                .saturating_sub(metrics.last_harvest);
             let prev_value = metrics.tvl;
             let reward_value = Self::value_in_usd(&env, net_rewards_a, net_rewards_b);
             if elapsed > 0 && prev_value > 0 && reward_value > 0 {
                 // yield_bp = reward_value / prev_value * seconds_per_year / elapsed * 10000
-                let apy_bp = reward_value as u128
-                    * SECONDS_PER_YEAR
-                    * 10000u128
+                let apy_bp = reward_value as u128 * SECONDS_PER_YEAR * 10000u128
                     / (prev_value as u128 * elapsed as u128);
                 // Cap at 100,000% APY to keep the value sane.
                 metrics.apy = apy_bp.min(1000_0000) as u32;
@@ -376,7 +455,9 @@ impl YieldVault {
             // Recompute TVL from the reinvested balances.
             metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
 
-            env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "metrics"), &metrics);
 
             // Transfer fees to treasury
             if fee_a > 0 || fee_b > 0 {
@@ -394,7 +475,22 @@ impl YieldVault {
 
             env.events().publish(
                 (Symbol::new(&env, "harvest"),),
-                (_caller, net_rewards_a, net_rewards_b, fee_a, fee_b),
+                (caller.clone(), net_rewards_a, net_rewards_b, fee_a, fee_b),
+            );
+        }
+
+        // Per-user harvest bookkeeping. Only an address that already holds a
+        // position is stamped: writing a position for a caller that has none
+        // would let anyone create instance-storage entries for arbitrary
+        // addresses, and there is no pending reward to reset for them anyway.
+        let mut position = Self::get_user_position(env.clone(), caller.clone());
+        if position.shares > 0 {
+            position.last_harvest = env.ledger().timestamp();
+            env.storage().instance().set(&caller, &position);
+
+            env.events().publish(
+                (Symbol::new(&env, "user_harvest"),),
+                (caller, position.last_harvest),
             );
         }
     }
@@ -413,25 +509,28 @@ impl YieldVault {
         )
     }
 
-    /// Set the minimum accepted deposit per leg (admin only). A minimum of 0
-    /// keeps single-leg deposits open; the combined deposit must be positive
-    /// either way.
-    pub fn set_min_deposit_amounts(env: Env, admin: Address, min_a: i128, min_b: i128) {
+    /// Queue a change to the minimum accepted deposit per leg (admin only).
+    ///
+    /// The change is queued rather than applied: it becomes executable once the
+    /// timelock delay has elapsed. A minimum of 0 keeps single-leg deposits
+    /// open; the combined deposit must be positive either way.
+    ///
+    /// Returns the id of the queued action.
+    pub fn propose_set_min_deposit_amounts(
+        env: Env,
+        admin: Address,
+        min_a: i128,
+        min_b: i128,
+    ) -> u64 {
         Self::require_admin(&env, admin.clone());
         require!(min_a >= 0, "min_amount_a must not be negative");
         require!(min_b >= 0, "min_amount_b must not be negative");
 
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "min_deposit_a"), &min_a);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "min_deposit_b"), &min_b);
-
-        env.events().publish(
-            (Symbol::new(&env, "min_deposit_updated"),),
-            (admin, min_a, min_b),
-        );
+        Self::enqueue(
+            env,
+            admin,
+            PendingAdminAction::MinDepositAmounts(min_a, min_b),
+        )
     }
 
     /// Smallest accepted withdrawal, in shares
@@ -442,20 +541,19 @@ impl YieldVault {
             .unwrap_or(DEFAULT_MIN_WITHDRAW_SHARES)
     }
 
-    /// Set the smallest accepted withdrawal in shares (admin only). Must be
-    /// positive so a zero-share withdrawal is always rejected.
-    pub fn set_min_withdraw_shares(env: Env, admin: Address, min_shares: i128) {
+    /// Queue a change to the smallest accepted withdrawal in shares (admin
+    /// only). Must be positive so a zero-share withdrawal is always rejected.
+    ///
+    /// Returns the id of the queued action.
+    pub fn propose_set_min_withdraw_shares(env: Env, admin: Address, min_shares: i128) -> u64 {
         Self::require_admin(&env, admin.clone());
         require!(min_shares > 0, "min_shares must be positive");
 
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "min_withdraw_shares"), &min_shares);
-
-        env.events().publish(
-            (Symbol::new(&env, "min_withdraw_shares_updated"),),
-            (admin, min_shares),
-        );
+        Self::enqueue(
+            env,
+            admin,
+            PendingAdminAction::MinWithdrawShares(min_shares),
+        )
     }
 
     /// Get vault information
@@ -495,27 +593,16 @@ impl YieldVault {
         Self::get_metrics(env).tvl
     }
 
-    /// Set USD prices (scaled) for token_a and token_b (admin only). TVL is
-    /// recomputed immediately so get_tvl reflects the new prices.
-    pub fn set_prices(env: Env, admin: Address, price_a: i128, price_b: i128) {
-        let current_admin = Self::get_admin(env.clone());
-        if admin != current_admin {
-            panic!("unauthorized");
-        }
-        if price_a < 0 || price_b < 0 {
-            panic!("negative price");
-        }
+    /// Queue a change to the USD prices (scaled) used for TVL (admin only).
+    ///
+    /// Prices are an economic parameter: they change the value backing every
+    /// share, so the change is queued behind the timelock. Returns the id of the
+    /// queued action.
+    pub fn propose_set_prices(env: Env, admin: Address, price_a: i128, price_b: i128) -> u64 {
+        Self::require_admin(&env, admin.clone());
+        require!(price_a >= 0 && price_b >= 0, "price must not be negative");
 
-        env.storage().instance().set(&Symbol::new(&env, "price_a"), &price_a);
-        env.storage().instance().set(&Symbol::new(&env, "price_b"), &price_b);
-
-        let metrics = Self::get_metrics(env.clone());
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
-
-        env.events().publish(
-            (Symbol::new(&env, "prices_updated"),),
-            (admin, price_a, price_b),
-        );
+        Self::enqueue(env, admin, PendingAdminAction::Prices(price_a, price_b))
     }
 
     /// Get the currently configured token prices as (price_a, price_b).
@@ -531,23 +618,89 @@ impl YieldVault {
             .unwrap_optimized()
     }
 
-    /// Point protocol fee routing at a new treasury/DAO address (admin only).
+    /// Queue a change to the treasury/DAO address that receives protocol fees
+    /// (admin only).
     ///
-    /// The treasury is set at initialization like `reward_distributor` does, but it
-    /// can be rotated so a DAO can move its own treasury without redeploying the
-    /// vault. Only affects fees collected after the call.
-    pub fn set_treasury(env: Env, admin: Address, treasury: Address) {
+    /// The treasury is set at initialization like `reward_distributor` does, but
+    /// it can be rotated so a DAO can move its own treasury without redeploying
+    /// the vault. Because fee routing is an economic parameter, the rotation is
+    /// queued behind the timelock and only affects fees collected after it is
+    /// executed. Returns the id of the queued action.
+    pub fn propose_set_treasury(env: Env, admin: Address, treasury: Address) -> u64 {
         Self::require_admin(&env, admin.clone());
 
-        let previous = Self::get_treasury(env.clone());
+        Self::enqueue(env, admin, PendingAdminAction::Treasury(treasury))
+    }
+
+    /// Queue a change to the timelock delay itself (admin only).
+    ///
+    /// The delay can only be changed through the timelock, so a compromised or
+    /// impatient admin cannot shorten the notice window and then act on it in
+    /// the same ledger. Returns the id of the queued action.
+    pub fn propose_set_timelock_delay(env: Env, admin: Address, delay: u64) -> u64 {
+        Self::require_admin(&env, admin.clone());
+        Self::enqueue(env, admin, PendingAdminAction::TimelockDelay(delay))
+    }
+
+    /// Execute a queued action once its timelock has elapsed (admin only).
+    ///
+    /// Executing early is rejected; the action stays queued, so it can still be
+    /// executed after the delay. Executing removes it, so it cannot be replayed.
+    pub fn execute_pending_action(env: Env, admin: Address, action_id: u64) {
+        Self::require_admin(&env, admin.clone());
+
+        let mut pending = Self::get_pending_actions(env.clone());
+        let action = match pending.get(action_id) {
+            Some(action) => action,
+            None => panic!("no pending action with that id"),
+        };
+        require!(
+            env.ledger().timestamp() >= action.executable_at,
+            "action is still timelocked"
+        );
+
+        pending.remove(action_id);
         env.storage()
             .instance()
-            .set(&Symbol::new(&env, "treasury"), &treasury);
+            .set(&Symbol::new(&env, "pending_actions"), &pending);
+
+        Self::apply_action(&env, &action.action);
 
         env.events().publish(
-            (Symbol::new(&env, "treasury_updated"),),
-            (admin, previous, treasury),
+            (Symbol::new(&env, "action_executed"), action_id),
+            (admin, action.executable_at),
         );
+    }
+
+    /// Cancel a queued action (admin only), discarding it without effect.
+    pub fn cancel_pending_action(env: Env, admin: Address, action_id: u64) {
+        Self::require_admin(&env, admin.clone());
+
+        let mut pending = Self::get_pending_actions(env.clone());
+        require!(
+            pending.contains_key(action_id),
+            "no pending action with that id"
+        );
+        pending.remove(action_id);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "pending_actions"), &pending);
+
+        env.events()
+            .publish((Symbol::new(&env, "action_cancelled"), action_id), (admin,));
+    }
+
+    /// A queued action by id, if it is still pending.
+    pub fn get_pending_action(env: Env, action_id: u64) -> Option<PendingAction> {
+        Self::get_pending_actions(env).get(action_id)
+    }
+
+    /// The delay applied to economic-parameter changes, in seconds.
+    pub fn get_timelock_delay(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "timelock_delay"))
+            .unwrap_or(DEFAULT_TIMELOCK_DELAY)
     }
 
     /// Read the raw stored metrics without recomputing TVL
@@ -617,26 +770,127 @@ impl YieldVault {
         1000i128
     }
 
+    /// The queued timelocked actions, keyed by action id.
+    fn get_pending_actions(env: Env) -> Map<u64, PendingAction> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "pending_actions"))
+            .unwrap_or(Map::new(&env))
+    }
+
+    /// Allocate the next action id.
+    fn next_action_id(env: &Env) -> u64 {
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "next_action_id"))
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "next_action_id"), &(id + 1));
+        id
+    }
+
+    /// Queue `action` so it becomes executable after the current timelock delay.
+    fn enqueue(env: Env, proposer: Address, action: PendingAdminAction) -> u64 {
+        let id = Self::next_action_id(&env);
+        let executable_at = env
+            .ledger()
+            .timestamp()
+            .saturating_add(Self::get_timelock_delay(env.clone()));
+
+        let mut pending = Self::get_pending_actions(env.clone());
+        pending.set(
+            id,
+            PendingAction {
+                id,
+                action,
+                proposer: proposer.clone(),
+                executable_at,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "pending_actions"), &pending);
+
+        env.events().publish(
+            (Symbol::new(&env, "action_proposed"), id),
+            (proposer, executable_at),
+        );
+
+        id
+    }
+
+    /// Apply a matured action to storage. Only `execute_pending_action` calls
+    /// this, after checking the delay and removing the action from the queue.
+    fn apply_action(env: &Env, action: &PendingAdminAction) {
+        match action.clone() {
+            PendingAdminAction::Prices(price_a, price_b) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "price_a"), &price_a);
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "price_b"), &price_b);
+
+                // Recompute TVL so the new prices are reflected immediately.
+                let metrics = Self::get_metrics(env.clone());
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "metrics"), &metrics);
+
+                env.events()
+                    .publish((Symbol::new(env, "prices_updated"),), (price_a, price_b));
+            }
+            PendingAdminAction::MinDepositAmounts(min_a, min_b) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "min_deposit_a"), &min_a);
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "min_deposit_b"), &min_b);
+
+                env.events()
+                    .publish((Symbol::new(env, "min_deposit_updated"),), (min_a, min_b));
+            }
+            PendingAdminAction::MinWithdrawShares(min_shares) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "min_withdraw_shares"), &min_shares);
+
+                env.events().publish(
+                    (Symbol::new(env, "min_withdraw_shares_updated"),),
+                    (min_shares,),
+                );
+            }
+            PendingAdminAction::Treasury(treasury) => {
+                let previous = Self::get_treasury(env.clone());
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "treasury"), &treasury);
+
+                env.events().publish(
+                    (Symbol::new(env, "treasury_updated"),),
+                    (previous, treasury),
+                );
+            }
+            PendingAdminAction::TimelockDelay(delay) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "timelock_delay"), &delay);
+
+                env.events()
+                    .publish((Symbol::new(env, "timelock_delay_updated"),), (delay,));
+            }
+        }
+    }
+
     /// Get admin address
     fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
             .unwrap_optimized()
-    }
-
-    /// Integer square root (Babylonian method) for share calculations
-    fn isqrt(n: u128) -> u128 {
-        if n == 0 {
-            return 0;
-        }
-        let mut x = n;
-        let mut y = (x + 1) / 2;
-        while y < x {
-            x = y;
-            y = (x + n / x) / 2;
-        }
-        x
     }
 
     /// Check if vault is paused
@@ -776,10 +1030,10 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::{
         token::{StellarAssetClient, TokenClient},
-        Env, IntoVal, Symbol,
+        Env, Symbol,
     };
 
     fn setup(
@@ -788,11 +1042,11 @@ mod tests {
         harvest_fee: u32,
         withdrawal_fee: u32,
     ) -> (
-        YieldVaultClient,
-        TokenClient,
-        TokenClient,
-        StellarAssetClient,
-        StellarAssetClient,
+        YieldVaultClient<'_>,
+        TokenClient<'_>,
+        TokenClient<'_>,
+        StellarAssetClient<'_>,
+        StellarAssetClient<'_>,
         Address,
         Address,
         Address,
@@ -808,7 +1062,7 @@ mod tests {
         let token_b_admin = StellarAssetClient::new(env, &token_b.address());
         let pool_id = Address::generate(env);
 
-        let vault_id = env.register_contract(None, YieldVault);
+        let vault_id = env.register(YieldVault, ());
         let vault = YieldVaultClient::new(env, &vault_id);
 
         vault.initialize(
@@ -837,8 +1091,8 @@ mod tests {
     }
 
     fn mint_pair(
-        token_a_client: &TokenClient,
-        token_b_client: &TokenClient,
+        _token_a_client: &TokenClient,
+        _token_b_client: &TokenClient,
         token_a_admin: &StellarAssetClient,
         token_b_admin: &StellarAssetClient,
         to: &Address,
@@ -857,7 +1111,15 @@ mod tests {
             setup(&env, 0, 0, 0);
 
         // Token-B-only first deposit must still mint shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 0, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            0,
+            100,
+        );
         let shares = vault.deposit(&user, &0, &100, &0);
 
         assert_eq!(shares, 100);
@@ -874,17 +1136,41 @@ mod tests {
         let user3 = Address::generate(&env);
 
         // First deposit: 100 A + 100 B -> 200 shares (1:1 combined value)
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user1, 100, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user1,
+            100,
+            100,
+        );
         let shares1 = vault.deposit(&user1, &100, &100, &0);
         assert_eq!(shares1, 200);
 
         // Token-B-only deposit: 100 B out of 200 total value -> 100 shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user2, 0, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user2,
+            0,
+            100,
+        );
         let shares2 = vault.deposit(&user2, &0, &100, &0);
         assert_eq!(shares2, 100);
 
         // Mixed deposit: 50 A + 50 B out of 200 total value -> 100 shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user3, 50, 50);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user3,
+            50,
+            50,
+        );
         let shares3 = vault.deposit(&user3, &50, &50, &0);
         assert_eq!(shares3, 100);
 
@@ -902,7 +1188,15 @@ mod tests {
         let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 10, 10);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            10,
+            10,
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             vault.deposit(&user, &10, &10, &100);
         }));
@@ -914,7 +1208,7 @@ mod tests {
     fn test_first_deposit_balanced_mints_combined_value_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &1000);
@@ -930,7 +1224,7 @@ mod tests {
     fn test_first_deposit_unbalanced_uses_nonzero_amount() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &2000);
@@ -944,7 +1238,7 @@ mod tests {
     fn test_subsequent_deposit_mints_proportional_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &1000);
@@ -963,7 +1257,7 @@ mod tests {
     fn test_withdraw_returns_tokens_and_burns_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &1000);
@@ -1081,7 +1375,7 @@ mod tests {
         let new_treasury = Address::generate(&env);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            vault.set_treasury(&stranger, &new_treasury);
+            vault.propose_set_treasury(&stranger, &new_treasury);
         }));
 
         assert!(result.is_err(), "treasury rotation must be admin only");
@@ -1104,7 +1398,10 @@ mod tests {
         ) = setup(&env, 0, 0, 100);
         let new_treasury = Address::generate(&env);
 
-        vault.set_treasury(&admin, &new_treasury);
+        // Rotation is timelocked: propose, wait out the delay, then execute.
+        let action = vault.propose_set_treasury(&admin, &new_treasury);
+        env.ledger().set_timestamp(vault.get_timelock_delay() + 1);
+        vault.execute_pending_action(&admin, &action);
         assert_eq!(vault.get_treasury(), new_treasury);
 
         token_a_admin.mint(&user, &1000);
@@ -1118,108 +1415,401 @@ mod tests {
         assert_eq!(token_a_client.balance(&treasury), 0);
     }
 
+    // ============ ADMIN TIMELOCK TESTS (Issue #301) ============
+
+    #[test]
+    fn test_default_timelock_delay_is_applied_at_initialize() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, ..) = setup(&env, 0, 0, 0);
+        assert_eq!(vault.get_timelock_delay(), DEFAULT_TIMELOCK_DELAY);
+    }
+
+    #[test]
+    fn test_economic_param_change_requires_the_timelock_to_elapse() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        let action = vault.propose_set_prices(&admin, &11, &22);
+
+        // Queued, not applied.
+        assert_eq!(vault.get_prices(), (0, 0));
+        assert_eq!(vault.get_pending_action(&action).unwrap().id, action);
+
+        // Executing early is rejected and leaves the action queued.
+        let early = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &action);
+        }));
+        assert!(early.is_err(), "an unexpired change must be rejected");
+        assert_eq!(vault.get_prices(), (0, 0));
+        assert!(vault.get_pending_action(&action).is_some());
+
+        // Once the delay has elapsed it applies, and cannot be replayed.
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        vault.execute_pending_action(&admin, &action);
+        assert_eq!(vault.get_prices(), (11, 22));
+        assert!(vault.get_pending_action(&action).is_none());
+
+        let replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &action);
+        }));
+        assert!(replay.is_err(), "an executed action must not be replayable");
+    }
+
+    #[test]
+    fn test_pending_action_can_be_cancelled() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        let action = vault.propose_set_min_deposit_amounts(&admin, &5, &5);
+        assert!(vault.get_pending_action(&action).is_some());
+
+        vault.cancel_pending_action(&admin, &action);
+        assert!(vault.get_pending_action(&action).is_none());
+
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        let executed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &action);
+        }));
+        assert!(executed.is_err(), "a cancelled action must not apply");
+
+        // The previous minimum is untouched.
+        assert_eq!(
+            vault.get_min_deposit_amounts(),
+            (DEFAULT_MIN_DEPOSIT, DEFAULT_MIN_DEPOSIT)
+        );
+    }
+
+    #[test]
+    fn test_each_economic_action_takes_effect_after_the_delay() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let new_treasury = Address::generate(&env);
+
+        let deposits = vault.propose_set_min_deposit_amounts(&admin, &11, &22);
+        let withdrawals = vault.propose_set_min_withdraw_shares(&admin, &33);
+        let prices = vault.propose_set_prices(&admin, &44, &55);
+        let treasury = vault.propose_set_treasury(&admin, &new_treasury);
+
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        vault.execute_pending_action(&admin, &deposits);
+        vault.execute_pending_action(&admin, &withdrawals);
+        vault.execute_pending_action(&admin, &prices);
+        vault.execute_pending_action(&admin, &treasury);
+
+        assert_eq!(vault.get_min_deposit_amounts(), (11, 22));
+        assert_eq!(vault.get_min_withdraw_shares(), 33);
+        assert_eq!(vault.get_prices(), (44, 55));
+        assert_eq!(vault.get_treasury(), new_treasury);
+    }
+
+    #[test]
+    fn test_timelock_delay_can_only_be_changed_through_the_timelock() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        // Even setting the delay to zero has to wait out the current delay.
+        let change = vault.propose_set_timelock_delay(&admin, &0);
+        let early = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &change);
+        }));
+        assert!(early.is_err());
+        assert_eq!(vault.get_timelock_delay(), DEFAULT_TIMELOCK_DELAY);
+
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        vault.execute_pending_action(&admin, &change);
+        assert_eq!(vault.get_timelock_delay(), 0);
+
+        // With a zero delay, propose and execute happen in the same ledger.
+        let action = vault.propose_set_prices(&admin, &7, &9);
+        vault.execute_pending_action(&admin, &action);
+        assert_eq!(vault.get_prices(), (7, 9));
+    }
+
+    #[test]
+    fn test_timelock_operations_are_admin_only() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+
+        let proposed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_prices(&stranger, &1, &1);
+        }));
+        assert!(proposed.is_err(), "only the admin may queue changes");
+
+        let action = vault.propose_set_prices(&admin, &1, &1);
+
+        let executed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&stranger, &action);
+        }));
+        assert!(executed.is_err(), "only the admin may execute changes");
+
+        let cancelled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.cancel_pending_action(&stranger, &action);
+        }));
+        assert!(cancelled.is_err(), "only the admin may cancel changes");
+    }
+
+    #[test]
+    fn test_invalid_values_are_rejected_when_the_action_is_proposed() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        let negative_price = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_prices(&admin, &-1, &1);
+        }));
+        assert!(negative_price.is_err());
+
+        let negative_minimum = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_min_deposit_amounts(&admin, &-1, &0);
+        }));
+        assert!(negative_minimum.is_err());
+
+        let zero_withdraw_minimum = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_min_withdraw_shares(&admin, &0);
+        }));
+        assert!(zero_withdraw_minimum.is_err());
+    }
+
+    // ─── Per-user harvest tracking (Issue #116) ───────────────────────────────
+
+    #[test]
+    fn test_withdraw_stamps_user_last_harvest() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        env.ledger().set_timestamp(1_000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        vault.deposit(&user, &1000, &1000, &0);
+        assert_eq!(vault.get_user_position(&user).last_harvest, 1_000);
+
+        env.ledger().set_timestamp(5_500);
+        vault.withdraw(&user, &500, &0, &0);
+
+        let position = vault.get_user_position(&user);
+        assert_eq!(
+            position.last_harvest, 5_500,
+            "withdraw must stamp the withdrawing user's last harvest"
+        );
+        assert_eq!(
+            position.shares, 1500,
+            "partial exit keeps the remaining shares"
+        );
+    }
+
+    #[test]
+    fn test_full_exit_stamps_user_last_harvest() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        env.ledger().set_timestamp(1_000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        vault.deposit(&user, &1000, &1000, &0);
+
+        env.ledger().set_timestamp(9_000);
+        vault.withdraw(&user, &2000, &0, &0);
+
+        let position = vault.get_user_position(&user);
+        assert_eq!(position.shares, 0);
+        assert_eq!(position.last_harvest, 9_000);
+    }
+
+    #[test]
+    fn test_harvest_stamps_only_the_caller() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        // No harvest fee, so the vault needs no token balance to reinvest.
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+        let other = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &other,
+            100,
+            100,
+        );
+        vault.deposit(&user, &1000, &1000, &0);
+        vault.deposit(&other, &100, &100, &0);
+
+        env.ledger().set_timestamp(4_000);
+        vault.harvest(&user);
+
+        assert_eq!(
+            vault.get_user_position(&user).last_harvest,
+            4_000,
+            "harvest must stamp the caller's last harvest"
+        );
+        assert_eq!(
+            vault.get_user_position(&other).last_harvest,
+            1_000,
+            "another holder's last harvest is untouched by someone else's harvest"
+        );
+        assert_eq!(
+            vault.get_metrics().last_harvest,
+            4_000,
+            "the vault-wide harvest timestamp still advances"
+        );
+        // The admin never deposited, so harvesting on their behalf must not
+        // create a position record for them.
+        assert_eq!(vault.get_user_position(&admin).last_harvest, 0);
+    }
+
+    #[test]
+    fn test_harvest_does_not_create_position_for_non_holder() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, _) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+
+        env.ledger().set_timestamp(7_000);
+        vault.harvest(&stranger);
+
+        let position = vault.get_user_position(&stranger);
+        assert_eq!(position.shares, 0);
+        assert_eq!(
+            position.last_harvest, 0,
+            "a caller with no position must not get a harvest timestamp written"
+        );
+    }
+
     // ─── Insurance Integration ────────────────────────────────────────────────
+    //
+    // These helpers were written as if they lived inside the contract's
+    // `impl YieldVault` block but were placed in the test module, where `Self`
+    // does not resolve. Wrapping them in an inherent impl keeps them compiled
+    // and callable from tests without exposing them as contract entrypoints.
+    impl YieldVault {
+        /// One-click deposit + insurance purchase.
+        ///
+        /// Deposits tokens into the vault and simultaneously purchases an insurance
+        /// policy covering the deposit against impermanent loss.
+        /// Returns (shares_minted, policy_id).
+        pub fn deposit_with_insurance(
+            env: Env,
+            user: Address,
+            amount_a: i128,
+            amount_b: i128,
+            min_shares: i128,
+            coverage_period: u64,
+            current_price_ratio_scaled: i128,
+            historical_volatility_bps: u32,
+            pool_correlation_bps: u32,
+            auto_renew: bool,
+            _insurance_contract: Address,
+            reserve_token: Address,
+        ) -> (i128, u64) {
+            Self::require_not_paused(&env);
 
-    /// One-click deposit + insurance purchase.
-    ///
-    /// Deposits tokens into the vault and simultaneously purchases an insurance
-    /// policy covering the deposit against impermanent loss.
-    /// Returns (shares_minted, policy_id).
-    pub fn deposit_with_insurance(
-        env: Env,
-        user: Address,
-        amount_a: i128,
-        amount_b: i128,
-        min_shares: i128,
-        coverage_period: u64,
-        current_price_ratio_scaled: i128,
-        historical_volatility_bps: u32,
-        pool_correlation_bps: u32,
-        auto_renew: bool,
-        insurance_contract: Address,
-        reserve_token: Address,
-    ) -> (i128, u64) {
-        Self::require_not_paused(&env);
+            // Step 1: Standard deposit
+            let shares = Self::deposit(env.clone(), user.clone(), amount_a, amount_b, min_shares);
 
-        // Step 1: Standard deposit
-        let shares = Self::deposit(
-            env.clone(),
-            user.clone(),
-            amount_a,
-            amount_b,
-            min_shares,
-        );
+            // Step 2: Purchase insurance covering deposit amount_a as proxy for coverage
+            // The coverage amount is the value of token_a deposited (simplified)
+            use crate::il_insurance::ILInsurance;
+            let policy_id = ILInsurance::purchase_insurance(
+                env.clone(),
+                user.clone(),
+                amount_a,
+                coverage_period,
+                current_price_ratio_scaled,
+                historical_volatility_bps,
+                pool_correlation_bps,
+                auto_renew,
+                reserve_token,
+            );
 
-        // Step 2: Purchase insurance covering deposit amount_a as proxy for coverage
-        // The coverage amount is the value of token_a deposited (simplified)
-        use crate::il_insurance::ILInsurance;
-        let policy_id = ILInsurance::purchase_insurance(
-            env.clone(),
-            user.clone(),
-            amount_a,
-            coverage_period,
-            current_price_ratio_scaled,
-            historical_volatility_bps,
-            pool_correlation_bps,
-            auto_renew,
-            reserve_token,
-        );
+            env.events().publish(
+                (Symbol::new(&env, "insured_deposit"), user),
+                (shares, policy_id, amount_a, coverage_period),
+            );
 
-        env.events().publish(
-            (Symbol::new(&env, "insured_deposit"), user),
-            (shares, policy_id, amount_a, coverage_period),
-        );
-
-        (shares, policy_id)
-    }
-
-    /// Returns the effective APY net of insurance premium cost.
-    ///
-    /// insured_apy = vault_apy - annualised_premium_cost_bps
-    /// where annualised_premium_cost = (premium_bps / coverage_days) * 365
-    pub fn get_insured_apy(
-        env: Env,
-        coverage_period_days: u32,
-        premium_bps: u32,
-    ) -> i32 {
-        let metrics = Self::get_metrics(env);
-        let vault_apy = metrics.apy as i32;
-
-        if coverage_period_days == 0 {
-            return vault_apy;
+            (shares, policy_id)
         }
 
-        // Annualise the premium: (premium_bps / coverage_days) * 365
-        let annualised_premium_bps = (premium_bps as i32 * 365) / coverage_period_days as i32;
+        /// Returns the effective APY net of insurance premium cost.
+        ///
+        /// insured_apy = vault_apy - annualised_premium_cost_bps
+        /// where annualised_premium_cost = (premium_bps / coverage_days) * 365
+        pub fn get_insured_apy(env: Env, coverage_period_days: u32, premium_bps: u32) -> i32 {
+            let metrics = Self::get_metrics(env);
+            let vault_apy = metrics.apy as i32;
 
-        vault_apy - annualised_premium_bps
-    }
+            if coverage_period_days == 0 {
+                return vault_apy;
+            }
 
-    /// Check if a policy is eligible for auto-renewal and return the renewal premium.
-    /// Auto-renewal extends coverage using harvested yield from the user's position.
-    /// Returns (eligible, estimated_premium) – both zero if not eligible.
-    pub fn check_auto_renewal_eligibility(
-        env: Env,
-        user: Address,
-        min_yield_threshold: i128,
-    ) -> (bool, i128) {
-        let position = Self::get_user_position(env.clone(), user.clone());
-        let metrics = Self::get_metrics(env);
+            // Annualise the premium: (premium_bps / coverage_days) * 365
+            let annualised_premium_bps = (premium_bps as i32 * 365) / coverage_period_days as i32;
 
-        // Estimate accrued yield for the user's share of the vault
-        if metrics.total_shares == 0 {
-            return (false, 0);
+            vault_apy - annualised_premium_bps
         }
-        let user_share_of_total = position.shares * 10000 / metrics.total_shares;
-        let estimated_yield_a =
-            metrics.total_amount_a * user_share_of_total / 10000 - position.deposited_amount_a;
 
-        if estimated_yield_a >= min_yield_threshold {
-            // Estimated premium for 30-day renewal at base rate (0.5%)
-            let renewal_premium = position.deposited_amount_a * 50 / 10000;
-            (true, renewal_premium)
-        } else {
-            (false, 0)
+        /// Check if a policy is eligible for auto-renewal and return the renewal premium.
+        /// Auto-renewal extends coverage using harvested yield from the user's position.
+        /// Returns (eligible, estimated_premium) – both zero if not eligible.
+        pub fn check_auto_renewal_eligibility(
+            env: Env,
+            user: Address,
+            min_yield_threshold: i128,
+        ) -> (bool, i128) {
+            let position = Self::get_user_position(env.clone(), user.clone());
+            let metrics = Self::get_metrics(env);
+
+            // Estimate accrued yield for the user's share of the vault
+            if metrics.total_shares == 0 {
+                return (false, 0);
+            }
+            let user_share_of_total = position.shares * 10000 / metrics.total_shares;
+            let estimated_yield_a =
+                metrics.total_amount_a * user_share_of_total / 10000 - position.deposited_amount_a;
+
+            if estimated_yield_a >= min_yield_threshold {
+                // Estimated premium for 30-day renewal at base rate (0.5%)
+                let renewal_premium = position.deposited_amount_a * 50 / 10000;
+                (true, renewal_premium)
+            } else {
+                (false, 0)
+            }
         }
     }
 }

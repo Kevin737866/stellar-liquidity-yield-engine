@@ -75,10 +75,11 @@ class ArbitrageBacktester {
         const profitability = ArbitrageOptimizer.calculateProfitability(
           opportunity,
           this.config.initialPosition,
-          BigInt(100),
         );
 
-        if (profitability.netProfit > BigInt(0)) {
+        // This historical fixture has no round-trip fee estimates, so the
+        // cost-aware calculator correctly keeps it in HOLD mode.
+        if (profitability.costEstimateAvailable && profitability.netProfit > BigInt(0)) {
           action = 'REBALANCE';
           arbitrageProfit = profitability.netProfit;
           cumulativeArbitrage += arbitrageProfit;

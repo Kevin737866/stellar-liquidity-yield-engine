@@ -4,13 +4,52 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+# `rlib` is required for the integration tests in `tests/` to link against the
+# crate; `cdylib` is what Soroban actually deploys.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+# `testutils` is deliberately absent here: enabling it on the deployed (wasm)
+# target pulls in `rand` and std-only code, and the SDK then fails to build.
+soroban-sdk = { version = "22.0.0" }
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+
+[features]
+# Host builds (`cargo test`, `cargo clippy`) compile every contract so the whole
+# crate is testable.
+#
+# A wasm binary, however, can only export one contract's interface: Soroban
+# exports every entrypoint under its own function name, so two contracts in one
+# binary collide as soon as they share an entrypoint name (`initialize`, `pause`,
+# ...). Build one contract at a time for deployment:
+#
+#   cargo build --target wasm32-unknown-unknown --release \
+#     --no-default-features --features yield-vault
+#
+default = [
+    "engine",
+    "yield-vault",
+    "rebalance-engine",
+    "reward-distributor",
+    "strategy-registry",
+    "il-insurance",
+    "actuary",
+    "oracle-registry",
+]
+
+# The umbrella `StellarLiquidityYieldEngine` contract in `src/lib.rs`.
+engine = []
+yield-vault = []
+# The rebalance engine compiles the vault's types (via `VaultInfo`) but declares
+# its own vault client, so it does not export the vault's entrypoints.
+rebalance-engine = []
+reward-distributor = []
+strategy-registry = []
+il-insurance = []
+actuary = []
+oracle-registry = []
 
 [profile.release]
 opt-level = "z"

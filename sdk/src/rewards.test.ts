@@ -1,5 +1,11 @@
 import { Keypair, Networks } from 'stellar-sdk';
-import { RewardsSDK, type RewardsSDKConfig } from './rewards';
+import {
+  MAX_SLIPPAGE_BPS,
+  RewardsSDK,
+  isClaimDeadlinePassed,
+  type RewardsSDKConfig,
+  validateMaxSlippageBps,
+} from './rewards';
 import { VaultClient } from './vaultClient';
 import { type UserPosition } from './types';
 
@@ -57,6 +63,7 @@ describe('RewardsSDK vault shares', () => {
         lastUpdate: 0,
         isActive: true,
         decimals: 7,
+        claimDeadline: 0,
       },
     ]);
 
@@ -92,5 +99,73 @@ describe('RewardsSDK vault shares', () => {
     await expect(
       rewardsSDK.getPendingRewards(userAddress, vaultAddress)
     ).rejects.toThrow('RPC unavailable');
+  });
+});
+
+describe('isClaimDeadlinePassed', () => {
+  it('treats a zero deadline as "never expires"', () => {
+    expect(isClaimDeadlinePassed({ claimDeadline: 0 }, 4_000_000_000)).toBe(false);
+  });
+
+  it('allows a claim exactly at the deadline but not after it', () => {
+    expect(isClaimDeadlinePassed({ claimDeadline: 5_000 }, 5_000)).toBe(false);
+    expect(isClaimDeadlinePassed({ claimDeadline: 5_000 }, 5_001)).toBe(true);
+  });
+});
+
+describe('slippage tolerance validation', () => {
+  it.each([0, MAX_SLIPPAGE_BPS - 1, MAX_SLIPPAGE_BPS])(
+    'accepts %s bps',
+    (slippageBps) => {
+      expect(() => validateMaxSlippageBps(slippageBps)).not.toThrow();
+    }
+  );
+
+  it.each([-1, MAX_SLIPPAGE_BPS + 1, Number.MAX_SAFE_INTEGER, NaN, Infinity, 0.5])(
+    'rejects invalid value %s',
+    (slippageBps) => {
+      expect(() => validateMaxSlippageBps(slippageBps)).toThrow(/maxSlippageBps/);
+    }
+  );
+
+  it('rejects an invalid runtime value before requesting a quote', async () => {
+    const rewardsSDK = createRewardsSDK();
+
+    await expect(
+      rewardsSDK.getSwapQuote('USDC', 'XLM', '1000', MAX_SLIPPAGE_BPS + 1)
+    ).rejects.toThrow(/maxSlippageBps/);
+  });
+});
+
+describe('RewardsSDK claim deadlines', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it('refuses to claim a stream whose deadline has passed', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(20_000);
+    jest
+      .spyOn(VaultClient.prototype, 'getUserPosition')
+      .mockResolvedValue(userPosition(1_000n));
+    const rewardsSDK = createRewardsSDK();
+    jest.spyOn(rewardsSDK, 'getAllStreams').mockResolvedValue([
+      {
+        index: 0,
+        token: 'USDC',
+        tokenSymbol: 'USDC',
+        ratePerSecond: '1',
+        totalDistributed: '0',
+        lastUpdate: 0,
+        isActive: true,
+        decimals: 7,
+        claimDeadline: 5, // long past: the ledger is at t=20
+      },
+    ]);
+
+    await expect(
+      rewardsSDK.claimRewards(Keypair.random(), vaultAddress, { streams: [0] })
+    ).rejects.toThrow(/stream 0 expired at 5/);
   });
 });

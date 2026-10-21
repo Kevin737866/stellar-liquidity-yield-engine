@@ -1,4 +1,12 @@
-import { ArbitrageScanner, ArbitrageExecutor, ArbitrageOptimizer, Opportunity } from '../arbitrage';
+import {
+  ArbitrageScanner,
+  ArbitrageExecutor,
+  ArbitrageOptimizer,
+  Opportunity,
+  RoundTripCostEstimator,
+} from '../arbitrage';
+import { LedgerHeadSource, RpcLagMonitor, RpcLagOptions, RpcLagReport } from '../rpcSync';
+import { SorobanRpc } from 'stellar-sdk';
 import axios from 'axios';
 
 export interface RebalancerConfig {
@@ -8,10 +16,22 @@ export interface RebalancerConfig {
   minApyDelta: number; // Basis points
   maxIlTolerance: number; // Basis points
   cooldownHours: number;
+  cronExpression?: string;
   telegramWebhookUrl?: string;
   discordWebhookUrl?: string;
   riskTolerance: number; // 1-10
   maxPositionSize: bigint;
+  /** Asset represented by maxPositionSize and the cost estimator's amounts. */
+  investmentAsset?: string;
+  /** Required to produce arbitrage recommendations; unknown fees fail closed. */
+  roundTripCostEstimator?: RoundTripCostEstimator;
+  /**
+   * RPC ledger-head source. When set, the keeper checks the node's head against
+   * the last ledger it processed and warns before acting on stale data.
+   */
+  rpcHeadSource?: LedgerHeadSource;
+  /** Thresholds for the RPC lag warning. */
+  lagOptions?: RpcLagOptions;
 }
 
 export interface RebalanceResult {
@@ -20,6 +40,15 @@ export interface RebalanceResult {
   opportunity?: Opportunity;
   profit?: bigint;
   message: string;
+  /** RPC lag observed for this run, when a head source is configured. */
+  lag?: RpcLagReport;
+}
+
+export interface AutoRebalancerOptions {
+  /** Override the opportunity scanner (defaults to a real Horizon-backed one). */
+  scanner?: ArbitrageScanner;
+  /** Override the executor, e.g. to configure its write pacing. */
+  executor?: ArbitrageExecutor;
 }
 
 export class AutoRebalancer {
@@ -28,11 +57,43 @@ export class AutoRebalancer {
   private executor: ArbitrageExecutor;
   private executionHistory: RebalanceResult[] = [];
   private lastExecutionTime: number = 0;
+  private lastConsumedMinute: number = -1;
+  private lagMonitor?: RpcLagMonitor;
+  private lastLag?: RpcLagReport;
 
-  constructor(config: RebalancerConfig) {
+  constructor(config: RebalancerConfig, options: AutoRebalancerOptions = {}) {
     this.config = config;
-    this.scanner = new ArbitrageScanner();
+    this.scanner = new ArbitrageScanner('https://horizon.stellar.org', {
+      roundTripCostEstimator: config.roundTripCostEstimator,
+    });
     this.executor = new ArbitrageExecutor();
+    if (config.rpcHeadSource) {
+      this.lagMonitor = new RpcLagMonitor(config.rpcHeadSource, config.lagOptions);
+    }
+  }
+
+  /** Write-pacing counters for the executor this keeper writes through. */
+  getWriteLimiterStats() {
+    return this.executor.getWriteLimiterStats();
+  }
+
+  /**
+   * Check the RPC node's ledger head against the last ledger this keeper has
+   * processed, warning when the node is noticeably behind. Returns `undefined`
+   * when no head source is configured.
+   */
+  async checkRpcLag(): Promise<RpcLagReport | undefined> {
+    if (!this.lagMonitor) {
+      return undefined;
+    }
+    const report = await this.lagMonitor.check();
+    this.lastLag = report;
+    return report;
+  }
+
+  /** The most recent lag report, if a check has run. */
+  getLastLagReport(): RpcLagReport | undefined {
+    return this.lastLag;
   }
 
   /**
@@ -43,12 +104,25 @@ export class AutoRebalancer {
     const results: RebalanceResult[] = [];
 
     try {
+      // Warn before acting if the RPC node's head has fallen noticeably behind
+      // the last ledger this keeper processed.
+      const lag = await this.checkRpcLag();
+      if (lag && lag.severity !== 'ok') {
+        results.push({
+          timestamp: Date.now(),
+          success: false,
+          message: `RPC lag detected: ${lag.message}`,
+          lag,
+        });
+      }
+
       // Check cooldown
       if (!this.isReadyForRebalance()) {
         results.push({
           timestamp: Date.now(),
           success: false,
           message: `Cooldown active. Last execution: ${new Date(this.lastExecutionTime).toISOString()}`,
+          lag,
         });
         return results;
       }
@@ -58,6 +132,11 @@ export class AutoRebalancer {
         this.config.currentVaultApy,
         this.config.minApyDelta,
         this.config.maxIlTolerance,
+        {
+          investmentAmount: this.config.maxPositionSize,
+          investmentAsset: this.config.investmentAsset ?? '',
+          sourcePoolId: this.config.currentPoolId,
+        },
       );
 
       if (opportunities.length === 0) {
@@ -65,15 +144,26 @@ export class AutoRebalancer {
           timestamp: Date.now(),
           success: false,
           message: 'No profitable opportunities found',
+          lag,
         });
         return results;
       }
 
       // Rank opportunities by risk-adjusted return
       const rankedOpps = ArbitrageOptimizer.rankOpportunities(
-        opportunities,
+        opportunities.filter((opportunity) => opportunity.recommended),
         this.config.riskTolerance,
       );
+
+      if (rankedOpps.length === 0) {
+        results.push({
+          timestamp: Date.now(),
+          success: false,
+          message: 'No opportunities remain eligible after net-profitability and risk checks',
+          lag,
+        });
+        return results;
+      }
 
       // Execute best opportunity if profitable
       const bestOpportunity = rankedOpps[0];
@@ -82,12 +172,14 @@ export class AutoRebalancer {
         this.config.maxPositionSize,
       );
 
-      if (profitability.netProfit <= BigInt(0)) {
+      if (!profitability.costEstimateAvailable || profitability.netProfit <= BigInt(0)) {
         results.push({
           timestamp: Date.now(),
           success: false,
           opportunity: bestOpportunity,
-          message: `Best opportunity not profitable. Net profit: ${profitability.netProfit}`,
+          message: profitability.costEstimateAvailable
+            ? `Best opportunity not profitable. Net profit: ${profitability.netProfit}`
+            : 'Best opportunity has no valid round-trip cost estimate for this position',
         });
         return results;
       }
@@ -98,12 +190,14 @@ export class AutoRebalancer {
         this.config.maxPositionSize,
       );
 
-      if (!simulation.profitable) {
+      if (!simulation.costEstimateAvailable || !simulation.profitable) {
         results.push({
           timestamp: Date.now(),
           success: false,
           opportunity: bestOpportunity,
-          message: `Simulation shows negative profit: ${simulation.netProfit}`,
+          message: simulation.costEstimateAvailable
+            ? `Simulation shows negative profit: ${simulation.netProfit}`
+            : 'Simulation has no valid round-trip cost estimate for this position',
         });
         return results;
       }
@@ -124,6 +218,7 @@ export class AutoRebalancer {
           opportunity: bestOpportunity,
           profit: profitability.netProfit,
           message: `Rebalance executed successfully. TX: ${executionResult.transactionHash}`,
+          lag,
         };
         results.push(result);
         this.executionHistory.push(result);
@@ -136,6 +231,7 @@ export class AutoRebalancer {
           success: false,
           opportunity: bestOpportunity,
           message: `Execution failed: ${executionResult.error}`,
+          lag,
         });
       }
     } catch (error) {
@@ -152,10 +248,72 @@ export class AutoRebalancer {
 
   /**
    * Check if enough time has passed since last execution (cooldown)
+   * and if the current time matches the cron expression schedule.
+   * Both conditions must be satisfied when cronExpression is set;
+   * cooldown must never bypass the schedule.
+   * The last consumed scheduled minute is tracked to prevent
+   * repeated rebalances during the same matching minute.
    */
   private isReadyForRebalance(): boolean {
     const cooldownMs = this.config.cooldownHours * 3600 * 1000;
-    return Date.now() - this.lastExecutionTime >= cooldownMs;
+    const cooldownReady = Date.now() - this.lastExecutionTime >= cooldownMs;
+    const now = new Date();
+    const currentMinute = now.getMinutes();
+
+    if (!this.config.cronExpression) {
+      return cooldownReady;
+    }
+
+    const cronMatch = this.isCronTime(currentMinute);
+    if (cronMatch && cooldownReady) {
+      if (currentMinute !== this.lastConsumedMinute) {
+        this.lastConsumedMinute = currentMinute;
+        return true;
+      }
+      return false; // same minute already consumed
+    }
+
+    if (cronMatch && !cooldownReady) {
+      // Cron matches but cooldown not satisfied — do not consume schedule
+      return false;
+    }
+
+    return false;
+  }
+
+/**
+   * Check if the current time matches the cron expression.
+   * Supports patterns like: every15m (every 15 minutes), minuteValue (e.g. 0).
+   * @param minute The current minute value (0-59) to check against the expression.
+   */
+  private isCronTime(minute: number): boolean {
+    if (!this.config.cronExpression) return false;
+
+    const parts = this.config.cronExpression.trim().split(/\s+/);
+    const minutePart = parts[0] || '';
+
+    if (minutePart === '*') return true;
+
+    if (minutePart.startsWith('*/')) {
+      const interval = parseInt(minutePart.slice(2), 10);
+      if (!isNaN(interval) && interval > 0) {
+        return minute % interval === 0;
+      }
+    }
+
+    if (minutePart.startsWith('every')) {
+      const numberPart = minutePart.replace('every', '').replace('m', '').replace('M', '').trim();
+      const interval = parseInt(numberPart, 10);
+      if (!isNaN(interval) && interval > 0) {
+        return minute % interval === 0;
+      }
+    }
+
+    if (minutePart === String(minute)) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -247,8 +405,12 @@ Time: ${new Date(result.timestamp).toISOString()}
  * Cron-compatible entry point for scheduled execution
  * Usage: add a crontab entry that runs `node dist/bots/autoRebalancer.js`
  * every 15 minutes, e.g. "/15 * * * *".
+ *
+ * Cron scheduling mode: set CRON_EXPRESSION env var (e.g. every15m)
+ * to enable cron-based cadence alongside the existing cooldown-based mode.
  */
 async function runScheduledRebalancer() {
+  const rpcUrl = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
   const config: RebalancerConfig = {
     vaultAddress: process.env.VAULT_ADDRESS || '',
     currentPoolId: process.env.CURRENT_POOL_ID || '',
@@ -256,10 +418,14 @@ async function runScheduledRebalancer() {
     minApyDelta: parseInt(process.env.MIN_APY_DELTA || '200'),
     maxIlTolerance: parseInt(process.env.MAX_IL_TOLERANCE || '100'),
     cooldownHours: parseInt(process.env.COOLDOWN_HOURS || '24'),
+    cronExpression: process.env.CRON_EXPRESSION,
     telegramWebhookUrl: process.env.TELEGRAM_WEBHOOK_URL,
     discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
     riskTolerance: parseInt(process.env.RISK_TOLERANCE || '5'),
     maxPositionSize: BigInt(process.env.MAX_POSITION_SIZE || '1000000000'),
+    // Watch the RPC node's ledger head so a lagging node is reported before
+    // the keeper acts on stale state.
+    rpcHeadSource: new SorobanRpc.Server(rpcUrl),
   };
 
   const rebalancer = new AutoRebalancer(config);
@@ -267,6 +433,12 @@ async function runScheduledRebalancer() {
 
   console.log(`[${new Date().toISOString()}] Rebalancer execution:`, results);
   console.log('Cumulative metrics:', rebalancer.getCumulativeMetrics());
+
+  if (config.cronExpression) {
+    console.log(`Cron schedule active: ${config.cronExpression}`);
+  } else {
+    console.log(`Cooldown mode active: ${config.cooldownHours}h intervals`);
+  }
 }
 
 // Execute if run directly

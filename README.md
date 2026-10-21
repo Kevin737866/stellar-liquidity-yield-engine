@@ -159,6 +159,36 @@ The rebalancing engine automatically optimizes liquidity allocation:
 - **Gas Optimization**: Batch transactions for cost efficiency
 - **Slippage Protection**: Maximum slippage tolerance settings
 
+### Arbitrage profitability and round-trip costs
+
+The SDK compares one year of expected APY-difference returns against a
+round-trip estimate for the configured investment amount. The estimate must
+cover both entering the destination pool and exiting it, and must report
+network, execution, and protocol costs in the same asset and base units as the
+investment. The scanner exposes `gross_profit` before these fees,
+`round_trip_cost` for their sum, and `net_profit` after fees. Opportunities with
+zero or negative net profit are excluded; remaining opportunities are ranked by
+net return with the existing impermanent-loss risk adjustment. IL risk remains
+a separate routing check and is deducted by the profitability simulation.
+
+Provide an `ArbitrageScanner` `roundTripCostEstimator` (and pass the investment
+amount, asset, and source pool to `findOpportunities`) to enable cost-aware
+recommendations. `AutoRebalancer` accepts the same estimator and an
+`investmentAsset` for its `maxPositionSize`. The estimator must convert fees
+such as XLM-denominated network charges into the investment asset using a
+trustworthy quote source, return all three cost components, and return `null`
+if a component or conversion is unavailable. Missing, negative, malformed, or
+wrong-asset estimates are logged and excluded; the SDK never treats unknown
+fees as zero. The same round-trip estimate is reused by ranking, profitability
+calculation, and simulation rather than charged again at each step.
+
+There is currently no built-in network-fee, execution-fee, or protocol-fee
+oracle/converter for this arbitrage path. Until an estimator is configured,
+arbitrage opportunities are intentionally not recommended. APY differences are
+annualized, so the comparison assumes a one-year holding period; shorter
+holding periods and unmodeled costs must be handled by the configured estimator
+or a separate strategy constraint.
+
 ### Configuration
 ```typescript
 const rebalancerClient = new RebalancerClient(TESTNET_CONFIG);
@@ -183,7 +213,10 @@ Multi-token reward system supporting:
 - **USDC**: Stablecoin rewards
 - **Native Tokens**: Project-specific reward tokens
 - **Merkle Distribution**: Efficient off-chain calculation
-- **Claim Deadlines**: Time-limited reward claims
+- **Claim Deadlines**: Time-limited reward claims — each stream carries a
+  `claim_deadline` (Unix seconds) set in `add_reward_stream` and adjustable with
+  `set_claim_deadline`; `claim_rewards` rejects a stream once the ledger passes
+  it. A deadline of `0` means the stream never expires.
 - **Fee Structure**: Performance and management fees
 
 ### Claiming Rewards
@@ -301,6 +334,9 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 ## 🔒 Security Features
 
 ### Contract Security
+- **In-place Upgrades**: Every contract exposes admin-only `upgrade(admin, new_wasm_hash)`,
+  `migrate(admin)` and `get_storage_version()` so deployed state can be fixed
+  without changing the contract address — see [docs/UPGRADING.md](docs/UPGRADING.md)
 - **Emergency Pause**: Admin can pause all operations
 - **Access Control**: Role-based permissions
 - **Input Validation**: Comprehensive parameter checks
@@ -313,6 +349,14 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 - **Time Locks**: Delays for sensitive operations
 - **Multi-signature**: Enhanced admin security
 - **Audit Trail**: Complete operation logging
+
+#### Swap-router slippage tolerance
+
+`max_slippage_bps` and the router's `default_slippage` are integer basis
+points (`100` = 1%). They accept values from `0` through `100` inclusive.
+Values above `100` are rejected with `InvalidSlippage`; an invalid admin update
+does not replace the previously configured value. Supplying no per-quote value
+uses the validated configured default.
 
 ## 📊 Performance Metrics
 
@@ -381,11 +425,18 @@ There is no `scripts/` directory in this repo — deploy with the `soroban`
 CLI directly. All commands below run from the **repository root** (that's
 where `Cargo.toml` lives; the crate is *not* under `src/`).
 
-> **Known blocker:** `src/lib.rs` unconditionally includes
-> `src/governance.rs` (`mod governance;`), which does not compile — see
-> [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). Until that's fixed,
-> `cargo build` for this crate fails and none of the steps below will
-> produce a wasm file.
+> **One contract per wasm.** Soroban exports a contract's entrypoints under
+> their plain function names, so two contracts cannot live in the same wasm
+> binary — they collide on shared names such as `initialize` or `pause`. Each
+> contract is behind a Cargo feature; build the one you are deploying with
+> `--no-default-features --features <contract>`. A default `cargo build`
+> (every feature) is for host builds and tests only. `src/governance.rs` is
+> not part of the crate and is still incomplete — see
+> [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
+
+Deployable contracts: `engine` (the umbrella `StellarLiquidityYieldEngine`),
+`yield-vault`, `rebalance-engine`, `reward-distributor`, `strategy-registry`,
+`il-insurance`, `actuary`.
 
 ```bash
 # 0. One-time setup: install the wasm target and create/fund a testnet identity
@@ -393,9 +444,11 @@ rustup target add wasm32-unknown-unknown
 soroban keys generate deployer --network testnet
 soroban keys fund deployer --network testnet
 
-# 1. Build the contract wasm
-cargo build --target wasm32-unknown-unknown --release
+# 1. Build one contract's wasm
+cargo build --target wasm32-unknown-unknown --release \
+  --no-default-features --features yield-vault
 # -> target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
+# Repeat with a different --features value for each contract you deploy.
 
 # 2. (Optional) Optimize the wasm binary size
 soroban contract optimize \

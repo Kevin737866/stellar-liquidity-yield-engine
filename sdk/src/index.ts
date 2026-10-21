@@ -8,6 +8,7 @@ export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
 export * from './insurance';
+export * from './utils';
 
 // Re-export commonly used types and classes for convenience
 export {
@@ -17,7 +18,15 @@ export {
   HorizonVolatilitySource,
   realizedVolatilityBp,
 } from './arbitrage';
-export type { VolatilitySource, VolatilityMetrics, PoolMetrics, Opportunity } from './arbitrage';
+export type {
+  VolatilitySource,
+  VolatilityMetrics,
+  PoolMetrics,
+  Opportunity,
+  RoundTripCostEstimate,
+  RoundTripCostEstimator,
+  OpportunityScanOptions,
+} from './arbitrage';
 
 // Issue #130: Strategy registry client for fetching active strategies.
 // A dedicated on-chain registry contract is not yet deployed, so this client
@@ -25,6 +34,55 @@ export type { VolatilitySource, VolatilityMetrics, PoolMetrics, Opportunity } fr
 // When a real registry contract is available, replace `fetchActiveStrategies`
 // with a contract call to `get_active_strategies`.
 export { StrategyRegistryClient } from './strategyRegistryClient';
+
+// Keeper write pacing: rate-limit transaction submissions to avoid throttling.
+export { WriteRateLimiter } from './utils/rateLimiter';
+export type { WriteRateLimiterOptions, WriteRateLimiterStats } from './utils/rateLimiter';
+
+// RPC synchronization: ledger-head lag detection for keepers.
+export {
+  RpcLagMonitor,
+  checkRpcLag,
+  computeLedgerLag,
+  classifyLag,
+  formatLagMessage,
+  DEFAULT_WARNING_LEDGERS,
+  DEFAULT_CRITICAL_LEDGERS,
+  LEDGER_CLOSE_TIME_SECONDS,
+} from './rpcSync';
+export type { RpcLagReport, RpcLagOptions, RpcLagThresholds, LagSeverity, LedgerHeadSource, RpcLagMonitorOptions } from './rpcSync';
+
+// Keeper health metrics for ops monitoring.
+export { KeeperMetrics, KEEPER_METRICS_PREFIX, } from './keeperMetrics';
+export type {
+  KeeperMetricsSnapshot,
+  KeeperMetricsOptions,
+  MetricSample,
+  MetricType,
+} from './keeperMetrics';
+
+// Address-filtered contract event listener for off-chain keepers.
+// Operators running multiple contracts can restrict a single listener to only
+// the contract addresses they care about, eliminating noise from unrelated
+// on-chain activity.
+export { ContractEventListener } from './eventListener';
+export type {
+  ListenerConfig,
+  EventSource,
+  GetEventsFilter,
+  GetEventsRequest,
+  GetEventsResponse,
+  RawContractEvent,
+  FilteredVaultEvent,
+  FilteredRebalanceEvent,
+  FilteredRewardEvent,
+  UnknownContractEvent,
+  KnownEventName,
+  EventHandlerMap,
+  EventHandler,
+  RawEventHandler,
+  ListenerErrorEvent,
+} from './eventListener';
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
 // Governance SDK exports
@@ -82,7 +140,7 @@ function contractsFromEnv() {
 // Network configurations
 //
 // Public endpoints are only defaults: every one of them can be pointed at a
-// custom RPC via the environment, which is what `SOROBAN_RPC_URL` /
+// custom RPC via the environment, which is what `Soroban_RPC_URL` /
 // `HORIZON_URL` in `.env.example` are for. See `.emdfile` for the convention.
 export const TESTNET_CONFIG = {
   network: 'testnet' as const,

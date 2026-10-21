@@ -251,6 +251,7 @@ class PartnershipAirdrop {
             lastUpdate: Math.floor(Date.now() / 1000),
             isActive: true,
             decimals: 7,
+            claimDeadline: 0, // no deadline
         };
     }
 
