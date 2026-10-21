@@ -57,6 +57,18 @@ pub struct VaultMetrics {
     pub last_harvest: u64,
 }
 
+/// The most recent annualized yield observation captured at a harvest event.
+/// This lets a vault report a defensible APY even when no new rewards have been
+/// harvested since the last snapshot, while still keeping the value scoped to
+/// the actual harvest history rather than a continuously guessed rate.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarvestSnapshot {
+    pub timestamp: u64,
+    pub tvl: i128,
+    pub apy: u32,
+}
+
 #[contract]
 pub struct YieldVault;
 
@@ -454,6 +466,14 @@ impl YieldVault {
 
             // Recompute TVL from the reinvested balances.
             metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
+            let snapshot = HarvestSnapshot {
+                timestamp: metrics.last_harvest,
+                tvl: metrics.tvl,
+                apy: metrics.apy,
+            };
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "harvest_snapshot"), &snapshot);
 
             env.storage()
                 .instance()
@@ -566,10 +586,18 @@ impl YieldVault {
 
     /// Get vault metrics, recomputing TVL on the fly from the current balances
     /// and the configured token prices so it can never get stuck at 0 once
-    /// prices are provided. APY is derived from harvest history in `harvest`.
+    /// prices are provided. APY is derived from the last stored harvest snapshot
+    /// when no new harvest has run yet.
     pub fn get_metrics(env: Env) -> VaultMetrics {
         let mut metrics = Self::stored_metrics(&env);
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
+        if metrics.apy == 0 {
+            if let Some(snapshot) = Self::get_harvest_snapshot(&env) {
+                if snapshot.apy > 0 {
+                    metrics.apy = snapshot.apy;
+                }
+            }
+        }
         metrics
     }
 
@@ -583,9 +611,22 @@ impl YieldVault {
         })
     }
 
-    /// Get APY for the vault (in basis points)
+    /// Get APY for the vault (in basis points).
+    ///
+    /// This uses the last persisted harvest snapshot as a fallback when no fresh
+    /// harvest has run since the most recent annualized observation. That keeps
+    /// APY reporting stable between harvests while still reflecting real
+    /// historical yield rather than silently collapsing to zero.
     pub fn get_apy(env: Env) -> u32 {
-        Self::get_metrics(env).apy
+        let metrics = Self::get_metrics(env.clone());
+        if metrics.apy > 0 {
+            return metrics.apy;
+        }
+
+        match Self::get_harvest_snapshot(&env) {
+            Some(snapshot) if snapshot.apy > 0 => snapshot.apy,
+            _ => 0,
+        }
     }
 
     /// Get TVL for the vault (USD, scaled by the configured token price scale)
@@ -716,6 +757,13 @@ impl YieldVault {
                 tvl: 0,
                 last_harvest: 0,
             })
+    }
+
+    /// Most recent harvest-level APY snapshot, if any has been recorded.
+    fn get_harvest_snapshot(env: &Env) -> Option<HarvestSnapshot> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "harvest_snapshot"))
     }
 
     /// Configured USD price of token_a, defaulting to 0 when unset
@@ -1710,6 +1758,39 @@ mod tests {
             position.last_harvest, 0,
             "a caller with no position must not get a harvest timestamp written"
         );
+    }
+
+    #[test]
+    fn test_get_apy_uses_last_harvest_snapshot_when_no_new_harvest_runs() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, _) = setup(&env, 0, 0, 0);
+        let snapshot = HarvestSnapshot {
+            timestamp: 1_000,
+            tvl: 10_000,
+            apy: 2_500,
+        };
+
+        env.storage().instance().set(
+            &Symbol::new(&env, "harvest_snapshot"),
+            &snapshot,
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "metrics"),
+            &VaultMetrics {
+                total_shares: 10,
+                total_amount_a: 5_000,
+                total_amount_b: 5_000,
+                apy: 0,
+                tvl: 10_000,
+                last_harvest: 1_000,
+            },
+        );
+
+        env.ledger().set_timestamp(20_000);
+
+        assert_eq!(vault.get_apy(), 2_500);
+        assert_eq!(vault.get_metrics().apy, 2_500);
     }
 
     // ─── Insurance Integration ────────────────────────────────────────────────
