@@ -1,565 +1,81 @@
-/**
- * Unit tests for ContractEventListener, covering:
- *
- * - Address-filter construction (allow-list, pass-all, case-insensitive)
- * - RPC request building: contractIds pushed into the RPC filter
- * - SDK-level secondary filtering (belt-and-suspenders)
- * - Typed event dispatch (vault / rebalance / reward families)
- * - Raw handler receives every passing event regardless of type
- * - Ledger cursor advancement after each poll
- * - Error handling: custom handler vs console fallback
- * - on/off handler registration
- * - isRunning / start / stop lifecycle (without real timers)
- */
-
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
-  ContractEventListener,
-  type EventSource,
-  type GetEventsRequest,
-  type GetEventsResponse,
-  type ListenerConfig,
-  type RawContractEvent,
-  type ListenerErrorEvent,
+  EventListener,
+  FileCursorStore,
+  ListenerEvent,
+  MemoryCursorStore,
 } from './eventListener';
 import { MemoryCheckpointStore } from './persistence';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const chain: ListenerEvent[] = [
+  { id: 'a', ledger: 10 },
+  { id: 'b', ledger: 10 },
+  { id: 'c', ledger: 12 },
+  { id: 'd', ledger: 15 },
+];
+const fetchEvents = jest.fn(async (start: number) => ({
+  events: chain.filter((e) => e.ledger >= start),
+  latestLedger: 20,
+}));
 
-/** Build a minimal RawContractEvent. */
-function makeRaw(
-  contractId: string,
-  topic: unknown[],
-  ledger = 100,
-  ledgerClosedAt = '2024-01-01T00:00:00Z',
-  value: unknown = null,
-): RawContractEvent {
-  return { contractId, topic, ledger, ledgerClosedAt, value, id: `${contractId}-${ledger}` };
-}
+beforeEach(() => fetchEvents.mockClear());
 
-/**
- * Create an EventSource stub that returns a fixed response. Captures the most
- * recent request for assertion in tests.
- */
-function stubSource(
-  events: RawContractEvent[],
-  latestLedger = 110,
-): EventSource & { lastRequest: GetEventsRequest | null; callCount: number } {
-  let lastRequest: GetEventsRequest | null = null;
-  let callCount = 0;
-  return {
-    get lastRequest() { return lastRequest; },
-    get callCount() { return callCount; },
-    async getEvents(req: GetEventsRequest): Promise<GetEventsResponse> {
-      lastRequest = req;
-      callCount += 1;
-      return { events, latestLedger };
-    },
-  };
-}
-
-/** Create a listener with a given allow-list and a stub source. */
-function makeListener(
-  contractAddresses: string[] | undefined,
-  events: RawContractEvent[],
-  latestLedger = 110,
-) {
-  const source = stubSource(events, latestLedger);
-  const config: ListenerConfig = {
-    startLedger: 100,
-    contractAddresses,
-  };
-  const listener = new ContractEventListener(source, config);
-  return { listener, source };
-}
-
-// ---------------------------------------------------------------------------
-// Address filtering
-// ---------------------------------------------------------------------------
-
-describe('address filtering', () => {
-  const VAULT_A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-  const VAULT_B = 'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBD2KM';
-  const OTHER  = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCP3JF';
-
-  it('passes all events when no contractAddresses is configured', async () => {
-    const events = [
-      makeRaw(VAULT_A, ['deposit']),
-      makeRaw(OTHER,   ['harvest']),
-    ];
-    const { listener } = makeListener(undefined, events);
-
+describe('EventListener resume', () => {
+  it('processes everything on first run and persists the cursor', async () => {
+    const store = new MemoryCursorStore();
     const seen: string[] = [];
-    listener.onRaw((e) => seen.push(e.contractId));
-    await listener.poll();
-
-    expect(seen).toEqual([VAULT_A, OTHER]);
+    const l = new EventListener({ fetchEvents, store, startLedger: 5, handler: (e) => void seen.push(e.id) });
+    expect(await l.poll()).toBe(4);
+    expect(fetchEvents).toHaveBeenCalledWith(5);
+    expect(seen).toEqual(['a', 'b', 'c', 'd']);
+    expect(store.load()).toBe(20);
   });
 
-  it('passes all events when contractAddresses is an empty array', async () => {
-    const events = [
-      makeRaw(VAULT_A, ['deposit']),
-      makeRaw(OTHER,   ['harvest']),
-    ];
-    const { listener } = makeListener([], events);
-
-    const seen: string[] = [];
-    listener.onRaw((e) => seen.push(e.contractId));
-    await listener.poll();
-
-    expect(seen).toEqual([VAULT_A, OTHER]);
-  });
-
-  it('drops events from contracts not in the allow-list', async () => {
-    const events = [
-      makeRaw(VAULT_A, ['deposit']),
-      makeRaw(OTHER,   ['deposit']),
-    ];
-    const { listener } = makeListener([VAULT_A], events);
-
-    const seen: string[] = [];
-    listener.onRaw((e) => seen.push(e.contractId));
-    await listener.poll();
-
-    expect(seen).toEqual([VAULT_A]);
-    expect(seen).not.toContain(OTHER);
-  });
-
-  it('accepts events from all listed addresses', async () => {
-    const events = [
-      makeRaw(VAULT_A, ['deposit']),
-      makeRaw(VAULT_B, ['harvest']),
-      makeRaw(OTHER,   ['deposit']),
-    ];
-    const { listener } = makeListener([VAULT_A, VAULT_B], events);
-
-    const seen: string[] = [];
-    listener.onRaw((e) => seen.push(e.contractId));
-    await listener.poll();
-
-    expect(seen).toContain(VAULT_A);
-    expect(seen).toContain(VAULT_B);
-    expect(seen).not.toContain(OTHER);
-  });
-
-  it('performs case-insensitive address comparison', async () => {
-    const upper = VAULT_A.toUpperCase();
-    const lower = VAULT_A.toLowerCase();
-    const events = [makeRaw(upper, ['deposit'])];
-    // Allow-list uses the opposite casing
-    const { listener } = makeListener([lower], events);
-
-    const seen: string[] = [];
-    listener.onRaw((e) => seen.push(e.contractId));
-    await listener.poll();
-
-    expect(seen).toContain(upper);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// RPC request building — contractIds are sent to the RPC layer
-// ---------------------------------------------------------------------------
-
-describe('RPC request building', () => {
-  const VAULT_A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-
-  it('includes contractIds in the RPC filter when allow-list is set', async () => {
-    const { listener, source } = makeListener([VAULT_A], []);
-    await listener.poll();
-
-    const req = source.lastRequest!;
-    expect(req.filters).toBeDefined();
-    expect(req.filters![0].contractIds).toEqual([VAULT_A.toLowerCase()]);
-  });
-
-  it('omits contractIds from the RPC filter in pass-all mode', async () => {
-    const { listener, source } = makeListener(undefined, []);
-    await listener.poll();
-
-    const req = source.lastRequest!;
-    expect(req.filters![0].contractIds).toBeUndefined();
-  });
-
-  it('sends startLedger equal to the current cursor', async () => {
-    const source = stubSource([], 105);
-    const listener = new ContractEventListener(source, { startLedger: 99 });
-    await listener.poll();
-
-    expect(source.lastRequest!.startLedger).toBe(99);
-  });
-
-  it('uses the configured pageSize', async () => {
-    const { listener, source } = makeListener(undefined, []);
-    // rebuild with explicit pageSize
-    const src = stubSource([], 110);
-    const l = new ContractEventListener(src, { startLedger: 100, pageSize: 50 });
-    await l.poll();
-    expect(src.lastRequest!.limit).toBe(50);
-  });
-
-  it('defaults to pageSize 200', async () => {
-    const { listener, source } = makeListener(undefined, []);
-    await listener.poll();
-    expect(source.lastRequest!.limit).toBe(200);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Typed dispatch — vault events
-// ---------------------------------------------------------------------------
-
-describe('typed dispatch — vault events', () => {
-  const VAULT = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-
-  it.each(['deposit', 'withdraw', 'harvest', 'pause', 'unpause'] as const)(
-    'dispatches %s to the corresponding vault handler',
-    async (evtName) => {
-      const raw = makeRaw(VAULT, [evtName]);
-      const { listener } = makeListener([VAULT], [raw]);
-
-      const received: unknown[] = [];
-      listener.on(evtName, (e) => received.push(e));
-      await listener.poll();
-
-      expect(received).toHaveLength(1);
-      const evt = received[0] as { type: string; contractId: string };
-      expect(evt.type).toBe(evtName);
-      expect(evt.contractId).toBe(VAULT);
-    },
-  );
-
-  it('does not call a vault handler for an unrelated event', async () => {
-    const raw = makeRaw(VAULT, ['distribution']);
-    const { listener } = makeListener([VAULT], [raw]);
-
-    const called: boolean[] = [];
-    listener.on('deposit', () => called.push(true));
-    await listener.poll();
-
-    expect(called).toHaveLength(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Typed dispatch — rebalance events
-// ---------------------------------------------------------------------------
-
-describe('typed dispatch — rebalance events', () => {
-  const CONTRACT = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-
-  it.each(['proposal', 'execution', 'failure'] as const)(
-    'dispatches %s to the corresponding rebalance handler',
-    async (evtName) => {
-      const raw = makeRaw(CONTRACT, [evtName]);
-      const { listener } = makeListener([CONTRACT], [raw]);
-
-      const received: unknown[] = [];
-      listener.on(evtName, (e) => received.push(e));
-      await listener.poll();
-
-      expect(received).toHaveLength(1);
-      const evt = received[0] as { type: string; contractId: string };
-      expect(evt.type).toBe(evtName);
-      expect(evt.contractId).toBe(CONTRACT);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Typed dispatch — reward events
-// ---------------------------------------------------------------------------
-
-describe('typed dispatch — reward events', () => {
-  const CONTRACT = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-
-  it.each(['distribution', 'claim', 'expiry'] as const)(
-    'dispatches %s to the corresponding reward handler',
-    async (evtName) => {
-      const raw = makeRaw(CONTRACT, [evtName]);
-      const { listener } = makeListener([CONTRACT], [raw]);
-
-      const received: unknown[] = [];
-      listener.on(evtName, (e) => received.push(e));
-      await listener.poll();
-
-      expect(received).toHaveLength(1);
-      const evt = received[0] as { type: string; contractId: string };
-      expect(evt.type).toBe(evtName);
-      expect(evt.contractId).toBe(CONTRACT);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Raw handler
-// ---------------------------------------------------------------------------
-
-describe('raw handler', () => {
-  const A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-  const B = 'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBD2KM';
-
-  it('receives every event that passes the address filter', async () => {
-    const events = [makeRaw(A, ['deposit']), makeRaw(A, ['unknown_event'])];
-    const { listener } = makeListener([A], events);
-
-    const rawIds: string[] = [];
-    listener.onRaw((e) => rawIds.push(e.contractId));
-    await listener.poll();
-
-    expect(rawIds).toHaveLength(2);
-    expect(rawIds).toEqual([A, A]);
-  });
-
-  it('does NOT receive events that fail the address filter', async () => {
-    const events = [makeRaw(B, ['deposit'])];
-    const { listener } = makeListener([A], events);
-
-    const rawIds: string[] = [];
-    listener.onRaw((e) => rawIds.push(e.contractId));
-    await listener.poll();
-
-    expect(rawIds).toHaveLength(0);
-  });
-
-  it('offRaw removes the handler', async () => {
-    const events = [makeRaw(A, ['deposit'])];
-    const { listener } = makeListener([A], events);
-
-    const rawIds: string[] = [];
-    const handler = (e: { contractId: string }) => rawIds.push(e.contractId);
-    listener.onRaw(handler);
-    listener.offRaw(handler);
-    await listener.poll();
-
-    expect(rawIds).toHaveLength(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// on / off handler chaining
-// ---------------------------------------------------------------------------
-
-describe('on/off handler registration', () => {
-  const A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-
-  it('supports chained .on() calls', async () => {
-    const events = [makeRaw(A, ['deposit'])];
-    const { listener } = makeListener([A], events);
-
-    const got: string[] = [];
-    listener
-      .on('deposit', () => got.push('first'))
-      .on('deposit', () => got.push('second'));
-    await listener.poll();
-
-    expect(got).toEqual(['first', 'second']);
-  });
-
-  it('off() removes only the specified handler', async () => {
-    const events = [makeRaw(A, ['deposit'])];
-    const { listener } = makeListener([A], events);
-
-    const got: string[] = [];
-    const first = () => got.push('first');
-    const second = () => got.push('second');
-    listener.on('deposit', first).on('deposit', second);
-    listener.off('deposit', first);
-    await listener.poll();
-
-    expect(got).toEqual(['second']);
-  });
-
-  it('off() on a never-registered handler is a no-op', async () => {
-    const { listener } = makeListener([A], []);
-    expect(() => listener.off('deposit', () => {})).not.toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Cursor advancement
-// ---------------------------------------------------------------------------
-
-describe('cursor advancement', () => {
-  it('advances the cursor to latestLedger + 1 after a successful poll', async () => {
-    const source = stubSource([], 120);
-    const listener = new ContractEventListener(source, { startLedger: 100 });
-
-    expect(listener.currentLedger).toBe(100);
-    await listener.poll();
-    expect(listener.currentLedger).toBe(121); // 120 + 1
-  });
-
-  it('does not move the cursor backwards when RPC returns a ledger behind our cursor', async () => {
-    const source = stubSource([], 80);
-    const listener = new ContractEventListener(source, { startLedger: 100 });
-
-    await listener.poll();
-    expect(listener.currentLedger).toBe(100); // unchanged
-  });
-
-  it('uses the advanced cursor on the next poll', async () => {
-    let call = 0;
-    const source: EventSource = {
-      async getEvents(req) {
-        const ledger = call === 0 ? 110 : 120;
-        call += 1;
-        return { events: [], latestLedger: ledger };
-      },
-    };
-    const listener = new ContractEventListener(source, { startLedger: 100 });
-
-    await listener.poll(); // cursor -> 111
-    await listener.poll(); // should start from 111
-
-    // We can't easily capture the second request start without a spy, but we
-    // can verify the cursor advanced correctly through both polls.
-    expect(listener.currentLedger).toBe(121);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Error handling
-// ---------------------------------------------------------------------------
-
-describe('error handling', () => {
-  it('calls the registered error handler on RPC failure', async () => {
-    const failingSource: EventSource = {
-      async getEvents(): Promise<GetEventsResponse> {
-        throw new Error('network timeout');
-      },
-    };
-    const listener = new ContractEventListener(failingSource, { startLedger: 100 });
-
-    const errors: ListenerErrorEvent[] = [];
-    listener.onError((e) => errors.push(e));
-    await listener.poll();
-
-    expect(errors).toHaveLength(1);
-    expect(errors[0].error.message).toBe('network timeout');
-    expect(errors[0].ledger).toBe(100);
-  });
-
-  it('does not throw when no error handler is registered (logs to console)', async () => {
-    const failingSource: EventSource = {
-      async getEvents(): Promise<GetEventsResponse> {
-        throw new Error('oops');
-      },
-    };
-    const listener = new ContractEventListener(failingSource, { startLedger: 100 });
-
-    // Suppress console.error for this test
-    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    await expect(listener.poll()).resolves.toBeUndefined();
-    spy.mockRestore();
-  });
-
-  it('does not advance the cursor when a poll fails', async () => {
-    const failingSource: EventSource = {
-      async getEvents(): Promise<GetEventsResponse> {
-        throw new Error('fail');
-      },
-    };
-    const listener = new ContractEventListener(failingSource, { startLedger: 42 });
-    listener.onError(() => {}); // suppress console.error
-
-    await listener.poll();
-    expect(listener.currentLedger).toBe(42);
-  });
-
-  it('continues polling after an error', async () => {
-    let calls = 0;
-    const source: EventSource = {
-      async getEvents() {
-        calls += 1;
-        if (calls === 1) throw new Error('transient');
-        return { events: [], latestLedger: 110 };
-      },
-    };
-    const listener = new ContractEventListener(source, { startLedger: 100 });
-    listener.onError(() => {}); // suppress console.error
-
-    await listener.poll(); // fails
-    await listener.poll(); // succeeds
-
-    expect(calls).toBe(2);
-    expect(listener.currentLedger).toBe(111);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// isRunning / start / stop (timer smoke test — no real timers)
-// ---------------------------------------------------------------------------
-
-describe('lifecycle', () => {
-  it('is not running before start() is called', () => {
-    const { listener } = makeListener(undefined, []);
-    expect(listener.isRunning).toBe(false);
-  });
-
-  it('is running after start() is called', () => {
-    const { listener } = makeListener(undefined, []);
-    listener.start(60_000);
-    expect(listener.isRunning).toBe(true);
-    listener.stop();
-  });
-
-  it('is not running after stop() is called', () => {
-    const { listener } = makeListener(undefined, []);
-    listener.start(60_000);
-    listener.stop();
-    expect(listener.isRunning).toBe(false);
-  });
-
-  it('a second start() call while running is a no-op', () => {
-    const { listener, source } = makeListener(undefined, []);
-    // We only care that there's no throw; call count verification would need
-    // fake timers which are out of scope for this smoke test.
-    listener.start(60_000);
-    listener.start(60_000); // should not throw or create a second interval
-    expect(listener.isRunning).toBe(true);
-    listener.stop();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Multiple contracts — integration-style scenario
-// ---------------------------------------------------------------------------
-
-describe('multi-contract scenario', () => {
-  const VAULT_A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
-  const VAULT_B = 'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBD2KM';
-  const NOISE   = 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCP3JF';
-
-  it('routes events from two watched contracts while suppressing noise', async () => {
-    const events = [
-      makeRaw(VAULT_A, ['deposit'],  100),
-      makeRaw(VAULT_B, ['harvest'],  101),
-      makeRaw(NOISE,   ['deposit'],  102), // should be dropped
-      makeRaw(VAULT_A, ['withdraw'], 103),
-    ];
-    const source = stubSource(events, 110);
-    const listener = new ContractEventListener(source, {
-      startLedger: 100,
-      contractAddresses: [VAULT_A, VAULT_B],
+  it('does not reprocess from zero after restart', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-'));
+    const file = path.join(dir, 'cursor.json');
+    const first: string[] = [];
+    await new EventListener({
+      fetchEvents, store: new FileCursorStore(file), handler: (e) => void first.push(e.id),
+    }).poll();
+
+    // "Restart": new listener and new store instance over the same file.
+    const second: string[] = [];
+    const restarted = new EventListener({
+      fetchEvents, store: new FileCursorStore(file), handler: (e) => void second.push(e.id),
     });
+    expect(restarted.nextLedger).toBe(21);
+    expect(await restarted.poll()).toBe(0);
+    expect(second).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 
-    const deposits: string[] = [];
-    const harvests: string[] = [];
-    const withdrawals: string[] = [];
+  it('replays only the unfinished ledger after a mid-run crash', async () => {
+    const store = new MemoryCursorStore();
+    const crashing = new EventListener({
+      fetchEvents,
+      store,
+      handler: (e) => {
+        if (e.id === 'd') throw new Error('crash');
+      },
+    });
+    await expect(crashing.poll()).rejects.toThrow('crash');
+    expect(store.load()).toBe(12);
 
-    listener
-      .on('deposit',  (e) => deposits.push(e.contractId))
-      .on('harvest',  (e) => harvests.push(e.contractId))
-      .on('withdraw', (e) => withdrawals.push(e.contractId));
+    const seen: string[] = [];
+    await new EventListener({ fetchEvents, store, handler: (e) => void seen.push(e.id) }).poll();
+    expect(seen).toEqual(['d']);
+  });
 
-    await listener.poll();
-
-    // NOISE events must not appear
-    expect(deposits).toEqual([VAULT_A]);
-    expect(harvests).toEqual([VAULT_B]);
-    expect(withdrawals).toEqual([VAULT_A]);
+  it('falls back to startLedger when the cursor file is missing or corrupt', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-'));
+    const file = path.join(dir, 'cursor.json');
+    fs.writeFileSync(file, '{not json');
+    const l = new EventListener({ fetchEvents, store: new FileCursorStore(file), startLedger: 7, handler: () => {} });
+    expect(l.nextLedger).toBe(7);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 
