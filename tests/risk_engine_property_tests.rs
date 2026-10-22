@@ -1,5 +1,5 @@
-use soroban_sdk::{testutils::Address as _, Address, Env, Symbol};
-use stellar_liquidity_yield_engine::{RiskEngine, RiskEngineClient};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec as SorobanVec};
+use stellar_liquidity_yield_engine::{CircuitBreakerConfig, RiskEngine, RiskEngineClient};
 
 fn main() {}
 
@@ -238,6 +238,50 @@ mod tests {
             !result,
             "Circuit breaker should NOT trigger under normal conditions"
         );
+    }
+
+    #[test]
+    fn test_per_pool_circuit_breaker_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let client = setup_risk_engine(&env);
+        let pool_sensitive = Address::generate(&env);
+        let pool_relaxed = Address::generate(&env);
+
+        // Configure sensitive breaker for pool_sensitive
+        client.set_pool_circuit_breaker(
+            &pool_sensitive,
+            &CircuitBreakerConfig {
+                max_imbalance: 60,
+                max_consecutive_losses: 2,
+                gas_surge_protection: true,
+            },
+        );
+
+        // Configure relaxed breaker for pool_relaxed
+        client.set_pool_circuit_breaker(
+            &pool_relaxed,
+            &CircuitBreakerConfig {
+                max_imbalance: 90,
+                max_consecutive_losses: 5,
+                gas_surge_protection: false,
+            },
+        );
+
+        // Imbalance 70 triggers sensitive pool but not relaxed pool
+        assert!(client.circuit_breaker_check(&pool_sensitive, &false, &70, &SorobanVec::new(&env)));
+        assert!(!client.circuit_breaker_check(&pool_relaxed, &false, &70, &SorobanVec::new(&env)));
+
+        // Gas surge triggers sensitive pool but not relaxed pool
+        assert!(client.circuit_breaker_check(&pool_sensitive, &true, &30, &SorobanVec::new(&env)));
+        assert!(!client.circuit_breaker_check(&pool_relaxed, &true, &30, &SorobanVec::new(&env)));
+
+        // 2 consecutive losses trigger sensitive pool but not relaxed pool
+        let mut two_losses = SorobanVec::new(&env);
+        two_losses.push_back(false);
+        two_losses.push_back(false);
+        assert!(client.circuit_breaker_check(&pool_sensitive, &false, &30, &two_losses));
+        assert!(!client.circuit_breaker_check(&pool_relaxed, &false, &30, &two_losses));
     }
 
     #[test]

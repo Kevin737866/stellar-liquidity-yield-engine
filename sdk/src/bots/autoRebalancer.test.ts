@@ -1,6 +1,12 @@
 import { ArbitrageScanner, ArbitrageExecutor, Opportunity } from '../arbitrage';
 import { WriteRateLimiter } from '../utils/rateLimiter';
-import { AutoRebalancer, RebalancerConfig } from './autoRebalancer';
+import { MemoryCheckpointStore } from '../persistence';
+import {
+  AutoRebalancer,
+  RebalancerConfig,
+  STATE_KEY_LAST_CONSUMED_MINUTE,
+  STATE_KEY_LAST_EXECUTION_TIME,
+} from './autoRebalancer';
 
 function opportunity(overrides: Partial<Opportunity> = {}): Opportunity {
   return {
@@ -238,5 +244,107 @@ describe('AutoRebalancer cron scheduling', () => {
 
     const result = keeper['isReadyForRebalance']();
     expect(result).toBe(true);
+  });
+});
+// ---------------------------------------------------------------------------
+// Durable keeper state
+// ---------------------------------------------------------------------------
+
+describe('AutoRebalancer durable state', () => {
+  it('exposes its default state', () => {
+    const keeper = new AutoRebalancer(baseConfig());
+    expect(keeper.getState()).toEqual({ lastExecutionTime: 0, lastConsumedMinute: -1 });
+  });
+
+  it('does nothing when no state store is configured', async () => {
+    const keeper = new AutoRebalancer(baseConfig());
+    expect(await keeper.restoreState()).toBe(false);
+    expect(await keeper.persistState()).toBeNull();
+  });
+
+  it('writes the last execution time and consumed minute', async () => {
+    const store = new MemoryCheckpointStore();
+    const keeper = new AutoRebalancer(baseConfig({ stateStore: store }));
+    (keeper as any).lastExecutionTime = 1_700_000_000_000;
+    (keeper as any).lastConsumedMinute = 17;
+
+    await keeper.persistState();
+
+    expect(store.peek()!.metadata).toEqual({
+      [STATE_KEY_LAST_EXECUTION_TIME]: 1_700_000_000_000,
+      [STATE_KEY_LAST_CONSUMED_MINUTE]: 17,
+    });
+  });
+
+  it('restores the state written by a previous process', async () => {
+    const store = new MemoryCheckpointStore();
+    await store.save({
+      version: 1,
+      nextLedger: 0,
+      lastProcessedLedger: -1,
+      updatedAt: 0,
+      metadata: {
+        [STATE_KEY_LAST_EXECUTION_TIME]: 1_600_000_000_000,
+        [STATE_KEY_LAST_CONSUMED_MINUTE]: 42,
+      },
+    });
+
+    const keeper = new AutoRebalancer(baseConfig({ stateStore: store }));
+    expect(await keeper.restoreState()).toBe(true);
+
+    expect(keeper.getState()).toEqual({
+      lastExecutionTime: 1_600_000_000_000,
+      lastConsumedMinute: 42,
+    });
+  });
+
+  it('continues to honour the cooldown after a restart', async () => {
+    const store = new MemoryCheckpointStore();
+    await store.save({
+      version: 1,
+      nextLedger: 0,
+      lastProcessedLedger: -1,
+      updatedAt: 0,
+      metadata: {
+        [STATE_KEY_LAST_EXECUTION_TIME]: Date.now(),
+        [STATE_KEY_LAST_CONSUMED_MINUTE]: -1,
+      },
+    });
+
+    const scanner = { findOpportunities: jest.fn() };
+    const keeper = new AutoRebalancer(baseConfig({ cooldownHours: 24, stateStore: store }), {
+      scanner: scanner as unknown as ArbitrageScanner,
+    });
+
+    const results = await keeper.run();
+
+    // The keeper remembered that it executed just before the restart, so it
+    // must not execute again.
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].message).toMatch(/Cooldown active/);
+    expect(scanner.findOpportunities).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the stored state cannot be read', async () => {
+    const store = {
+      load: async () => {
+        throw new Error('corrupt state');
+      },
+      save: async () => undefined,
+      clear: async () => undefined,
+    };
+
+    const scanner = { findOpportunities: jest.fn() };
+    const keeper = new AutoRebalancer(baseConfig({ stateStore: store }), {
+      scanner: scanner as unknown as ArbitrageScanner,
+    });
+
+    const results = await keeper.run();
+
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].message).toMatch(/corrupt state/);
+    expect(scanner.findOpportunities).not.toHaveBeenCalled();
   });
 });

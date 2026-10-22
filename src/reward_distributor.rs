@@ -8,6 +8,7 @@ const MAX_REWARD_STREAMS: u32 = 10;
 
 /// Basis points divisor (10000 = 100%)
 const BPS_DIVISOR: i128 = 10000;
+const BASIS_POINTS_DIVISOR: i128 = BPS_DIVISOR;
 
 /// Treasury fee in basis points (0.25% = 25 bps)
 const TREASURY_FEE_BPS: u32 = 25;
@@ -156,6 +157,10 @@ pub enum RewardError {
     AlreadyInitialized = 11,
     /// The stream's `claim_deadline` has passed; it can no longer be claimed.
     ClaimDeadlinePassed = 12,
+    /// The user has nothing accrued to claim.
+    NoPendingRewards = 13,
+    /// The emergency withdrawal has already been completed.
+    EmergencyWithdrawalAlreadyCompleted = 14,
 }
 
 #[contractimpl]
@@ -192,9 +197,10 @@ impl MultiRewardDistributor {
             .set(&Symbol::new(&env, "emergency_mode"), &false);
 
         // Initialize default slippage (aligned with swap_router for consistency)
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "default_slippage"), &DEFAULT_MAX_SLIPPAGE_BPS);
+        env.storage().instance().set(
+            &Symbol::new(&env, "default_slippage"),
+            &DEFAULT_MAX_SLIPPAGE_BPS,
+        );
 
         // Initialize empty reward streams
         let streams: Vec<RewardStream> = Vec::new(&env);
@@ -467,11 +473,11 @@ impl MultiRewardDistributor {
 
             let pending = reward_debt.pending_rewards;
             if pending <= 0 {
-                panic!("no pending rewards");
+                panic_with_error!(env, RewardError::NoPendingRewards);
             }
 
             // Calculate treasury fee (0.25%)
-            let treasury_fee = (pending * TREASURY_FEE_BPS as i128) / BASIS_POINTS_DIVISOR;
+            let treasury_fee = (pending * TREASURY_FEE_BPS as i128) / BPS_DIVISOR;
             let net_reward = pending - treasury_fee;
 
             // Transfer net reward to user
@@ -578,7 +584,7 @@ impl MultiRewardDistributor {
         let mut withdrawal: EmergencyWithdrawal = env.storage().instance().get(&key).unwrap();
 
         if withdrawal.completed {
-            panic!("already completed");
+            panic_with_error!(&env, RewardError::EmergencyWithdrawalAlreadyCompleted);
         }
 
         withdrawal.completed = true;
@@ -598,7 +604,7 @@ impl MultiRewardDistributor {
         reinvest_percentage: u32,
         enabled: bool,
     ) {
-        if reinvest_percentage > BASIS_POINTS_DIVISOR as u32 {
+        if reinvest_percentage > BPS_DIVISOR as u32 {
             panic_with_error!(&env, RewardError::InvalidPercentage);
         }
 
@@ -652,7 +658,7 @@ impl MultiRewardDistributor {
                 continue;
             }
 
-            let to_reinvest = (pending * config.reinvest_percentage as i128) / BASIS_POINTS_DIVISOR;
+            let to_reinvest = (pending * config.reinvest_percentage as i128) / BPS_DIVISOR;
             let to_claim = pending - to_reinvest;
 
             if to_reinvest > 0 {
@@ -857,7 +863,7 @@ impl MultiRewardDistributor {
     /// Update default slippage (admin only)
     /// Aligned with swap_router::update_default_slippage for consistency
     pub fn update_default_slippage(env: Env, admin: Address, new_slippage_bps: u32) {
-        Self::require_admin(&env, admin);
+        Self::require_admin(&env, admin.clone());
         require!(new_slippage_bps <= BPS_DIVISOR as u32, RewardError::InvalidPercentage);
         env.storage()
             .instance()
@@ -971,14 +977,14 @@ impl MultiRewardDistributor {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap()
+            .unwrap_or_else(|| panic!("admin not configured"))
     }
 
     fn get_treasury(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "treasury"))
-            .unwrap()
+            .unwrap_or_else(|| panic!("treasury not configured"))
     }
 
     fn get_swap_router(env: Env) -> Address {
@@ -1105,7 +1111,7 @@ impl MultiRewardDistributor {
     ) -> i128 {
         // In production, query DEX for expected output
         // Apply slippage protection
-        let slippage_factor = (BPS_DIVISOR - max_slippage_bps as i128) as i128;
+        let slippage_factor = BPS_DIVISOR - max_slippage_bps as i128;
         amount * slippage_factor / BPS_DIVISOR
     }
 
@@ -1554,5 +1560,44 @@ mod tests {
             client.get_pending_rewards(&user, &indices).get(0).unwrap(),
             pending
         );
+    }
+
+    // ==================== Typed error paths ====================
+
+    #[test]
+    fn test_claim_with_nothing_accrued_is_typed() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1_000);
+        let (_admin, _treasury, client, _token_admin, _token_client) = setup_stream(&env, 1_000, 0);
+
+        // No time has passed, so nothing accrued for this fresh user.
+        let user = Address::generate(&env);
+        let vault = Address::generate(&env);
+        let indices = Vec::from_array(&env, [0u32]);
+        let err = client
+            .try_claim_rewards(&user, &vault, &indices, &None::<Address>)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RewardError::NoPendingRewards.into());
+    }
+
+    #[test]
+    fn test_complete_emergency_withdrawal_twice_is_typed() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, _treasury, _swap_router, client, _token_client) = setup(&env);
+
+        let user = Address::generate(&env);
+        let vault = Address::generate(&env);
+
+        // A withdrawal has to be requested before it can be completed.
+        client.emergency_withdraw(&user, &vault, &100);
+        client.complete_emergency_withdrawal(&user, &vault);
+        let err = client
+            .try_complete_emergency_withdrawal(&user, &vault)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RewardError::EmergencyWithdrawalAlreadyCompleted.into());
     }
 }

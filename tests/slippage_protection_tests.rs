@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 // End-to-end tests for slippage protection across vault, router, and reward distributor
 // Tests verify the shared and differentiated slippage semantics documented in docs/SLIPPAGE_POLICY.md
 
@@ -114,7 +115,10 @@ fn test_vault_withdrawal_enforces_min_amounts() {
 
     // Test 1: Withdrawal with min_amounts = 0 should succeed
     let (amount_a, amount_b) = vault_client.withdraw(&user, &shares, &0, &0);
-    assert!(amount_a > 0 || amount_b > 0, "Withdrawal should return tokens");
+    assert!(
+        amount_a > 0 || amount_b > 0,
+        "Withdrawal should return tokens"
+    );
 
     // Deposit again for further tests
     token_a_admin.mint(&user, &1000);
@@ -129,8 +133,14 @@ fn test_vault_withdrawal_enforces_min_amounts() {
 
     // Test 3: Withdrawal with reasonable min_amounts should succeed
     let (amount_a3, amount_b3) = vault_client.withdraw(&user, &shares2, &100, &100);
-    assert!(amount_a3 >= 100, "Withdrawal should meet min_amount_a requirement");
-    assert!(amount_b3 >= 100, "Withdrawal should meet min_amount_b requirement");
+    assert!(
+        amount_a3 >= 100,
+        "Withdrawal should meet min_amount_a requirement"
+    );
+    assert!(
+        amount_b3 >= 100,
+        "Withdrawal should meet min_amount_b requirement"
+    );
 }
 
 #[test]
@@ -202,11 +212,7 @@ fn test_router_slippage_calculation() {
 
     // Add a pool
     router_client.add_pool(
-        &admin,
-        &pool_id,
-        &token_a,
-        &token_b,
-        &30u32, // 0.3% fee
+        &admin, &pool_id, &token_a, &token_b, &30u32, // 0.3% fee
         false,
     );
 
@@ -259,14 +265,7 @@ fn test_router_slippage_execution() {
     router_client.initialize(&admin, &treasury, &xlm_token);
 
     // Add pool
-    router_client.add_pool(
-        &admin,
-        &pool_id,
-        &token_a,
-        &token_b,
-        &30u32,
-        false,
-    );
+    router_client.add_pool(&admin, &pool_id, &token_a, &token_b, &30u32, false);
     router_client
         .update_pool_reserves(&pool_id, &1000000, &1000000)
         .unwrap();
@@ -305,6 +304,7 @@ fn test_router_slippage_execution() {
     assert!(result.is_err(), "Swap with excessive min_output must fail");
 }
 
+#[test]
 #[test]
 fn test_router_default_slippage_configuration() {
     let env = Env::default();
@@ -362,6 +362,7 @@ fn test_slippage_formula_consistency() {
 }
 
 #[test]
+#[test]
 fn test_vault_uses_different_slippage_model() {
     // Verify that vault uses absolute minimums, not percentage-based slippage
     // This is intentional and documented in SLIPPAGE_POLICY.md
@@ -408,8 +409,14 @@ fn test_vault_uses_different_slippage_model() {
     // Vault withdrawal uses absolute min_amount_a and min_amount_b
     // These are not percentage-based, confirming the different model
     let (amount_a, amount_b) = vault_client.withdraw(&user, &shares, &100, &100);
-    assert!(amount_a >= 100, "Vault uses absolute minimum, not percentage");
-    assert!(amount_b >= 100, "Vault uses absolute minimum, not percentage");
+    assert!(
+        amount_a >= 100,
+        "Vault uses absolute minimum, not percentage"
+    );
+    assert!(
+        amount_b >= 100,
+        "Vault uses absolute minimum, not percentage"
+    );
 }
 
 // ==================== Edge Cases ====================
@@ -439,7 +446,10 @@ fn test_zero_slippage_allowed() {
 
     // 0% slippage should be accepted
     let quote = router_client.get_quote(&token_a, &token_b, &1000, Some(0));
-    assert_eq!(quote.minimum_output, 1000, "0% slippage should equal expected");
+    assert_eq!(
+        quote.minimum_output, 1000,
+        "0% slippage should equal expected"
+    );
 }
 
 #[test]
@@ -467,11 +477,243 @@ fn test_max_slippage_boundary() {
 
     // 100% slippage should be accepted
     let quote = router_client.get_quote(&token_a, &token_b, &1000, Some(10000));
-    assert_eq!(quote.minimum_output, 0, "100% slippage should result in 0 minimum");
+    assert_eq!(
+        quote.minimum_output, 0,
+        "100% slippage should result in 0 minimum"
+    );
 
     // 100.01% slippage should be rejected
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         router_client.get_quote(&token_a, &token_b, &1000, Some(10001));
     }));
     assert!(result.is_err(), "Slippage > 100% must be rejected");
+}
+
+// ==================== Execution-Time Slippage Enforcement Tests ====================
+
+#[test]
+fn test_router_execution_rechecks_slippage_when_quote_diverges() {
+    // Simulates a frontend quote taken at one reserve state, then execution
+    // occurring after reserves have moved. The execution-time minimum_output
+    // must be enforced against the actual executed amount, not the stale quote.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let xlm_token = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    let pool_id = Address::generate(&env);
+
+    let token_a_admin = StellarAssetClient::new(&env, &token_a);
+    token_a_admin.mock_all_auths();
+    let token_b_admin = StellarAssetClient::new(&env, &token_b);
+    token_b_admin.mock_all_auths();
+
+    let router_contract_id = env.register_contract(None, SwapRouter);
+    let router_client = SwapRouterClient::new(&env, &router_contract_id);
+    router_client.initialize(&admin, &treasury, &xlm_token);
+    router_client.add_pool(&admin, &pool_id, &token_a, &token_b, &30u32, false);
+    router_client
+        .update_pool_reserves(&pool_id, &1000000, &1000000)
+        .unwrap();
+
+    // Frontend quote at the initial reserve state.
+    let quote = router_client.get_quote(&token_a, &token_b, &1000, Some(100));
+    let quoted_min_output = quote.minimum_output;
+    assert_eq!(quoted_min_output, 990, "quote should reflect 1% slippage");
+
+    // Reserves move adversely between quote and execution.
+    router_client
+        .update_pool_reserves(&pool_id, &500000, &2000000)
+        .unwrap();
+
+    token_a_admin.mint(&user, &1000);
+    let mut path = Vec::new(&env);
+    path.push_back(token_a.clone());
+    path.push_back(token_b.clone());
+
+    // Execution must re-check the bound against the actual output. With the
+    // stale quote's minimum_output, execution must fail.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        router_client.swap(
+            &user,
+            &token_a,
+            &token_b,
+            &1000,
+            &quoted_min_output,
+            path.clone(),
+            None,
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "Execution must reject swap when actual output falls below stale quote minimum"
+    );
+}
+
+#[test]
+fn test_router_execution_succeeds_with_updated_bound_after_divergence() {
+    // Same divergence scenario, but the caller refreshes the minimum_output
+    // bound to match the new reserve state. Execution should succeed only
+    // because the bound is re-evaluated at execution time.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let xlm_token = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    let pool_id = Address::generate(&env);
+
+    let token_a_admin = StellarAssetClient::new(&env, &token_a);
+    token_a_admin.mock_all_auths();
+    let token_b_admin = StellarAssetClient::new(&env, &token_b);
+    token_b_admin.mock_all_auths();
+
+    let router_contract_id = env.register_contract(None, SwapRouter);
+    let router_client = SwapRouterClient::new(&env, &router_contract_id);
+    router_client.initialize(&admin, &treasury, &xlm_token);
+    router_client.add_pool(&admin, &pool_id, &token_a, &token_b, &30u32, false);
+    router_client
+        .update_pool_reserves(&pool_id, &1000000, &1000000)
+        .unwrap();
+
+    // Reserves move adversely before execution.
+    router_client
+        .update_pool_reserves(&pool_id, &500000, &2000000)
+        .unwrap();
+
+    // Re-quote at execution-time reserve state.
+    let fresh_quote = router_client.get_quote(&token_a, &token_b, &1000, Some(100));
+
+    token_a_admin.mint(&user, &1000);
+    let mut path = Vec::new(&env);
+    path.push_back(token_a.clone());
+    path.push_back(token_b.clone());
+
+    let output = router_client.swap(
+        &user,
+        &token_a,
+        &token_b,
+        &1000,
+        &fresh_quote.minimum_output,
+        path,
+        None,
+    );
+    assert!(
+        output >= fresh_quote.minimum_output,
+        "Execution output must satisfy the execution-time minimum_output bound"
+    );
+}
+
+#[test]
+fn test_vault_execution_rechecks_min_shares_after_price_divergence() {
+    // Vault deposit enforces min_shares at execution time. If the share price
+    // moves between quote and execution, a stale min_shares must be rejected.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    let pool_id = Address::generate(&env);
+
+    let token_a_admin = StellarAssetClient::new(&env, &token_a);
+    token_a_admin.mock_all_auths();
+    let token_b_admin = StellarAssetClient::new(&env, &token_b);
+    token_b_admin.mock_all_auths();
+
+    let vault_contract_id = env.register_contract(None, YieldVault);
+    let vault_client = YieldVaultClient::new(&env, &vault_contract_id);
+    vault_client.initialize(
+        &admin,
+        &Symbol::new(&env, "Test Vault"),
+        &token_a,
+        &token_b,
+        &pool_id,
+        &0u32,
+        &0u32,
+        &0u32,
+        &0u32,
+        &treasury,
+    );
+    vault_client.set_prices(&admin, &1, &1);
+
+    token_a_admin.mint(&user, &1000);
+    token_b_admin.mint(&user, &1000);
+    let first_shares = vault_client.deposit(&user, &1000, &1000, &0);
+
+    // Price divergence: token_a appreciates, so subsequent deposits mint fewer shares.
+    vault_client.set_prices(&admin, &2, &1);
+
+    token_a_admin.mint(&user, &1000);
+    token_b_admin.mint(&user, &1000);
+
+    // A stale min_shares from the pre-divergence quote must be rejected at execution.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vault_client.deposit(&user, &1000, &1000, &first_shares);
+    }));
+    assert!(
+        result.is_err(),
+        "Vault deposit must enforce min_shares at execution after price divergence"
+    );
+}
+
+#[test]
+fn test_vault_withdrawal_execution_rechecks_min_amounts_after_price_divergence() {
+    // Vault withdrawal enforces min_amount_a/min_amount_b at execution time.
+    // A stale bound from before a price move must be rejected.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    let pool_id = Address::generate(&env);
+
+    let token_a_admin = StellarAssetClient::new(&env, &token_a);
+    token_a_admin.mock_all_auths();
+    let token_b_admin = StellarAssetClient::new(&env, &token_b);
+    token_b_admin.mock_all_auths();
+
+    let vault_contract_id = env.register_contract(None, YieldVault);
+    let vault_client = YieldVaultClient::new(&env, &vault_contract_id);
+    vault_client.initialize(
+        &admin,
+        &Symbol::new(&env, "Test Vault"),
+        &token_a,
+        &token_b,
+        &pool_id,
+        &0u32,
+        &0u32,
+        &0u32,
+        &0u32,
+        &treasury,
+    );
+    vault_client.set_prices(&admin, &1, &1);
+
+    token_a_admin.mint(&user, &1000);
+    token_b_admin.mint(&user, &1000);
+    let shares = vault_client.deposit(&user, &1000, &1000, &0);
+
+    // Price divergence: token_a depreciates, so withdrawal returns less token_a.
+    vault_client.set_prices(&admin, &1, &1);
+
+    // Stale min_amounts from before divergence must be rejected at execution.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vault_client.withdraw(&user, &shares, &10000, &10000);
+    }));
+    assert!(
+        result.is_err(),
+        "Vault withdrawal must enforce min_amounts at execution time"
+    );
 }

@@ -37,6 +37,7 @@ default = [
     "il-insurance",
     "actuary",
     "oracle-registry",
+    "risk-engine",
 ]
 
 # The umbrella `StellarLiquidityYieldEngine` contract in `src/lib.rs`.
@@ -50,6 +51,7 @@ strategy-registry = []
 il-insurance = []
 actuary = []
 oracle-registry = []
+risk-engine = []
 
 [profile.release]
 opt-level = "z"

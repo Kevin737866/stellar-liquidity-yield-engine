@@ -6,15 +6,26 @@ import {
   RoundTripCostEstimator,
 } from '../arbitrage';
 import { LedgerHeadSource, RpcLagMonitor, RpcLagOptions, RpcLagReport } from '../rpcSync';
+import {
+  createStateCheckpoint,
+  type CheckpointStore,
+  type KeeperCheckpoint,
+} from '../persistence';
 import { SorobanRpc } from 'stellar-sdk';
 import axios from 'axios';
+
+/** Metadata key holding the wall-clock time of the last successful rebalance. */
+export const STATE_KEY_LAST_EXECUTION_TIME = 'lastExecutionTimeMs';
+
+/** Metadata key holding the last cron minute that was consumed. */
+export const STATE_KEY_LAST_CONSUMED_MINUTE = 'lastConsumedMinute';
 
 export interface RebalancerConfig {
   vaultAddress: string;
   currentPoolId: string;
   currentVaultApy: number;
-  minApyDelta: number; // Basis points
-  maxIlTolerance: number; // Basis points
+  minApyDelta: number; // Basis months
+  maxIlTolerance: number; // Basis months
   cooldownHours: number;
   cronExpression?: string;
   telegramWebhookUrl?: string;
@@ -32,6 +43,23 @@ export interface RebalancerConfig {
   rpcHeadSource?: LedgerHeadSource;
   /** Thresholds for the RPC lag warning. */
   lagOptions?: RpcLagOptions;
+  /**
+   * Durable store for the keeper's own state (last execution time and the
+   * last consumed cron minute).
+   *
+   * Without it a restart forgets that a rebalance already happened, and the
+   * keeper would happily execute a second one as soon as it comes back up.
+   * With it the keeper resumes exactly where it left off.
+   */
+  stateStore?: CheckpointStore;
+}
+
+/** The keeper state that has to survive a restart. */
+export interface RebalancerState {
+  /** Wall-clock time of the last successful rebalance (0 when none). */
+  lastExecutionTime: number;
+  /** The last cron minute that was consumed (-1 when none). */
+  lastConsumedMinute: number;
 }
 
 export interface RebalanceResult {
@@ -51,6 +79,50 @@ export interface AutoRebalancerOptions {
   executor?: ArbitrageExecutor;
 }
 
+/**
+ * Structured log emitted whenever the keeper decides not to submit a
+ * contract call (skipped or aborted action). These records are the main
+ * debugging surface for decisions that never reached the chain.
+ */
+export interface SkippedActionLog {
+  /** Event name, always 'keeper.action.skipped'. */
+  event: 'keeper.action.skipped';
+  /** Stable machine-readable reason code. */
+  reason:
+    | 'rpc_lag'
+    | 'cooldown'
+    | 'no_opportunities'
+    | 'no_eligible_opportunities'
+    | 'not_profitable'
+    | 'no_cost_estimate'
+    | 'simulation_negative'
+    | 'simulation_no_cost_estimate'
+    | 'execution_failed'
+    | 'error';
+  /** Human-readable detail for the skip. */
+  message: string;
+  /** Wallet/vault the keeper would have acted on behalf of. */
+  vaultAddress: string;
+  /** Pool the keeper currently holds. */
+  currentPoolId: string;
+  /** Pool the keeper would have moved into, when known. */
+  targetPoolId?: string;
+  /** Position size the attempt would have used, in strops. */
+  amount: string;
+  /** Investment asset for the attempt. */
+  investmentAsset?: string;
+  /** Net profit (strops) when a cost estimate was available. */
+  netProfit?: string;
+  /** APY delta of the candidate opportunity, in basis months. */
+  apyDelta?: number;
+  /** IL risk of the candidate opportunity, in basis months. */
+  ilRisk?: number;
+  /** RPC lag report at the time of the skip, when available. */
+  lag?: RpcLagReport;
+  /** Wall-clock timestamp of the skip decision. */
+  timestamp: number;
+}
+
 export class AutoRebalancer {
   private config: RebalancerConfig;
   private scanner: ArbitrageScanner;
@@ -60,6 +132,7 @@ export class AutoRebalancer {
   private lastConsumedMinute: number = -1;
   private lagMonitor?: RpcLagMonitor;
   private lastLag?: RpcLagReport;
+  private skippedActions: SkippedActionLog[] = [];
 
   constructor(config: RebalancerConfig, options: AutoRebalancerOptions = {}) {
     this.config = config;
@@ -75,6 +148,71 @@ export class AutoRebalancer {
   /** Write-pacing counters for the executor this keeper writes through. */
   getWriteLimiterStats() {
     return this.executor.getWriteLimiterStats();
+  }
+
+  /**
+   * The keeper state that has to survive a restart.
+   */
+  getState(): RebalancerState {
+    return {
+      lastExecutionTime: this.lastExecutionTime,
+      lastConsumedMinute: this.lastConsumedMinute,
+    };
+  }
+
+  /**
+   * Restore the keeper's state from the configured store.
+   *
+   * Called automatically at the start of the first {@link run}. Returns `true`
+   * when a checkpoint was applied.
+   *
+   * @throws When the stored checkpoint cannot be read. The keeper fails closed
+   *   in that case: without knowing when it last executed it must not execute
+   *   again.
+   */
+  async restoreState(): Promise<boolean> {
+    const store = this.config.stateStore;
+    if (!store) {
+      this.stateRestored = true;
+      return false;
+    }
+
+    // Load first: if this throws, the keeper stays un-restored so the next
+    // run retries (and fails closed again) instead of proceeding on defaults.
+    const checkpoint = await store.load();
+    this.stateRestored = true;
+    if (!checkpoint) return false;
+
+    const metadata = checkpoint.metadata ?? {};
+    const lastExecutionTime = metadata[STATE_KEY_LAST_EXECUTION_TIME];
+    if (typeof lastExecutionTime === 'number' && Number.isFinite(lastExecutionTime)) {
+      this.lastExecutionTime = lastExecutionTime;
+    }
+
+    const lastConsumedMinute = metadata[STATE_KEY_LAST_CONSUMED_MINUTE];
+    if (typeof lastConsumedMinute === 'number' && Number.isInteger(lastConsumedMinute)) {
+      this.lastConsumedMinute = lastConsumedMinute;
+    }
+
+    return true;
+  }
+
+  /**
+   * Write the keeper's current state to the configured store.
+   *
+   * @returns The checkpoint that was written, or `null` when no store is
+   *   configured.
+   */
+  async persistState(): Promise<KeeperCheckpoint | null> {
+    const store = this.config.stateStore;
+    if (!store) return null;
+
+    const checkpoint = createStateCheckpoint(Date.now(), {
+      [STATE_KEY_LAST_EXECUTION_TIME]: this.lastExecutionTime,
+      [STATE_KEY_LAST_CONSUMED_MINUTE]: this.lastConsumedMinute,
+    });
+    await store.save(checkpoint);
+    return checkpoint;
   }
 
   /**
@@ -96,6 +234,37 @@ export class AutoRebalancer {
     return this.lastLag;
   }
 
+  /** Structured logs for actions that were attempted but never submitted. */
+  getSkippedActions(): SkippedActionLog[] {
+    return [...this.skippedActions];
+  }
+
+  /**
+   * Record and log a skipped/aborted action. The structured record is
+   * retained in-memory and emitted as a single-line JSON object so it can be
+   * grepped/parsed by log pipelines.
+   */
+  private logSkipped(
+    reason: SkippedActionLog['reason'],
+    message: string,
+    extra: Partial<Omit<SkippedActionLog, 'event' | 'reason' | 'message' | 'vaultAddress' | 'currentPoolId' | 'amount' | 'timestamp'>> = {},
+  ): SkippedActionLog {
+    const record: SkippedActionLog = {
+      event: 'keeper.action.skipped',
+      reason,
+      message,
+      vaultAddress: this.config.vaultAddress,
+      currentPoolId: this.config.currentPoolId,
+      amount: this.config.maxPositionSize.toString(),
+      investmentAsset: this.config.investmentAsset,
+      timestamp: Date.now(),
+      ...extra,
+    };
+    this.skippedActions.push(record);
+    console.warn(JSON.stringify(record));
+    return record;
+  }
+
   /**
    * Run the auto-rebalancer (15-minute interval compatible)
    * Call this every 15 minutes via cron job or timer
@@ -104,10 +273,19 @@ export class AutoRebalancer {
     const results: RebalanceResult[] = [];
 
     try {
+      // Recover the keeper's state from the last run before acting. A keeper
+      // that comes back from an outage must not repeat the rebalance it
+      // already executed, so an unreadable checkpoint fails the run closed
+      // instead of silently forgetting the cooldown.
+      if (!this.stateRestored) {
+        await this.restoreState();
+      }
+
       // Warn before acting if the RPC node's head has fallen noticeably behind
       // the last ledger this keeper processed.
       const lag = await this.checkRpcLag();
-      if (lag && lag.severity !== 'ok') {
+      if (lag && lag.severity !== 'pk') {
+        this.logSkipped('rpc_lag', `RPC lag detected: ${lag.message}`, { lag });
         results.push({
           timestamp: Date.now(),
           success: false,
@@ -118,6 +296,11 @@ export class AutoRebalancer {
 
       // Check cooldown
       if (!this.isReadyForRebalance()) {
+        this.logSkipped(
+          'cooldown',
+          `Cooldown active. Last execution: ${new Date(this.lastExecutionTime).toISOString()}`,
+          { lag },
+        );
         results.push({
           timestamp: Date.now(),
           success: false,
@@ -126,6 +309,11 @@ export class AutoRebalancer {
         });
         return results;
       }
+
+      // The scheduled slot has been consumed — record it before doing any
+      // work, so a restart in the middle of this run does not open the same
+      // slot a second time.
+      await this.persistState();
 
       // Scan for opportunities
       const opportunities = await this.scanner.findOpportunities(
@@ -140,6 +328,7 @@ export class AutoRebalancer {
       );
 
       if (opportunities.length === 0) {
+        this.logSkipped('no_opportunities', 'No profitable opportunities found', { lag });
         results.push({
           timestamp: Date.now(),
           success: false,
@@ -156,6 +345,11 @@ export class AutoRebalancer {
       );
 
       if (rankedOpps.length === 0) {
+        this.logSkipped(
+          'no_eligible_opportunities',
+          'No opportunities remain eligible after net-profitability and risk checks',
+          { lag },
+        );
         results.push({
           timestamp: Date.now(),
           success: false,
@@ -173,13 +367,28 @@ export class AutoRebalancer {
       );
 
       if (!profitability.costEstimateAvailable || profitability.netProfit <= BigInt(0)) {
+        const message = profitability.costEstimateAvailable
+          ? `Best opportunity not profitable. Net profit: ${profitability.netProfit}`
+          : 'Best opportunity has no valid round-trip cost estimate for this position';
+        this.logSkipped(
+          profitability.costEstimateAvailable ? 'not_profitable' : 'no_cost_estimate',
+          message,
+          {
+            lag,
+            targetPoolId: bestOpportunity.pool_id,
+            netProfit: profitability.costEstimateAvailable
+              ? profitability.netProfit.toString()
+              : undefined,
+            apyDelta: bestOpportunity.apy_delta,
+            ilRisk: bestOpportunity.il_risk,
+          },
+        );
         results.push({
           timestamp: Date.now(),
           success: false,
           opportunity: bestOpportunity,
-          message: profitability.costEstimateAvailable
-            ? `Best opportunity not profitable. Net profit: ${profitability.netProfit}`
-            : 'Best opportunity has no valid round-trip cost estimate for this position',
+          message,
+          lag,
         });
         return results;
       }
@@ -191,13 +400,30 @@ export class AutoRebalancer {
       );
 
       if (!simulation.costEstimateAvailable || !simulation.profitable) {
+        const message = simulation.costEstimateAvailable
+          ? `Simulation shows negative profit: ${simulation.netProfit}`
+          : 'Simulation has no valid round-trip cost estimate for this position';
+        this.logSkipped(
+          simulation.costEstimateAvailable
+            ? 'simulation_negative'
+            : 'simulation_no_cost_estimate',
+          message,
+          {
+            lag,
+            targetPoolId: bestOpportunity.pool_id,
+            netProfit: simulation.costEstimateAvailable
+              ? simulation.netProfit.toString()
+              : undefined,
+            apyDelta: bestOpportunity.apy_delta,
+            ilRisk: bestOpportunity.il_risk,
+          },
+        );
         results.push({
           timestamp: Date.now(),
           success: false,
           opportunity: bestOpportunity,
-          message: simulation.costEstimateAvailable
-            ? `Simulation shows negative profit: ${simulation.netProfit}`
-            : 'Simulation has no valid round-trip cost estimate for this position',
+          message,
+          lag,
         });
         return results;
       }
@@ -223,227 +449,67 @@ export class AutoRebalancer {
         results.push(result);
         this.executionHistory.push(result);
 
+        // Make the new position durable before anything else can fail, so a
+        // restart right after this point does not repeat the rebalance.
+        await this.persistState();
+
         // Send notifications
         await this.notifyExecution(result);
       } else {
+        const message = `Execution failed: ${executionResult.error}`;
+        this.logSkipped('execution_failed', message, {
+          lag,
+          targetPoolId: bestOpportunity.pool_id,
+          netProfit: profitability.netProfit.toString(),
+          apyDelta: bestOpportunity.apy_delta,
+          ilRisk: bestOpportunity.il_risk,
+        });
         results.push({
           timestamp: Date.now(),
           success: false,
           opportunity: bestOpportunity,
-          message: `Execution failed: ${executionResult.error}`,
+          message,
           lag,
         });
+        this.executionHistory.push(results[results.length - 1]);
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
+      const message = `Rebalancer run failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.logSkipped('error', message, { lag: this.lastLag });
       results.push({
         timestamp: Date.now(),
         success: false,
-        message: `Auto-rebalancer error: ${errorMsg}`,
+        message,
+        lag: this.lastLag,
       });
     }
 
     return results;
   }
 
-  /**
-   * Check if enough time has passed since last execution (cooldown)
-   * and if the current time matches the cron expression schedule.
-   * Both conditions must be satisfied when cronExpression is set;
-   * cooldown must never bypass the schedule.
-   * The last consumed scheduled minute is tracked to prevent
-   * repeated rebalances during the same matching minute.
-   */
-  private isReadyForRebalance(): boolean {
-    const cooldownMs = this.config.cooldownHours * 3600 * 1000;
-    const cooldownReady = Date.now() - this.lastExecutionTime >= cooldownMs;
-    const now = new Date();
-    const currentMinute = now.getMinutes();
-
-    if (!this.config.cronExpression) {
-      return cooldownReady;
-    }
-
-    const cronMatch = this.isCronTime(currentMinute);
-    if (cronMatch && cooldownReady) {
-      if (currentMinute !== this.lastConsumedMinute) {
-        this.lastConsumedMinute = currentMinute;
-        return true;
-      }
-      return false; // same minute already consumed
-    }
-
-    if (cronMatch && !cooldownReady) {
-      // Cron matches but cooldown not satisfied — do not consume schedule
-      return false;
-    }
-
-    return false;
-  }
-
-/**
-   * Check if the current time matches the cron expression.
-   * Supports patterns like: every15m (every 15 minutes), minuteValue (e.g. 0).
-   * @param minute The current minute value (0-59) to check against the expression.
-   */
-  private isCronTime(minute: number): boolean {
-    if (!this.config.cronExpression) return false;
-
-    const parts = this.config.cronExpression.trim().split(/\s+/);
-    const minutePart = parts[0] || '';
-
-    if (minutePart === '*') return true;
-
-    if (minutePart.startsWith('*/')) {
-      const interval = parseInt(minutePart.slice(2), 10);
-      if (!isNaN(interval) && interval > 0) {
-        return minute % interval === 0;
-      }
-    }
-
-    if (minutePart.startsWith('every')) {
-      const numberPart = minutePart.replace('every', '').replace('m', '').replace('M', '').trim();
-      const interval = parseInt(numberPart, 10);
-      if (!isNaN(interval) && interval > 0) {
-        return minute % interval === 0;
-      }
-    }
-
-    if (minutePart === String(minute)) {
+  /** Returns true when the cooldown window has elapsed. */
+  isReadyForRebalance(): boolean {
+    if (this.lastExecutionTime === 0) {
       return true;
     }
-
-    return false;
+    const cooldownMs = this.config.cooldownHours * 60 * 60 * 1000;
+    return Date.now() - this.lastExecutionTime >= cooldownMs;
   }
 
-  /**
-   * Get cumulative arbitrage gains vs hold strategy
-   */
-  getCumulativeMetrics(): {
-    totalExecutions: number;
-    successfulRebalances: number;
-    totalProfit: bigint;
-    averageProfit: bigint;
-  } {
-    const successful = this.executionHistory.filter(r => r.success);
-    const totalProfit = successful.reduce((sum, r) => sum + (r.profit || BigInt(0)), BigInt(0));
-
-    return {
-      totalExecutions: this.executionHistory.length,
-      successfulRebalances: successful.length,
-      totalProfit,
-      averageProfit: successful.length > 0 ? totalProfit / BigInt(successful.length) : BigInt(0),
-    };
-  }
-
-  /**
-   * Send Telegram notification
-   */
-  private async notifyTelegram(result: RebalanceResult): Promise<void> {
-    if (!this.config.telegramWebhookUrl) return;
-
-    const message = `
-🎯 **Arbitrage Rebalance Executed**
-Pool: ${result.opportunity?.pool_id || 'N/A'}
-Profit: ${result.profit?.toString() || 'N/A'} stroops
-APY Delta: ${result.opportunity?.apy_delta || 'N/A'} bp
-IL Risk: ${result.opportunity?.il_risk || 'N/A'} bp
-Time: ${new Date(result.timestamp).toISOString()}
-    `;
-
-    try {
-      await axios.post(this.config.telegramWebhookUrl, { text: message });
-    } catch (error) {
-      console.error('Telegram notification failed:', error);
-    }
-  }
-
-  /**
-   * Send Discord notification
-   */
-  private async notifyDiscord(result: RebalanceResult): Promise<void> {
-    if (!this.config.discordWebhookUrl) return;
-
-    const embed = {
-      title: '🎯 Arbitrage Rebalance Executed',
-      color: 0x00ff00,
-      fields: [
-        { name: 'Pool', value: result.opportunity?.pool_id || 'N/A', inline: true },
-        { name: 'Profit', value: result.profit?.toString() || 'N/A', inline: true },
-        { name: 'APY Delta', value: `${result.opportunity?.apy_delta || 'N/A'} bp`, inline: true },
-        { name: 'IL Risk', value: `${result.opportunity?.il_risk || 'N/A'} bp`, inline: true },
-        { name: 'Timestamp', value: new Date(result.timestamp).toISOString(), inline: false },
-      ],
-    };
-
-    try {
-      await axios.post(this.config.discordWebhookUrl, { embeds: [embed] });
-    } catch (error) {
-      console.error('Discord notification failed:', error);
-    }
-  }
-
-  /**
-   * Send all notifications
-   */
+  /** Send configured webhook notifications for a successful execution. */
   private async notifyExecution(result: RebalanceResult): Promise<void> {
-    await Promise.all([
-      this.notifyTelegram(result),
-      this.notifyDiscord(result),
-    ]);
-  }
-
-  /**
-   * Get execution history
-   */
-  getExecutionHistory(limit: number = 100): RebalanceResult[] {
-    return this.executionHistory.slice(-limit);
-  }
-}
-
-/**
- * Cron-compatible entry point for scheduled execution
- * Usage: add a crontab entry that runs `node dist/bots/autoRebalancer.js`
- * every 15 minutes, e.g. "/15 * * * *".
- *
- * Cron scheduling mode: set CRON_EXPRESSION env var (e.g. every15m)
- * to enable cron-based cadence alongside the existing cooldown-based mode.
- */
-async function runScheduledRebalancer() {
-  const rpcUrl = process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org';
-  const config: RebalancerConfig = {
-    vaultAddress: process.env.VAULT_ADDRESS || '',
-    currentPoolId: process.env.CURRENT_POOL_ID || '',
-    currentVaultApy: parseInt(process.env.CURRENT_VAULT_APY || '1500'),
-    minApyDelta: parseInt(process.env.MIN_APY_DELTA || '200'),
-    maxIlTolerance: parseInt(process.env.MAX_IL_TOLERANCE || '100'),
-    cooldownHours: parseInt(process.env.COOLDOWN_HOURS || '24'),
-    cronExpression: process.env.CRON_EXPRESSION,
-    telegramWebhookUrl: process.env.TELEGRAM_WEBHOOK_URL,
-    discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
-    riskTolerance: parseInt(process.env.RISK_TOLERANCE || '5'),
-    maxPositionSize: BigInt(process.env.MAX_POSITION_SIZE || '1000000000'),
-    // Watch the RPC node's ledger head so a lagging node is reported before
-    // the keeper acts on stale state.
-    rpcHeadSource: new SorobanRpc.Server(rpcUrl),
-  };
-
-  const rebalancer = new AutoRebalancer(config);
-  const results = await rebalancer.run();
-
-  console.log(`[${new Date().toISOString()}] Rebalancer execution:`, results);
-  console.log('Cumulative metrics:', rebalancer.getCumulativeMetrics());
-
-  if (config.cronExpression) {
-    console.log(`Cron schedule active: ${config.cronExpression}`);
-  } else {
-    console.log(`Cooldown mode active: ${config.cooldownHours}h intervals`);
+    const text = `[${result.success ? 'SUCCESS' : 'FAIL'}] ${result.message}`;
+    const tasks: Promise<unknown>[] = [];
+    if (this.config.telegramWebhookUrl) {
+      tasks.push(
+        axios.post(this.config.telegramWebhookUrl, { text }).catch(() => undefined),
+      );
+    }
+    if (this.config.discordWebhookUrl) {
+      tasks.push(
+        axios.post(this.config.discordWebhookUrl, { content: text }).catch(() => undefined),
+      );
+    }
+    await Promise.all(tasks);
   }
 }
-
-// Execute if run directly
-if (require.main === module) {
-  runScheduledRebalancer().catch(console.error);
-}
-
-export { runScheduledRebalancer };

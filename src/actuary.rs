@@ -6,8 +6,26 @@
 /// - Dynamic pricing based on reserve pool health
 /// - Governance: community-adjustable pricing model coefficients
 use soroban_sdk::{
-    contract, contractimpl, contracttype, unwrap::UnwrapOptimized, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Symbol,
 };
+
+/// Typed failures of the actuarial pricing contract.
+///
+/// Governance parameter updates are the only state-changing path, so the
+/// anticipated rejections are an unauthorized caller and out-of-range model
+/// coefficients. They fail with these codes instead of opaque panics.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActuaryError {
+    /// The caller is not the stored admin.
+    Unauthorized = 1,
+    /// The contract has not been initialized.
+    NotInitialized = 2,
+    /// The `base_multiplier_bps` coefficient is outside the allowed range.
+    BaseMultiplierOutOfRange = 3,
+    /// The `reserve_margin_bps` coefficient is outside the allowed range.
+    ReserveMarginOutOfRange = 4,
+}
 
 /// Target minimum reserve ratio: 150% (in bps * 100)
 pub const MIN_RESERVE_RATIO_BPS: u32 = 15000;
@@ -99,9 +117,9 @@ impl Actuary {
             .storage()
             .instance()
             .get(&Symbol::new(env, "admin"))
-            .unwrap();
+            .unwrap_or_else(|| env.panic_with_error(ActuaryError::NotInitialized));
         if caller != admin {
-            panic!("unauthorized: admin required");
+            env.panic_with_error(ActuaryError::Unauthorized);
         }
     }
 
@@ -222,17 +240,17 @@ impl Actuary {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_optimized();
+            .unwrap_or_else(|| env.panic_with_error(ActuaryError::NotInitialized));
         if admin != stored_admin {
-            panic!("unauthorized: admin required");
+            panic_with_error!(&env, ActuaryError::Unauthorized);
         }
 
         // Validate params within reasonable bounds
         if new_params.base_multiplier_bps < 5000 || new_params.base_multiplier_bps > 30000 {
-            panic!("base_multiplier_bps out of range [5000, 30000]");
+            panic_with_error!(&env, ActuaryError::BaseMultiplierOutOfRange);
         }
         if new_params.reserve_margin_bps < 500 || new_params.reserve_margin_bps > 5000 {
-            panic!("reserve_margin_bps out of range [500, 5000]");
+            panic_with_error!(&env, ActuaryError::ReserveMarginOutOfRange);
         }
 
         env.storage()
@@ -336,5 +354,66 @@ mod test {
 
         // The stored parameters are untouched by the rejected update.
         assert_eq!(client.get_pricing_params(), default_pricing_params());
+    }
+
+    // ==================== Typed error paths ====================
+
+    fn actuary(env: &Env) -> (Address, ActuaryClient) {
+        let admin = Address::generate(env);
+        let contract_id = env.register_contract(None, Actuary);
+        let client = ActuaryClient::new(env, &contract_id);
+        client.initialize(&admin);
+        (admin, client)
+    }
+
+    fn params(base_multiplier_bps: u32, reserve_margin_bps: u32) -> PricingParams {
+        PricingParams {
+            base_multiplier_bps,
+            vol_sensitivity_bps: 10000,
+            correlation_discount_bps: 10000,
+            reserve_margin_bps,
+        }
+    }
+
+    #[test]
+    fn test_update_pricing_params_reports_typed_errors() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (admin, client) = actuary(&env);
+
+        // base_multiplier_bps below the allowed floor.
+        let err = client
+            .try_update_pricing_params(&admin, &params(4_000, 1_000))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ActuaryError::BaseMultiplierOutOfRange.into());
+
+        // base_multiplier_bps above the allowed ceiling.
+        let err = client
+            .try_update_pricing_params(&admin, &params(30_001, 1_000))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ActuaryError::BaseMultiplierOutOfRange.into());
+
+        // reserve_margin_bps outside its range is a distinct code.
+        let err = client
+            .try_update_pricing_params(&admin, &params(10_000, 5_001))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ActuaryError::ReserveMarginOutOfRange.into());
+    }
+
+    #[test]
+    fn test_update_pricing_params_from_non_admin_is_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, client) = actuary(&env);
+
+        let stranger = Address::generate(&env);
+        let err = client
+            .try_update_pricing_params(&stranger, &params(10_000, 1_000))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, ActuaryError::Unauthorized.into());
     }
 }

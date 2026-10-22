@@ -194,7 +194,10 @@ impl GovernanceToken {
     }
 
     fn get_admin(env: &Env) -> Address {
-        env.storage().instance().get(&GovTokenDataKey::Admin).unwrap()
+        env.storage()
+            .instance()
+            .get(&GovTokenDataKey::Admin)
+            .unwrap_or_else(|| panic!("admin not configured"))
     }
 
     /// Mint new tokens (only by governance)

@@ -1,7 +1,36 @@
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, unwrap::UnwrapOptimized, Address, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map,
+    Symbol, Vec,
 };
+
+/// Typed failures of the rebalance engine.
+///
+/// Expected invalid inputs - an out-of-range risk level, a strategy id that
+/// does not exist, an unauthorized keeper - fail with one of these codes so a
+/// caller can distinguish and handle them instead of parsing a panic message.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RebalanceError {
+    /// The caller is neither the admin nor a configured APY keeper.
+    Unauthorized = 1,
+    /// The engine is paused and refuses the operation.
+    Paused = 2,
+    /// The engine has not been initialized.
+    NotInitialized = 3,
+    /// No strategy exists with the requested id.
+    StrategyNotFound = 4,
+    /// `risk_level` must be 1 (conservative), 2 (balanced) or 3 (aggressive).
+    InvalidRiskLevel = 5,
+    /// The allocations list was empty.
+    EmptyAllocations = 6,
+    /// A single allocation exceeds 10000 bps (100%).
+    AllocationOutOfRange = 7,
+    /// The allocations do not sum to exactly 10000 bps (100%).
+    AllocationsMustSumTo100Percent = 8,
+    /// The published APY exceeds [`MAX_APY_BPS`].
+    ApyOutOfRange = 9,
+}
 
 /// The single vault call this engine makes.
 ///
@@ -20,6 +49,10 @@ pub const MAX_APY_BPS: u32 = 1_000_000;
 
 /// Default age after which an APY observation is considered stale: 24 hours.
 pub const DEFAULT_MAX_APY_AGE: u64 = 86_400;
+
+/// Default number of rejected observations that excludes a pool from routing
+/// until its feed is accepted again (Issue #289).
+pub const DEFAULT_FEED_FAILURE_THRESHOLD: u32 = 3;
 
 /// Number of consecutive failed rebalances that trips the circuit breaker.
 pub const EMERGENCY_STOP_WINDOW: u32 = 3;
@@ -58,6 +91,8 @@ pub struct RebalanceProposal {
     pub expected_apy_improvement: u32, // Basis points
     pub estimated_gas_cost: i128,
     pub timestamp: u64,
+    /// Minimum acceptable output (in the moved unit) enforced at execution time.
+    pub min_output: i128,
 }
 
 #[contracttype]
@@ -85,6 +120,20 @@ pub struct ArbitrageOpportunity {
     pub recommended: bool,
 }
 
+/// Slippage bound enforced at execution time, not only at quote time.
+///
+/// A quote produced off-chain (or by `analyze_rebalance_opportunities`) is not
+/// trusted as the only safeguard: the executor re-checks the realised output
+/// against this bound before committing the move.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlippageBound {
+    /// Minimum acceptable output amount for the executed leg.
+    pub min_output: i128,
+    /// Maximum slippage tolerated, in basis points (10000 = 100%).
+    pub max_slippage_bps: u32,
+}
+
 /// Arbitrage rebalance threshold configuration
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,6 +141,28 @@ pub struct ArbitrageThresholds {
     pub min_apy_delta: u32, // Minimum APY difference to trigger rebalance (basis points)
     pub max_il_tolerance: u32, // Maximum acceptable IL (basis points)
     pub cooldown_period: u64, // Seconds between rebalances, applied per vault
+    /// Minimum estimated net profit for an opportunity to be routed, in the
+    /// same units as [`ArbitrageOpportunity::net_profit`] (Issue #294).
+    /// `0` disables the filter.
+    pub min_net_profit: i128,
+}
+
+/// Validation-failure tracking for one pool's oracle feed (Issue #289).
+///
+/// A feed whose last observation failed validation must not influence routing.
+/// The off-chain validator calls [`RebalanceEngine::record_feed_validation_failure`]
+/// each time it rejects an observation; once `failure_count` reaches the
+/// configured exclusion threshold the feed is marked `excluded` and every
+/// routing path skips the pool until a valid observation is accepted again.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedValidationRecord {
+    /// Rejected observations counted since the feed was last accepted.
+    pub failure_count: u32,
+    /// Ledger timestamp of the most recent rejected observation.
+    pub last_failure_at: u64,
+    /// True once `failure_count` reached the exclusion threshold.
+    pub excluded: bool,
 }
 
 /// One oracle observation for a pool.
@@ -101,11 +172,38 @@ pub struct ArbitrageThresholds {
 /// that successful publication.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebalancePacing {
+    /// Maximum amount (in the moved unit) that may leave one pool per window.
+    /// Zero disables pacing.
+    pub max_amount_per_window: i128,
+    /// Length of the pacing window, in seconds.
+    pub window_seconds: u64,
+}
+
+/// Consumption of the per-pool rebalance budget inside one window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolWindowUsage {
+    /// Whether a window has been opened for this pool at all. A boolean, rather
+    /// than a zero timestamp, so a window opened at ledger time 0 is distinct
+    /// from no window yet.
+    pub window_active: bool,
+    /// Ledger timestamp that opened the window.
+    pub window_started_at: u64,
+    /// Total amount moved out of the pool inside this window.
+    pub amount_moved: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolApyRecord {
     pub apy_bps: u32,        // Observed APY in basis points (10000 = 100%)
     pub updated_at: u64,     // Ledger timestamp the feed was refreshed
     pub updated_by: Address, // Admin or keeper that pushed the observation
 }
+
+/// Default maximum slippage tolerated at execution time: 50 bps (0.5%).
+pub const DEFAULT_MAX_SLIPPAGE_BPS: u32 = 50;
 
 #[contract]
 pub struct RebalanceEngine;
@@ -149,6 +247,9 @@ impl RebalanceEngine {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_apy_age"), &DEFAULT_MAX_APY_AGE);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "max_slippage_bps"), &DEFAULT_MAX_SLIPPAGE_BPS);
         // Record the storage schema version of this build; `migrate` moves it
         // forward after an upgrade swaps the code.
         crate::upgrade::set_storage_version(&env, crate::upgrade::STORAGE_VERSION);
@@ -186,7 +287,7 @@ impl RebalanceEngine {
     ) -> u32 {
         Self::require_admin(&env, admin.clone());
         Self::require_not_paused(&env);
-        Self::validate_allocations(&allocations);
+        Self::validate_allocations(&env, &allocations);
 
         let strategy_id = Self::get_next_strategy_id(&env);
 
@@ -201,7 +302,11 @@ impl RebalanceEngine {
         };
 
         let mut strategies = Self::get_strategies_map(env.clone());
-        require!((1..=3).contains(&risk_level), "risk_level must be 1-3");
+        require!(
+            env,
+            (1..=3).contains(&risk_level),
+            RebalanceError::InvalidRiskLevel
+        );
         strategies.set(strategy_id, strategy.clone());
         env.storage()
             .instance()
@@ -229,12 +334,16 @@ impl RebalanceEngine {
     ) {
         Self::require_admin(&env, admin.clone());
         Self::require_not_paused(&env);
-        Self::validate_allocations(&allocations);
-        require!((1..=3).contains(&risk_level), "risk_level must be 1-3");
+        Self::validate_allocations(&env, &allocations);
+        require!(
+            env,
+            (1..=3).contains(&risk_level),
+            RebalanceError::InvalidRiskLevel
+        );
 
         let mut strategies = Self::get_strategies_map(env.clone());
         if strategies.get(strategy_id).is_none() {
-            panic!("strategy not found");
+            panic_with_error!(&env, RebalanceError::StrategyNotFound);
         }
         let updated_strategy = RebalanceStrategy {
             strategy_id,
@@ -285,6 +394,7 @@ impl RebalanceEngine {
                         expected_apy_improvement: better_pool.current_apy - current_apy,
                         estimated_gas_cost: Self::estimate_gas_cost(&env),
                         timestamp: env.ledger().timestamp(),
+                        min_output: 0,
                     };
                     proposals.push_back(proposal);
                 }
@@ -301,12 +411,31 @@ impl RebalanceEngine {
         // Verify caller is authorized (could be a vault or authorized manager)
         // For now, allow any caller - in production, add proper authorization
 
+        // Pace large moves out of a pool: an oversized or over-budget proposal is
+        // rejected before any token moves, so a mass unwind cannot execute in a
+        // single window. Only successful rebalances consume the budget.
+        let moved_amount = proposal.amount_a + proposal.amount_b;
+        if moved_amount > 0 && !Self::pacing_allows(&env, &proposal.from_pool, moved_amount) {
+            return false;
+        }
+
+        // Slippage protection is re-checked here, at execution time. A quote
+        // produced earlier (possibly by an off-chain frontend) is not trusted
+        // as the only safeguard: the bound carried on the proposal must still
+        // hold against the configured maximum slippage.
+        if !Self::slippage_allows(&env, &proposal) {
+            return false;
+        }
+
         let apy_before = Self::get_pool_current_apy(env.clone(), proposal.from_pool.clone());
         let mut success = false;
 
         // Execute the rebalance (simplified - would integrate with AMM contracts)
         if Self::perform_rebalance(&env, &proposal) {
             success = true;
+            if moved_amount > 0 {
+                Self::record_pacing(&env, &proposal.from_pool, moved_amount);
+            }
         }
 
         let apy_after = if success {
@@ -331,32 +460,92 @@ impl RebalanceEngine {
         success
     }
 
+    /// Current maximum slippage tolerated at execution time, in basis points.
+    pub fn get_max_slippage_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "max_slippage_bps"))
+            .unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS)
+    }
+
+    /// Set the maximum slippage tolerated at execution time (admin only).
+    pub fn set_max_slippage_bps(env: Env, admin: Address, max_slippage_bps: u32) {
+        Self::require_admin(&env, admin.clone());
+        require!(max_slippage_bps <= 10000, "max_slippage_bps must not exceed 10000");
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "max_slippage_bps"), &max_slippage_bps);
+
+        env.events().publish(
+            (Symbol::new(&env, "max_slippage_bps_updated"),),
+            (admin, max_slippage_bps),
+        );
+    }
+
+    /// Internal: whether the proposal's execution-time slippage bound holds.
+    ///
+    /// The realised output of the executed leg is compared against the
+    /// proposal's `min_output`. A non-positive `min_output` means the caller
+    /// supplied no bound, which is rejected outright so a frontend quote can
+    /// never be the only safeguard.
+    fn slippage_allows(env: &Env, proposal: &RebalanceProposal) -> bool {
+        if proposal.min_output <= 0 {
+            return false;
+        }
+
+        // The realised output of the executed leg. In this simplified engine
+        // the deposit leg is `amount_b`; a full deployment would substitute the
+        // swap router's actual output here.
+        let realised_output = proposal.amount_b;
+        if realised_output < proposal.min_output {
+            return false;
+        }
+
+        // Re-derive the implied slippage from the quote (the amount the caller
+        // expected to receive) and reject anything beyond the configured cap.
+        let quoted_output = proposal.amount_b;
+        if quoted_output <= 0 {
+            return false;
+        }
+        let shortfall = quoted_output.saturating_sub(realised_output);
+        let slippage_bps = ((shortfall as u128) * 10000) / (quoted_output as u128);
+        slippage_bps <= Self::get_max_slippage_bps(env.clone()) as u128
+    }
+
     /// Validate that allocations are non-empty, each within bounds (<= 10000 bps),
     /// and that the percentages sum to exactly 10000 bps (100%).
-    fn validate_allocations(allocations: &Vec<PoolAllocation>) {
-        require!(!allocations.is_empty(), "allocations must not be empty");
+    fn validate_allocations(env: &Env, allocations: &Vec<PoolAllocation>) {
+        require!(
+            env,
+            !allocations.is_empty(),
+            RebalanceError::EmptyAllocations
+        );
 
         let mut total_bps: u64 = 0;
         for allocation in allocations.iter() {
             require!(
+                env,
                 allocation.allocation_percent <= 10000,
-                "allocation_percent must not exceed 10000 bps (100%)"
+                RebalanceError::AllocationOutOfRange
             );
             total_bps += allocation.allocation_percent as u64;
         }
 
         require!(
+            env,
             total_bps == 10000,
-            "allocations must sum to exactly 10000 bps (100%)"
+            RebalanceError::AllocationsMustSumTo100Percent
         );
     }
 
     /// Internal: get strategies Map for O(1) access
+    ///
+    /// Fails with [`RebalanceError::NotInitialized`] before `initialize` runs.
     pub fn get_strategies_map(env: Env) -> Map<u32, RebalanceStrategy> {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "strategies"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::NotInitialized))
     }
 
     /// Get all strategies as Vec (materialized from Map)
@@ -370,10 +559,12 @@ impl RebalanceEngine {
     }
 
     /// Get specific strategy - O(1)
+    ///
+    /// Fails with [`RebalanceError::StrategyNotFound`] for an unknown id.
     pub fn get_strategy(env: Env, strategy_id: u32) -> RebalanceStrategy {
-        Self::get_strategies_map(env)
+        Self::get_strategies_map(env.clone())
             .get(strategy_id)
-            .unwrap_or_else(|| panic!("strategy not found"))
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::StrategyNotFound))
     }
 
     /// Paginated strategy listing (Issue #107)
@@ -405,7 +596,7 @@ impl RebalanceEngine {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "history"))
-            .unwrap_optimized();
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::NotInitialized));
 
         let mut result: Vec<RebalanceHistory> = Vec::new(&env);
         let start = if history.len() > limit {
@@ -427,7 +618,7 @@ impl RebalanceEngine {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "history"))
-            .unwrap_optimized();
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::NotInitialized));
         if limit == 0 || offset >= history.len() {
             return Vec::new(&env);
         }
@@ -444,7 +635,7 @@ impl RebalanceEngine {
             .storage()
             .instance()
             .get(&Symbol::new(&env, "history"))
-            .unwrap_optimized();
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::NotInitialized));
         h.len()
     }
 
@@ -464,11 +655,15 @@ impl RebalanceEngine {
     pub fn update_pool_apy(env: Env, caller: Address, pool_id: Address, apy_bps: u32) {
         Self::require_not_paused(&env);
         Self::require_admin_or_apy_keeper(&env, caller.clone());
+        require!(env, apy_bps <= MAX_APY_BPS, RebalanceError::ApyOutOfRange);
         require!(apy_bps <= MAX_APY_BPS, "apy_bps exceeds maximum");
         // The caller address is part of the feed's public provenance, so it
         // must be authorized by that address rather than merely supplied as a
         // method argument.
         caller.require_auth();
+
+        let mut registry = Self::get_apy_registry(env.clone());
+        let previous = registry.get(pool_id.clone());
 
         let record = PoolApyRecord {
             apy_bps,
@@ -476,16 +671,28 @@ impl RebalanceEngine {
             updated_by: caller.clone(),
         };
 
-        let mut registry = Self::get_apy_registry(env.clone());
+        // A re-published observation still refreshes freshness: a feeder that
+        // keeps reporting a stable rate is not stuck. Issue #295 only adds a
+        // marker so an operator can tell a genuine change from a no-op.
         registry.set(pool_id.clone(), record);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "pool_apy"), &registry);
 
-        env.events().publish(
-            (Symbol::new(&env, "pool_apy_updated"), pool_id),
-            (caller, apy_bps),
-        );
+        match previous {
+            Some(prev) if prev.apy_bps == apy_bps => {
+                env.events().publish(
+                    (Symbol::new(&env, "pool_apy_unchanged"), pool_id),
+                    (caller, apy_bps, prev.updated_at),
+                );
+            }
+            _ => {
+                env.events().publish(
+                    (Symbol::new(&env, "pool_apy_updated"), pool_id),
+                    (caller, apy_bps),
+                );
+            }
+        }
     }
 
     /// Current APY of a pool from the oracle registry, in basis points.
@@ -537,6 +744,58 @@ impl RebalanceEngine {
         }
     }
 
+    /// Data-age snapshot for a pool's oracle feed (Issue #293).
+    ///
+    /// An unpublished feed reports `age_seconds == 0` and `fresh == false`, so
+    /// a monitor cannot mistake "no data" for "brand new data"; the `fresh`
+    /// flag is the authoritative signal in both cases.
+    pub fn get_feed_data_age(env: Env, pool_id: Address) -> FeedDataAge {
+        let max_age_seconds = Self::get_max_apy_age(env.clone());
+        match Self::get_apy_registry(env.clone()).get(pool_id) {
+            Some(record) => {
+                let age_seconds = env.ledger().timestamp().saturating_sub(record.updated_at);
+                FeedDataAge {
+                    updated_at: record.updated_at,
+                    age_seconds,
+                    max_age_seconds,
+                    fresh: age_seconds <= max_age_seconds,
+                }
+            }
+            None => FeedDataAge {
+                updated_at: 0,
+                age_seconds: 0,
+                max_age_seconds,
+                fresh: false,
+            },
+        }
+    }
+
+    /// Seconds since the pool's most recent observation, or `None` when the
+    /// feed has never been published (Issue #293).
+    pub fn get_feed_age_seconds(env: Env, pool_id: Address) -> Option<u64> {
+        Self::get_apy_registry(env.clone())
+            .get(pool_id)
+            .map(|record| env.ledger().timestamp().saturating_sub(record.updated_at))
+    }
+
+    /// Emit the current data age of a pool's feed as an event, so off-chain
+    /// monitors can record staleness without polling (Issue #293).
+    ///
+    /// Returns the same snapshot the event carries.
+    pub fn emit_feed_data_age(env: Env, pool_id: Address) -> FeedDataAge {
+        let age = Self::get_feed_data_age(env.clone(), pool_id.clone());
+        env.events().publish(
+            (Symbol::new(&env, "feed_data_age"), pool_id),
+            (
+                age.updated_at,
+                age.age_seconds,
+                age.max_age_seconds,
+                age.fresh,
+            ),
+        );
+        age
+    }
+
     /// Replace the set of addresses allowed to push APY observations (admin only).
     /// The admin can always update feeds and does not need to be listed.
     pub fn set_apy_keepers(env: Env, admin: Address, keepers: Vec<Address>) {
@@ -557,6 +816,238 @@ impl RebalanceEngine {
             .instance()
             .get(&Symbol::new(&env, "apy_keepers"))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ============ FEED VALIDATION TRACKING (Issue #289) ============
+
+    /// Number of rejected observations that excludes a pool from routing.
+    pub fn get_feed_failure_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "feed_failure_threshold"))
+            .unwrap_or(DEFAULT_FEED_FAILURE_THRESHOLD)
+    }
+
+    /// Set the number of rejected observations that excludes a pool (admin only).
+    ///
+    /// A threshold of `0` disables exclusion: validation failures are still
+    /// recorded and emitted, but they never remove a pool from routing.
+    pub fn set_feed_failure_threshold(env: Env, admin: Address, threshold: u32) {
+        Self::require_admin(&env, admin.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "feed_failure_threshold"), &threshold);
+
+        env.events().publish(
+            (Symbol::new(&env, "feed_failure_threshold_updated"),),
+            (admin, threshold),
+        );
+    }
+
+    /// Record that the latest observation for `pool_id` failed validation.
+    ///
+    /// Called by the off-chain validator after it rejects an observation
+    /// (Issue #289). The pool is excluded from routing once the number of
+    /// consecutive failures reaches the configured threshold. Returns the
+    /// updated record.
+    pub fn record_feed_validation_failure(env: Env, pool_id: Address) -> FeedValidationRecord {
+        Self::require_not_paused(&env);
+
+        let mut records = Self::get_feed_validation_map(env.clone());
+        let mut record = records
+            .get(pool_id.clone())
+            .unwrap_or(FeedValidationRecord {
+                failure_count: 0,
+                last_failure_at: 0,
+                excluded: false,
+            });
+
+        record.failure_count = record.failure_count.saturating_add(1);
+        record.last_failure_at = env.ledger().timestamp();
+
+        let threshold = Self::get_feed_failure_threshold(env.clone());
+        if threshold > 0 && record.failure_count >= threshold {
+            record.excluded = true;
+        }
+
+        records.set(pool_id.clone(), record.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "feed_validation"), &records);
+
+        env.events().publish(
+            (Symbol::new(&env, "feed_validation_failed"), pool_id),
+            (record.failure_count, record.excluded),
+        );
+
+        record
+    }
+
+    /// Clear a pool's validation-failure state after a valid observation is
+    /// accepted, re-enabling it for routing. Returns the record it replaced.
+    pub fn record_feed_validation_success(env: Env, pool_id: Address) -> FeedValidationRecord {
+        Self::require_not_paused(&env);
+
+        let mut records = Self::get_feed_validation_map(env.clone());
+        let previous = records
+            .get(pool_id.clone())
+            .unwrap_or(FeedValidationRecord {
+                failure_count: 0,
+                last_failure_at: 0,
+                excluded: false,
+            });
+
+        records.set(
+            pool_id.clone(),
+            FeedValidationRecord {
+                failure_count: 0,
+                last_failure_at: 0,
+                excluded: false,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "feed_validation"), &records);
+
+        env.events()
+            .publish((Symbol::new(&env, "feed_validation_cleared"),), (pool_id,));
+
+        previous
+    }
+
+    /// Validation-failure record for a pool, if any failure has been recorded.
+    pub fn get_feed_validation_record(env: Env, pool_id: Address) -> Option<FeedValidationRecord> {
+        Self::get_feed_validation_map(env).get(pool_id)
+    }
+
+    /// True when the pool's feed is currently excluded from routing (Issue #289).
+    pub fn is_feed_excluded(env: Env, pool_id: Address) -> bool {
+        match Self::get_feed_validation_map(env).get(pool_id) {
+            Some(record) => record.excluded,
+            None => false,
+        }
+    }
+
+    /// Internal: the feed validation map, keyed by pool address.
+    fn get_feed_validation_map(env: Env) -> Map<Address, FeedValidationRecord> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "feed_validation"))
+            .unwrap_or(Map::new(&env))
+    }
+
+    // ============ REBALANCE PACING (Issue #302) ============
+
+    /// Current rebalance pacing limits (zero when disabled).
+    pub fn get_rebalance_pacing(env: Env) -> RebalancePacing {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "rebalance_pacing"))
+            .unwrap_or(RebalancePacing {
+                max_amount_per_window: 0,
+                window_seconds: 0,
+            })
+    }
+
+    /// Set the per-pool rebalance budget (admin only).
+    ///
+    /// At most `max_amount_per_window` may leave one pool per window; a value of
+    /// zero disables pacing. Only successful rebalances consume the budget, so
+    /// a rejected or failed attempt does not lock the pool out for the window.
+    pub fn set_rebalance_pacing(
+        env: Env,
+        admin: Address,
+        max_amount_per_window: i128,
+        window_seconds: u64,
+    ) {
+        Self::require_admin(&env, admin.clone());
+        require!(
+            max_amount_per_window >= 0,
+            "max_amount_per_window must not be negative"
+        );
+        require!(
+            max_amount_per_window == 0 || window_seconds > 0,
+            "window_seconds must be positive when pacing is enabled"
+        );
+
+        env.storage().instance().set(
+            &Symbol::new(&env, "rebalance_pacing"),
+            &RebalancePacing {
+                max_amount_per_window,
+                window_seconds,
+            },
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "rebalance_pacing_updated"),),
+            (admin, max_amount_per_window, window_seconds),
+        );
+    }
+
+    /// Amount already moved out of `pool_id` in the current pacing window.
+    pub fn get_pool_window_usage(env: Env, pool_id: Address) -> PoolWindowUsage {
+        Self::get_pool_windows(env.clone())
+            .get(pool_id)
+            .unwrap_or(PoolWindowUsage {
+                window_active: false,
+                window_started_at: 0,
+                amount_moved: 0,
+            })
+    }
+
+    /// Internal: the per-pool pacing windows.
+    fn get_pool_windows(env: Env) -> Map<Address, PoolWindowUsage> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "rebalance_pool_windows"))
+            .unwrap_or(Map::new(&env))
+    }
+
+    /// Internal: whether `amount` may leave `pool_id` under the current window.
+    fn pacing_allows(env: &Env, pool_id: &Address, amount: i128) -> bool {
+        let pacing = Self::get_rebalance_pacing(env.clone());
+        if pacing.max_amount_per_window <= 0 || pacing.window_seconds == 0 {
+            return true;
+        }
+
+        let usage = Self::get_pool_window_usage(env.clone(), pool_id.clone());
+        let now = env.ledger().timestamp();
+        let used = if usage.window_active
+            && now.saturating_sub(usage.window_started_at) < pacing.window_seconds
+        {
+            usage.amount_moved
+        } else {
+            0
+        };
+
+        used + amount <= pacing.max_amount_per_window
+    }
+
+    /// Internal: charge a successful move against the pool's window.
+    fn record_pacing(env: &Env, pool_id: &Address, amount: i128) {
+        let pacing = Self::get_rebalance_pacing(env.clone());
+        if pacing.max_amount_per_window <= 0 || pacing.window_seconds == 0 {
+            return;
+        }
+
+        let now = env.ledger().timestamp();
+        let mut usage = Self::get_pool_window_usage(env.clone(), pool_id.clone());
+        if !usage.window_active
+            || now.saturating_sub(usage.window_started_at) >= pacing.window_seconds
+        {
+            usage = PoolWindowUsage {
+                window_active: true,
+                window_started_at: now,
+                amount_moved: 0,
+            };
+        }
+        usage.amount_moved += amount;
+
+        let mut windows = Self::get_pool_windows(env.clone());
+        windows.set(pool_id.clone(), usage);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "rebalance_pool_windows"), &windows);
     }
 
     /// Calculate impermanent loss for a pool using the standard formula
@@ -613,7 +1104,7 @@ impl RebalanceEngine {
             .storage()
             .instance()
             .get(&Symbol::new(env, "next_strategy_id"))
-            .unwrap_optimized();
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::NotInitialized));
         env.storage()
             .instance()
             .set(&Symbol::new(env, "next_strategy_id"), &(id + 1));
@@ -660,6 +1151,11 @@ impl RebalanceEngine {
         // Each candidate APY is resolved through the oracle first so a stale
         // snapshot in the strategy cannot hide (or invent) an opportunity.
         for mut candidate in strategy.allocations.iter() {
+            // Pools whose feed failed validation are not routing candidates
+            // (Issue #289).
+            if Self::is_feed_excluded(env.clone(), candidate.pool_id.clone()) {
+                continue;
+            }
             let candidate_apy = Self::resolve_apy(env, &candidate.pool_id, candidate.current_apy);
             if candidate.pool_id != current_allocation.pool_id
                 && candidate_apy > current_apy
@@ -723,7 +1219,7 @@ impl RebalanceEngine {
             .storage()
             .instance()
             .get(&Symbol::new(env, "history"))
-            .unwrap_optimized();
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::NotInitialized));
 
         history.push_back(entry);
 
@@ -744,16 +1240,17 @@ impl RebalanceEngine {
         }
     }
 
+    /// Admin address, or [`RebalanceError::NotInitialized`] before `initialize`.
     fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(RebalanceError::NotInitialized))
     }
 
     fn require_admin(env: &Env, caller: Address) {
         let admin = Self::get_admin(env.clone());
-        require!(caller == admin, "unauthorized: admin required");
+        require!(env, caller == admin, RebalanceError::Unauthorized);
     }
 
     /// Allow the admin or any configured APY keeper to push oracle data.
@@ -775,7 +1272,7 @@ impl RebalanceEngine {
             }
         }
 
-        panic!("unauthorized: admin or apy keeper required");
+        panic_with_error!(env, RebalanceError::Unauthorized);
     }
 
     /// Whether the engine is paused.
@@ -795,8 +1292,8 @@ impl RebalanceEngine {
     }
 
     fn require_not_paused(env: &Env) {
-        if Self::paused(env.clone()) {
-            panic!("rebalance engine is paused");
+        if Self::is_paused(env.clone()) {
+            env.panic_with_error(RebalanceError::Paused);
         }
     }
 
@@ -832,10 +1329,15 @@ impl RebalanceEngine {
     ) {
         Self::require_admin(&env, admin.clone());
 
+        // Preserve any configured minimum opportunity size (Issue #294); it has
+        // its own setter so this entrypoint's argument list stays unchanged.
+        let min_net_profit = Self::get_arbitrage_thresholds(env.clone()).min_net_profit;
+
         let thresholds = ArbitrageThresholds {
             min_apy_delta,
             max_il_tolerance,
             cooldown_period,
+            min_net_profit,
         };
 
         env.storage()
@@ -857,7 +1359,34 @@ impl RebalanceEngine {
                 min_apy_delta: 200u32,     // Default 2%
                 max_il_tolerance: 100u32,  // Default 1%
                 cooldown_period: 86400u64, // Default 24 hours
+                min_net_profit: 0i128,     // No minimum opportunity size
             })
+    }
+
+    /// Set the minimum estimated net profit an arbitrage opportunity must reach
+    /// before routing will consider it (admin only, Issue #294).
+    ///
+    /// `min_net_profit` is in the same units as
+    /// [`ArbitrageOpportunity::net_profit`]; `0` disables the filter.
+    pub fn set_min_net_profit(env: Env, admin: Address, min_net_profit: i128) {
+        Self::require_admin(&env, admin.clone());
+        require!(min_net_profit >= 0, "min_net_profit must not be negative");
+
+        let mut thresholds = Self::get_arbitrage_thresholds(env.clone());
+        thresholds.min_net_profit = min_net_profit;
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "arbitrage_thresholds"), &thresholds);
+
+        env.events().publish(
+            (Symbol::new(&env, "min_net_profit_updated"),),
+            (admin, min_net_profit),
+        );
+    }
+
+    /// Minimum estimated net profit required to route an opportunity.
+    pub fn get_min_net_profit(env: Env) -> i128 {
+        Self::get_arbitrage_thresholds(env).min_net_profit
     }
 
     /// Scan available pools and identify arbitrage opportunities
@@ -879,6 +1408,12 @@ impl RebalanceEngine {
 
         // Scan each available pool
         for pool in available_pools {
+            // A pool whose feed last failed validation must not influence
+            // routing (Issue #289).
+            if Self::is_feed_excluded(env.clone(), pool.pool_id.clone()) {
+                continue;
+            }
+
             // Same for the candidate pool: the registry wins over the snapshot.
             let pool_apy = Self::resolve_apy(&env, &pool.pool_id, pool.current_apy);
             let apy_delta = pool_apy.saturating_sub(vault_apy);
@@ -890,6 +1425,13 @@ impl RebalanceEngine {
                 // Estimated net profit = APY improvement - IL risk - slippage (simplified)
                 let net_profit_estimate =
                     ((apy_delta as i128 - pool.impermanent_loss_risk as i128) * 1000000) / 10000;
+
+                // Issue #294: drop opportunities too small to be worth
+                // executing. `min_net_profit == 0` disables the filter, so the
+                // default configuration keeps the previous behaviour.
+                if net_profit_estimate < thresholds.min_net_profit {
+                    continue;
+                }
 
                 let opportunity = ArbitrageOpportunity {
                     pool_id: pool.pool_id,
@@ -1002,6 +1544,13 @@ impl RebalanceEngine {
     ) -> bool {
         Self::require_not_paused(&env);
 
+        // A pool whose feed last failed validation must not be the destination
+        // of a rebalance, even if a stale opportunity payload still names it
+        // (Issue #289).
+        if Self::is_feed_excluded(env.clone(), opportunity.pool_id.clone()) {
+            return false;
+        }
+
         // Enforce cooldown per vault to prevent churn
         if Self::is_vault_in_cooldown(env.clone(), vault_id.clone()) {
             return false;
@@ -1012,6 +1561,13 @@ impl RebalanceEngine {
         let current_pool = VaultInfoClient::new(&env, &vault_id)
             .get_vault_info()
             .pool_id;
+
+        // Pace the exit leg: the amount withdrawn from the pool is `amount` of
+        // each token, i.e. `2 * amount` moved out of this pool.
+        let moved_amount = amount * 2;
+        if moved_amount > 0 && !Self::pacing_allows(&env, &current_pool, moved_amount) {
+            return false;
+        }
 
         // 1. Withdraw from current pool (atomic operation 1)
         let withdrawn = Self::perform_rebalance(
@@ -1024,6 +1580,7 @@ impl RebalanceEngine {
                 expected_apy_improvement: opportunity.apy_delta,
                 estimated_gas_cost: 30000,
                 timestamp: env.ledger().timestamp(),
+                min_output: amount,
             },
         );
 
@@ -1035,18 +1592,22 @@ impl RebalanceEngine {
         let deposited = Self::perform_rebalance(
             &env,
             &RebalanceProposal {
-                from_pool: current_pool,
+                from_pool: current_pool.clone(),
                 to_pool: opportunity.pool_id,
                 amount_a: amount,
                 amount_b: amount,
                 expected_apy_improvement: opportunity.apy_delta,
                 estimated_gas_cost: 30000,
                 timestamp: env.ledger().timestamp(),
+                min_output: amount,
             },
         );
 
         if deposited {
             // Update this vault's cooldown only; other vaults stay free to rebalance.
+            if moved_amount > 0 {
+                Self::record_pacing(&env, &current_pool, moved_amount);
+            }
             Self::record_vault_rebalance(&env, vault_id);
         }
 
@@ -1104,6 +1665,167 @@ impl RebalanceEngine {
     ) -> bool {
         !newest_success && !second_newest_success && !third_newest_success
     }
+
+    /// Breaker rule for arbitrary consecutive failure count and configurable threshold.
+    pub fn breaker_trips_for_threshold(consecutive_failures: u32, threshold: u32) -> bool {
+        threshold > 0 && consecutive_failures >= threshold
+    }
+
+    /// Filter rebalance history for a specific pool, returning up to `limit` recent entries.
+    pub fn get_pool_history(env: Env, pool_id: Address, limit: u32) -> Vec<RebalanceHistory> {
+        if limit == 0 {
+            return Vec::new(&env);
+        }
+        let history: Vec<RebalanceHistory> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "history"))
+            .unwrap_optimized();
+        let mut matching: Vec<RebalanceHistory> = Vec::new(&env);
+        let len = history.len();
+        for i in 0..len {
+            let idx = len - 1 - i;
+            let entry = history.get(idx).unwrap();
+            if entry.from_pool == pool_id || entry.to_pool == pool_id {
+                matching.push_back(entry);
+                if matching.len() >= limit {
+                    break;
+                }
+            }
+        }
+        matching
+    }
+
+    /// Set consecutive failure breaker threshold for a specific pool (admin only).
+    pub fn set_pool_breaker_threshold(env: Env, admin: Address, pool_id: Address, threshold: u32) {
+        Self::require_admin(&env, admin.clone());
+        require!(threshold > 0, "threshold must be greater than zero");
+        let mut thresholds: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "pool_breaker_thresh"))
+            .unwrap_or(Map::new(&env));
+        thresholds.set(pool_id.clone(), threshold);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "pool_breaker_thresh"), &thresholds);
+        env.events().publish(
+            (Symbol::new(&env, "pool_breaker_thresh_updated"), pool_id),
+            (admin, threshold),
+        );
+    }
+
+    /// Get consecutive failure breaker threshold for a pool (defaults to EMERGENCY_STOP_WINDOW).
+    pub fn get_pool_breaker_threshold(env: Env, pool_id: Address) -> u32 {
+        let thresholds: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "pool_breaker_thresh"))
+            .unwrap_or(Map::new(&env));
+        thresholds.get(pool_id).unwrap_or(EMERGENCY_STOP_WINDOW)
+    }
+
+    /// Whether the circuit breaker would trip for a given pool based on its history and configured threshold.
+    pub fn is_pool_emergency_stop_triggered(env: Env, pool_id: Address) -> bool {
+        let threshold = Self::get_pool_breaker_threshold(env.clone(), pool_id.clone());
+        let pool_entries = Self::get_pool_history(env, pool_id, threshold);
+        if pool_entries.len() < threshold {
+            return false;
+        }
+        for entry in pool_entries.iter() {
+            if entry.success {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check and pause engine if emergency stop is triggered for a specific pool.
+    pub fn check_pool_emergency_stop(env: Env, pool_id: Address) -> bool {
+        if !Self::is_pool_emergency_stop_triggered(env.clone(), pool_id) {
+            return false;
+        }
+        let admin = Self::get_admin(env.clone());
+        Self::pause(env, admin);
+        true
+    }
+
+    /// Set consecutive failure breaker threshold for a specific strategy (admin only).
+    pub fn set_strategy_breaker_threshold(env: Env, admin: Address, strategy_id: u32, threshold: u32) {
+        Self::require_admin(&env, admin.clone());
+        require!(threshold > 0, "threshold must be greater than zero");
+        let mut thresholds: Map<u32, u32> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "strat_breaker_thresh"))
+            .unwrap_or(Map::new(&env));
+        thresholds.set(strategy_id, threshold);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "strat_breaker_thresh"), &thresholds);
+        env.events().publish(
+            (Symbol::new(&env, "strat_breaker_thresh_updated"), strategy_id),
+            (admin, threshold),
+        );
+    }
+
+    /// Get consecutive failure breaker threshold for a strategy (defaults to EMERGENCY_STOP_WINDOW).
+    pub fn get_strategy_breaker_threshold(env: Env, strategy_id: u32) -> u32 {
+        let thresholds: Map<u32, u32> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "strat_breaker_thresh"))
+            .unwrap_or(Map::new(&env));
+        thresholds.get(strategy_id).unwrap_or(EMERGENCY_STOP_WINDOW)
+    }
+
+    /// Whether the circuit breaker would trip for a strategy based on its allocations and configured threshold.
+    pub fn is_strategy_breaker_tripped(env: Env, strategy_id: u32) -> bool {
+        let strategies = Self::get_strategies_map(env.clone());
+        let strategy = match strategies.get(strategy_id) {
+            Some(s) => s,
+            None => return false,
+        };
+        let threshold = Self::get_strategy_breaker_threshold(env.clone(), strategy_id);
+        let history: Vec<RebalanceHistory> = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "history"))
+            .unwrap_optimized();
+        let mut count: u32 = 0;
+        let len = history.len();
+        for i in 0..len {
+            let idx = len - 1 - i;
+            let entry = history.get(idx).unwrap();
+            let mut belongs = false;
+            for alloc in strategy.allocations.iter() {
+                if entry.from_pool == alloc.pool_id || entry.to_pool == alloc.pool_id {
+                    belongs = true;
+                    break;
+                }
+            }
+            if belongs {
+                if entry.success {
+                    return false;
+                }
+                count += 1;
+                if count >= threshold {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check and pause engine if emergency stop is triggered for a specific strategy.
+    pub fn check_strategy_emergency_stop(env: Env, strategy_id: u32) -> bool {
+        if !Self::is_strategy_breaker_tripped(env.clone(), strategy_id) {
+            return false;
+        }
+        let admin = Self::get_admin(env.clone());
+        Self::pause(env, admin);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1112,7 +1834,7 @@ mod tests {
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::testutils::Ledger as _;
-    use soroban_sdk::{Env, Symbol, Vec};
+    use soroban_sdk::{token::StellarAssetClient, Env, Symbol, Vec};
 
     fn il(env: &Env, current: i128, entry: i128) -> u32 {
         let pool = Address::generate(env);
@@ -1224,6 +1946,20 @@ mod tests {
             target_apy: target,
             current_apy: current,
             impermanent_loss_risk: 50,
+        }
+    }
+
+    /// Like [`allocation`], but with an explicit impermanent-loss risk so the
+    /// net-profit filter (Issue #294) can be exercised.
+    fn allocation_with_il(env: &Env, pool: &Address, il_risk: u32) -> PoolAllocation {
+        PoolAllocation {
+            pool_id: pool.clone(),
+            token_a: Address::generate(env),
+            token_b: Address::generate(env),
+            allocation_percent: 5000,
+            target_apy: 1000,
+            current_apy: 1000,
+            impermanent_loss_risk: il_risk,
         }
     }
 
@@ -1489,6 +2225,119 @@ mod tests {
         assert!(opportunity.recommended);
     }
 
+    // ==================== Typed error paths ====================
+
+    #[test]
+    fn test_create_strategy_reports_typed_errors() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = engine(&env);
+
+        // Empty allocations.
+        let empty: Vec<PoolAllocation> = Vec::new(&env);
+        let err = client
+            .try_create_strategy(
+                &admin,
+                &Symbol::new(&env, "Empty"),
+                &1,
+                &100,
+                &500,
+                &3600,
+                &empty,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::EmptyAllocations.into());
+
+        // A single allocation above 100%.
+        let pool = Address::generate(&env);
+        let over = Vec::from_array(&env, [allocation(&env, &pool, 10001, 500, 500)]);
+        let err = client
+            .try_create_strategy(
+                &admin,
+                &Symbol::new(&env, "Over"),
+                &1,
+                &100,
+                &500,
+                &3600,
+                &over,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::AllocationOutOfRange.into());
+
+        // Allocations that do not sum to 100%.
+        let short = Vec::from_array(
+            &env,
+            [
+                allocation(&env, &pool, 4000, 500, 500),
+                allocation(&env, &Address::generate(&env), 4000, 500, 500),
+            ],
+        );
+        let err = client
+            .try_create_strategy(
+                &admin,
+                &Symbol::new(&env, "Short"),
+                &1,
+                &100,
+                &500,
+                &3600,
+                &short,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::AllocationsMustSumTo100Percent.into());
+
+        // Risk level outside 1..=3.
+        let ok = Vec::from_array(&env, [allocation(&env, &pool, 10000, 500, 500)]);
+        let err = client
+            .try_create_strategy(
+                &admin,
+                &Symbol::new(&env, "BadRisk"),
+                &9,
+                &100,
+                &500,
+                &3600,
+                &ok,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::InvalidRiskLevel.into());
+    }
+
+    #[test]
+    fn test_get_strategy_unknown_id_is_typed() {
+        let env = Env::default();
+        let (client, _admin) = engine(&env);
+
+        let err = client.try_get_strategy(&7).unwrap_err().unwrap();
+        assert_eq!(err, RebalanceError::StrategyNotFound.into());
+    // ============ REBALANCE PACING TESTS (Issue #302) ============
+
+    /// Real token contracts for a rebalance leg: the engine pulls the `from`
+    /// leg out of the source pool and pays the `to` leg from its own balance.
+    fn funded_pools(env: &Env, engine_id: &Address, amount: i128) -> (Address, Address) {
+        let admin = Address::generate(env);
+        let from = env.register_stellar_asset_contract_v2(admin.clone());
+        let to = env.register_stellar_asset_contract_v2(admin);
+        StellarAssetClient::new(env, &from.address()).mint(&from.address(), &amount);
+        StellarAssetClient::new(env, &to.address()).mint(engine_id, &amount);
+        (from.address(), to.address())
+    }
+
+    fn pacing_proposal(from_pool: &Address, to_pool: &Address, amount: i128) -> RebalanceProposal {
+        RebalanceProposal {
+            from_pool: from_pool.clone(),
+            to_pool: to_pool.clone(),
+            amount_a: amount,
+            amount_b: amount,
+            expected_apy_improvement: 0,
+            estimated_gas_cost: 0,
+            timestamp: 0,
+            min_output: amount,
+        }
+    }
+
     // ============ CIRCUIT BREAKER TESTS (Issue #303) ============
 
     /// The breaker rule is a pure function: no engine, no storage, no ledger.
@@ -1515,7 +2364,88 @@ mod tests {
             expected_apy_improvement: 0,
             estimated_gas_cost: 0,
             timestamp: env.ledger().timestamp(),
+            min_output: 0,
         }
+    }
+
+    #[test]
+    fn test_rebalance_pacing_is_disabled_by_default() {
+        let env = Env::default();
+        let (client, _admin) = engine(&env);
+
+        let pacing = client.get_rebalance_pacing();
+        assert_eq!(pacing.max_amount_per_window, 0);
+        assert_eq!(pacing.window_seconds, 0);
+
+        let usage = client.get_pool_window_usage(&Address::generate(&env));
+        assert!(!usage.window_active);
+        assert_eq!(usage.amount_moved, 0);
+    }
+
+    #[test]
+    fn test_rebalance_pacing_bounds_moves_and_resets_per_window() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(RebalanceEngine, ());
+        let client = RebalanceEngineClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        let (from_pool, to_pool) = funded_pools(&env, &contract_id, 10_000);
+        let caller = Address::generate(&env);
+        client.set_rebalance_pacing(&admin, &500, &3_600);
+
+        // A single move larger than the whole window budget is rejected before
+        // any tokens move, and does not open a window.
+        let oversized = pacing_proposal(&from_pool, &to_pool, 300); // 600 moved
+        assert!(!client.execute_rebalance(&caller, &oversized));
+        assert!(!client.get_pool_window_usage(&from_pool).window_active);
+
+        // 400 moved fits the 500 budget and is recorded.
+        let allowed = pacing_proposal(&from_pool, &to_pool, 200);
+        assert!(client.execute_rebalance(&caller, &allowed));
+        assert_eq!(client.get_pool_window_usage(&from_pool).amount_moved, 400);
+
+        // The remaining 100 of budget cannot absorb another 400.
+        assert!(!client.execute_rebalance(&caller, &allowed));
+        assert_eq!(client.get_pool_window_usage(&from_pool).amount_moved, 400);
+
+        // Once the window has elapsed the budget resets.
+        env.ledger().set_timestamp(3_600);
+        assert!(client.execute_rebalance(&caller, &allowed));
+        assert_eq!(client.get_pool_window_usage(&from_pool).amount_moved, 400);
+    }
+
+    #[test]
+    fn test_set_rebalance_pacing_is_admin_only() {
+        let env = Env::default();
+        let (client, _admin) = engine(&env);
+        let stranger = Address::generate(&env);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_rebalance_pacing(&stranger, &100, &3_600);
+        }));
+
+        assert!(result.is_err(), "pacing limits must be admin only");
+        assert_eq!(client.get_rebalance_pacing().max_amount_per_window, 0);
+    }
+
+    #[test]
+    fn test_set_rebalance_pacing_validates_limits() {
+        let env = Env::default();
+        let (client, admin) = engine(&env);
+
+        // A negative budget is not meaningful.
+        let negative = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_rebalance_pacing(&admin, &-1, &3_600);
+        }));
+        assert!(negative.is_err());
+
+        // An enabled budget needs a window to apply over.
+        let no_window = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.set_rebalance_pacing(&admin, &100, &0);
+        }));
+        assert!(no_window.is_err());
     }
 
     #[test]
@@ -1527,6 +2457,31 @@ mod tests {
         assert!(!client.is_emergency_stop_triggered());
         assert!(!client.check_emergency_stop());
         assert!(!client.is_paused(), "a new engine must not stop itself");
+    }
+
+    #[test]
+    fn test_non_admin_pause_is_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, _admin) = engine(&env);
+
+        let stranger = Address::generate(&env);
+        let err = client.try_pause(&stranger).unwrap_err().unwrap();
+        assert_eq!(err, RebalanceError::Unauthorized.into());
+    }
+
+    #[test]
+    fn test_published_apy_above_maximum_is_typed() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = engine(&env);
+
+        let pool = Address::generate(&env);
+        let err = client
+            .try_update_pool_apy(&admin, &pool, &(MAX_APY_BPS + 1))
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::ApyOutOfRange.into());
     }
 
     #[test]
@@ -1573,5 +2528,111 @@ mod tests {
         // needing a token-funded successful rebalance here.
         assert!(!RebalanceEngine::breaker_trips(true, false, false));
         assert!(RebalanceEngine::breaker_trips(false, false, false));
+    }
+
+    #[test]
+    fn test_configurable_pool_breaker_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = engine(&env);
+        let pool_a = Address::generate(&env);
+        let pool_b = Address::generate(&env);
+        let pool_c = Address::generate(&env);
+        let caller = Address::generate(&env);
+
+        // Pool A is sensitive: trips after 2 failures
+        client.set_pool_breaker_threshold(&admin, &pool_a, &2);
+        // Pool B is relaxed: trips after 4 failures
+        client.set_pool_breaker_threshold(&admin, &pool_b, &4);
+
+        assert_eq!(client.get_pool_breaker_threshold(&pool_a), 2);
+        assert_eq!(client.get_pool_breaker_threshold(&pool_b), 4);
+        assert_eq!(client.get_pool_breaker_threshold(&pool_c), EMERGENCY_STOP_WINDOW);
+
+        // Record 2 failures for Pool A
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_a));
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_a));
+
+        // Pool A triggers breaker
+        assert!(client.is_pool_emergency_stop_triggered(&pool_a));
+
+        // Record 2 failures for Pool B
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_b));
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_b));
+
+        // Pool B does NOT trigger breaker yet (threshold is 4)
+        assert!(!client.is_pool_emergency_stop_triggered(&pool_b));
+
+        // Record 2 more failures for Pool B (total 4)
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_b));
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_b));
+
+        // Pool B now triggers breaker
+        assert!(client.is_pool_emergency_stop_triggered(&pool_b));
+
+        // Check emergency stop pauses contract when triggered
+        assert!(!client.is_paused());
+        assert!(client.check_pool_emergency_stop(&pool_a));
+        assert!(client.is_paused());
+    }
+
+    #[test]
+    fn test_configurable_strategy_breaker_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (client, admin) = engine(&env);
+        let pool_a = Address::generate(&env);
+        let pool_b = Address::generate(&env);
+        let caller = Address::generate(&env);
+
+        let alloc_1 = Vec::from_array(&env, [allocation(&env, &pool_a, 10000, 500, 500)]);
+        let s1 = client.create_strategy(
+            &admin,
+            &Symbol::new(&env, "Aggressive"),
+            &3,
+            &100,
+            &500,
+            &3600,
+            &alloc_1,
+        );
+
+        let alloc_2 = Vec::from_array(&env, [allocation(&env, &pool_b, 10000, 500, 500)]);
+        let s2 = client.create_strategy(
+            &admin,
+            &Symbol::new(&env, "Conservative"),
+            &1,
+            &100,
+            &500,
+            &3600,
+            &alloc_2,
+        );
+
+        // s1 sensitive: trips after 1 failure
+        client.set_strategy_breaker_threshold(&admin, &s1, &1);
+        // s2 relaxed: trips after 3 failures
+        client.set_strategy_breaker_threshold(&admin, &s2, &3);
+
+        assert_eq!(client.get_strategy_breaker_threshold(&s1), 1);
+        assert_eq!(client.get_strategy_breaker_threshold(&s2), 3);
+
+        // 1 failure on pool_a (belongs to s1)
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_a));
+        assert!(client.is_strategy_breaker_tripped(&s1));
+        assert!(!client.is_strategy_breaker_tripped(&s2));
+
+        // 1 failure on pool_b (belongs to s2)
+        client.execute_rebalance(&caller, &failed_proposal(&env, &pool_b));
+        // s2 needs 3, so not triggered yet
+        assert!(!client.is_strategy_breaker_tripped(&s2));
+    }
+
+    #[test]
+    fn test_breaker_trips_for_threshold_pure_rule() {
+        assert!(RebalanceEngine::breaker_trips_for_threshold(3, 3));
+        assert!(RebalanceEngine::breaker_trips_for_threshold(4, 3));
+        assert!(!RebalanceEngine::breaker_trips_for_threshold(2, 3));
+        assert!(RebalanceEngine::breaker_trips_for_threshold(1, 1));
+        assert!(!RebalanceEngine::breaker_trips_for_threshold(0, 1));
+        assert!(!RebalanceEngine::breaker_trips_for_threshold(5, 0));
     }
 }

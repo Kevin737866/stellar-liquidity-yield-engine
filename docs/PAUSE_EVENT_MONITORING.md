@@ -14,7 +14,7 @@ Pause events now include structured reason categories that help monitoring syste
 ## Pause Reason Categories
 
 | Reason | Description | Typical Use Case |
-|--------|-------------|------------------|
+|--------|-------------|----------------|
 | `security` | Security concern detected (exploit, suspicious activity) | Critical alerts, immediate investigation |
 | `circuit_breaker` | Circuit breaker triggered (high volatility, large slippage) | High-priority alerts, risk monitoring |
 | `slippage_protection` | Price deviation exceeded threshold | Medium-priority alerts, market conditions |
@@ -246,6 +246,53 @@ function handlePauseEvent(event: { reason?: PauseReason; reasonDetails?: string 
    - Post-incident analysis
    - Protocol governance
 
+## Emergency Audit History
+
+Emergency interventions are recorded in an append-only audit history. Once an emergency event is recorded, it cannot be edited, rewritten, or reordered. This preserves an immutable record of emergency interventions and prevents cover-ups.
+
+### Invariants
+
+- **Append-only**: New emergency events are added to the end of the history. Existing entries are never mutated or removed.
+- **Order preserved**: Entries remain in the sequence they were recorded; the history is not sorted or reordered after the fact.
+- **Non-editable**: There is no public API to modify or delete a recorded emergency event.
+- **Append only via recording**: Emergency events enter the history only through the emergency action path, not through general history mutation methods.
+
+### Consuming the Audit History
+
+```typescript
+import { VaultClient } from '@stellar-liquidity-yield-engine/sdk';
+
+const vaultClient = new VaultClient(vaultAddress, networkConfig);
+
+// Read the append-only emergency audit history
+const history = await vaultClient.getEmergencyAuditHistory();
+
+for (const entry of history) {
+  console.log(`[${entry.sequence}] ${new Date(entry.timestamp * 1000).toISOString()} ${entry.action}`);
+  console.log(`Reason: ${entry.reason || 'not provided'}`);
+  console.log(`Details: ${entry.details || 'not provided'}`);
+}
+```
+
+### Verifying Integrity
+
+To verify that the history has not been tampered with, check that sequence numbers are strictly increasing and that timestamps are non-decreasing. Any gap, duplicate, or out-of-order entry indicates an integrity violation.
+
+```typescript
+function assertAppendOnly(history: Array<{ sequence: number; timestamp: number }>) {
+  for (let i = 1; i < history.length; i++) {
+    const prev = history[i - 1];
+    const curr = history[i];
+    if (curr.sequence !== prev.sequence + 1) {
+      throw new Error(`Sequence gap at index ${i}`);
+    }
+    if (curr.timestamp < prev.timestamp) {
+      throw new Error(`Timestamp regression at index ${i}`);
+    }
+  }
+}
+```
+
 ## Event Schema
 
 ### VaultEvent
@@ -279,6 +326,19 @@ interface RebalanceEvent {
 }
 ```
 
+### EmergencyAuditEntry
+
+```typescript
+interface EmergencyAuditEntry {
+  sequence: number; // Strictly increasing, assigned on append
+  timestamp: number; // Unix timestamp in seconds
+  action: string; // Emergency action taken
+  reason?: PauseReason;
+  details?: string;
+  actor?: Address; // Address that initiated the action
+}
+```
+
 ## Testing Event Consumption
 
 See `sdk/src/pauseEvents.test.ts` for comprehensive tests covering:
@@ -288,7 +348,15 @@ See `sdk/src/pauseEvents.test.ts` for comprehensive tests covering:
 - Event listener registration
 - Type validation
 
+See `sdk?src/emergencyAuditHistory.test.ts` for audit-history integrity tests covering:
+- Append-only behavior: existing entries are unchanged after new emergency events
+- Sequence numbers remain strictly increasing and in recorded order
+- Timestamps are non-decreasing
+- No public mutation path exists for recorded entries
+
 Run tests with:
 ```bash
 npm test -- pauseEvents.test.ts
+npm test -- emergencyAuditHistory.test.ts
+
 ```

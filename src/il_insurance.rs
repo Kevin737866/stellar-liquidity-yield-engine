@@ -1,7 +1,38 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token::TokenClient, unwrap::UnwrapOptimized, Address,
-    Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token::TokenClient,
+    Address, Env, Symbol,
 };
+
+/// Typed failures of the IL insurance contract.
+///
+/// Each anticipated rejection - an invalid coverage period, a claim that is
+/// already paid, a caller who is not the policy owner - fails with its own
+/// code, so the SDK client surfaces a stable error value instead of a panic
+/// string that has to be parsed.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InsuranceError {
+    /// The caller is not the stored admin.
+    Unauthorized = 1,
+    /// The registry has not been initialized.
+    NotInitialized = 2,
+    /// No policy exists with the requested id.
+    PolicyNotFound = 3,
+    /// The coverage period is not one of the supported durations.
+    InvalidCoveragePeriod = 4,
+    /// The requested coverage amount is not positive.
+    CoverageAmountMustBePositive = 5,
+    /// The computed premium is not positive.
+    PremiumMustBePositive = 6,
+    /// The policy has already been claimed.
+    PolicyAlreadyClaimed = 7,
+    /// The caller does not own the policy.
+    NotPolicyOwner = 8,
+    /// The policy has not expired yet.
+    PolicyNotExpired = 9,
+    /// The stored start price ratio is not positive.
+    InvalidStartPriceRatio = 10,
+}
 
 /// Duration options for coverage period in seconds
 pub const COVERAGE_7D: u64 = 7 * 24 * 3600;
@@ -110,9 +141,9 @@ impl ILInsurance {
             .storage()
             .instance()
             .get(&Symbol::new(env, "admin"))
-            .unwrap();
+            .unwrap_or_else(|| env.panic_with_error(InsuranceError::NotInitialized));
         if caller != admin {
-            panic!("unauthorized: admin required");
+            env.panic_with_error(InsuranceError::Unauthorized);
         }
     }
 
@@ -191,10 +222,10 @@ impl ILInsurance {
             && coverage_period != COVERAGE_30D
             && coverage_period != COVERAGE_90D
         {
-            panic!("invalid coverage period");
+            panic_with_error!(&env, InsuranceError::InvalidCoveragePeriod);
         }
         if coverage_amount <= 0 {
-            panic!("coverage amount must be positive");
+            panic_with_error!(&env, InsuranceError::CoverageAmountMustBePositive);
         }
 
         let quote = Self::calculate_premium(
@@ -206,7 +237,7 @@ impl ILInsurance {
         );
         let premium_amount = quote.premium_amount;
         if premium_amount <= 0 {
-            panic!("premium must be positive");
+            panic_with_error!(&env, InsuranceError::PremiumMustBePositive);
         }
 
         // Transfer premium from buyer to reserve
@@ -265,19 +296,19 @@ impl ILInsurance {
 
         let mut policy = Self::get_policy(env.clone(), policy_id);
         if policy.claimed {
-            panic!("policy already claimed");
+            panic_with_error!(&env, InsuranceError::PolicyAlreadyClaimed);
         }
         if policy.owner != claimant {
-            panic!("not policy owner");
+            panic_with_error!(&env, InsuranceError::NotPolicyOwner);
         }
         if env.ledger().timestamp() < policy.expiry {
-            panic!("policy not yet expired");
+            panic_with_error!(&env, InsuranceError::PolicyNotExpired);
         }
 
         let start = policy.start_price_ratio;
         let current = current_price_ratio_scaled;
         if start <= 0 {
-            panic!("invalid start price ratio");
+            panic_with_error!(&env, InsuranceError::InvalidStartPriceRatio);
         }
 
         // price_ratio_1e6 = (current/start)^2 * 1e6
@@ -347,7 +378,7 @@ impl ILInsurance {
         env.storage()
             .persistent()
             .get(&policy_id)
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(InsuranceError::PolicyNotFound))
     }
 
     /// Get the current collateralization ratio in basis points (15000 = 150%)
@@ -492,5 +523,76 @@ mod test {
         // sqrt_scaled(4000) = sqrt(4000) ≈ 63
         let result2 = ILInsurance::sqrt_scaled(4000);
         assert!((63..=64).contains(&result2));
+    }
+    // ==================== Typed error paths ====================
+
+    fn insured(env: &Env) -> (Address, Address, ILInsuranceClient) {
+        let admin = Address::generate(env);
+        let reserve_token = Address::generate(env);
+        let contract_id = env.register_contract(None, ILInsurance);
+        let client = ILInsuranceClient::new(env, &contract_id);
+        client.initialize(&admin, &reserve_token);
+        (admin, reserve_token, client)
+    }
+
+    #[test]
+    fn test_purchase_insurance_reports_typed_errors() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, reserve_token, client) = insured(&env);
+        let buyer = Address::generate(&env);
+
+        // An unsupported coverage period is rejected before any transfer.
+        let err = client
+            .try_purchase_insurance(
+                &buyer,
+                &1_000i128,
+                &123u64,
+                &1_000_000i128,
+                &8000,
+                &5000,
+                &false,
+                &reserve_token,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, InsuranceError::InvalidCoveragePeriod.into());
+
+        // A non-positive coverage amount is its own code.
+        let err = client
+            .try_purchase_insurance(
+                &buyer,
+                &0i128,
+                &COVERAGE_30D,
+                &1_000_000i128,
+                &8000,
+                &5000,
+                &false,
+                &reserve_token,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, InsuranceError::CoverageAmountMustBePositive.into());
+    }
+
+    #[test]
+    fn test_get_unknown_policy_is_typed() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, _reserve_token, client) = insured(&env);
+
+        let err = client.try_get_policy(&7).unwrap_err().unwrap();
+        assert_eq!(err, InsuranceError::PolicyNotFound.into());
+    }
+
+    #[test]
+    fn test_migrate_from_non_admin_is_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, _reserve_token, client) = insured(&env);
+
+        let stranger = Address::generate(&env);
+        let err = client.try_migrate(&stranger).unwrap_err().unwrap();
+        assert_eq!(err, InsuranceError::Unauthorized.into());
     }
 }

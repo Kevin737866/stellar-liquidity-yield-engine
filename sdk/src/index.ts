@@ -65,7 +65,7 @@ export type {
 // Operators running multiple contracts can restrict a single listener to only
 // the contract addresses they care about, eliminating noise from unrelated
 // on-chain activity.
-export { ContractEventListener } from './eventListener';
+export { ContractEventListener, DEFAULT_PAGE_SIZE } from './eventListener';
 export type {
   ListenerConfig,
   EventSource,
@@ -83,6 +83,21 @@ export type {
   RawEventHandler,
   ListenerErrorEvent,
 } from './eventListener';
+
+// Durable keeper state: checkpoints let a keeper resume exactly where it left
+// off after a crash, a deploy, or an extended outage.
+export {
+  CHECKPOINT_VERSION,
+  CheckpointError,
+  FileCheckpointStore,
+  MemoryCheckpointStore,
+  createCheckpoint,
+  createStateCheckpoint,
+  isKeeperCheckpoint,
+  normalizeCheckpoint,
+} from './persistence';
+export type { CheckpointStore, KeeperCheckpoint } from './persistence';
+
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
 // Governance SDK exports

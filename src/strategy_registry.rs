@@ -3,8 +3,38 @@
 //! See `docs/SECURITY_CHECKLIST.md` for the pause / access-control /
 //! fee-routing / reentrancy assumptions this contract is verified against.
 use soroban_sdk::{
-    contract, contractimpl, contracttype, unwrap::UnwrapOptimized, Address, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map,
+    Symbol, Vec,
 };
+
+/// Typed failures of the strategy registry.
+///
+/// Invalid or unauthorized registry operations fail with one of these codes so
+/// a caller can react to the specific case instead of matching panic text.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RegistryError {
+    /// The caller is not the stored admin.
+    Unauthorized = 1,
+    /// The registry is paused and refuses state-changing operations.
+    Paused = 2,
+    /// The registry has not been initialized.
+    NotInitialized = 3,
+    /// No strategy exists with the requested id.
+    StrategyNotFound = 4,
+    /// The strategy parameters entry is missing.
+    StrategyParametersNotFound = 5,
+    /// `min_investment` must be positive.
+    MinInvestmentMustBePositive = 6,
+    /// `max_investment` must be at least `min_investment`.
+    MaxInvestmentBelowMinimum = 7,
+    /// `risk_level` must be 1 (low), 2 (medium) or 3 (high).
+    InvalidRiskLevel = 8,
+    /// The strategy id is already taken.
+    StrategyIdCollision = 9,
+    /// The caller neither created the strategy nor is the admin.
+    NotStrategyCreator = 10,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,10 +170,15 @@ impl StrategyRegistry {
         parameters: StrategyParameters,
     ) -> u32 {
         Self::require_not_paused(&env);
-        require!(min_investment > 0, "min investment must be positive");
         require!(
+            env,
+            min_investment > 0,
+            RegistryError::MinInvestmentMustBePositive
+        );
+        require!(
+            env,
             max_investment >= min_investment,
-            "max investment must be greater than or equal to min investment"
+            RegistryError::MaxInvestmentBelowMinimum
         );
 
         let strategy_id = Self::get_next_strategy_id(&env);
@@ -167,10 +202,15 @@ impl StrategyRegistry {
         // O(1) insert into Map keyed by strategy_id
         let mut strategies = Self::get_strategies_map(&env);
         // Validate risk_level bounds (1-3) per issue #118
-        require!((1..=3).contains(&risk_level), "risk_level must be 1-3");
         require!(
+            env,
+            (1..=3).contains(&risk_level),
+            RegistryError::InvalidRiskLevel
+        );
+        require!(
+            env,
             strategies.get(strategy_id).is_none(),
-            "strategy id collision"
+            RegistryError::StrategyIdCollision
         );
         strategies.set(strategy_id, strategy.clone());
         env.storage()
@@ -200,7 +240,7 @@ impl StrategyRegistry {
         let mut strategies = Self::get_strategies_map(&env);
         let mut strategy = strategies
             .get(strategy_id)
-            .unwrap_or_else(|| panic!("strategy not found"));
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyNotFound));
         strategy.is_active = true;
         strategy.updated_at = env.ledger().timestamp();
         strategies.set(strategy_id, strategy);
@@ -240,20 +280,29 @@ impl StrategyRegistry {
         parameters: StrategyParameters,
     ) {
         Self::require_not_paused(&env);
-        require!(min_investment > 0, "min investment must be positive");
         require!(
+            env,
+            min_investment > 0,
+            RegistryError::MinInvestmentMustBePositive
+        );
+        require!(
+            env,
             max_investment >= min_investment,
-            "max investment must be greater than or equal to min investment"
+            RegistryError::MaxInvestmentBelowMinimum
         );
 
         let mut strategies = Self::get_strategies_map(&env);
         let strategy = strategies
             .get(strategy_id)
-            .unwrap_or_else(|| panic!("strategy not found"));
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyNotFound));
         if strategy.creator != creator {
-            panic!("unauthorized: not strategy creator");
+            panic_with_error!(&env, RegistryError::NotStrategyCreator);
         }
-        require!((1..=3).contains(&risk_level), "risk_level must be 1-3");
+        require!(
+            env,
+            (1..=3).contains(&risk_level),
+            RegistryError::InvalidRiskLevel
+        );
 
         let updated_strategy = YieldStrategy {
             strategy_id,
@@ -302,7 +351,7 @@ impl StrategyRegistry {
         let mut strategies = Self::get_strategies_map(&env);
         let mut strategy = strategies
             .get(strategy_id)
-            .unwrap_or_else(|| panic!("strategy not found"));
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyNotFound));
 
         let performance_record = PerformanceRecord {
             timestamp: env.ledger().timestamp(),
@@ -361,7 +410,7 @@ impl StrategyRegistry {
         let mut strategies = Self::get_strategies_map(&env);
         let mut strategy = strategies
             .get(strategy_id)
-            .unwrap_or_else(|| panic!("strategy not found"));
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyNotFound));
         strategy.is_active = false;
         strategy.updated_at = env.ledger().timestamp();
 
@@ -420,7 +469,7 @@ impl StrategyRegistry {
     pub fn get_strategy(env: Env, strategy_id: u32) -> YieldStrategy {
         Self::get_strategies_map(&env)
             .get(strategy_id)
-            .unwrap_or_else(|| panic!("strategy not found"))
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyNotFound))
     }
 
     // --- Pagination helpers (Issue #107) ---
@@ -478,7 +527,7 @@ impl StrategyRegistry {
         let strategy_params = Self::get_strategy_params(&env);
         strategy_params
             .get(strategy_id)
-            .unwrap_or_else(|| panic!("strategy parameters not found"))
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyParametersNotFound))
     }
 
     /// Get strategy performance history (most recent `limit` entries)
@@ -568,7 +617,7 @@ impl StrategyRegistry {
             .storage()
             .instance()
             .get(&Symbol::new(env, "next_strategy_id"))
-            .unwrap_optimized();
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::NotInitialized));
         env.storage()
             .instance()
             .set(&Symbol::new(env, "next_strategy_id"), &(id + 1));
@@ -579,7 +628,7 @@ impl StrategyRegistry {
         env.storage()
             .instance()
             .get(&Symbol::new(env, "strategies"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::NotInitialized))
     }
 
     fn get_strategies(env: &Env) -> Vec<YieldStrategy> {
@@ -595,14 +644,14 @@ impl StrategyRegistry {
         env.storage()
             .instance()
             .get(&Symbol::new(env, "strategy_params"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::NotInitialized))
     }
 
     fn get_approvals(env: &Env) -> Vec<StrategyApproval> {
         env.storage()
             .instance()
             .get(&Symbol::new(env, "approvals"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::NotInitialized))
     }
 
     fn add_approval(env: &Env, approval: StrategyApproval) {
@@ -630,14 +679,14 @@ impl StrategyRegistry {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::NotInitialized))
     }
 
     fn require_admin(env: &Env, caller: Address) {
         let admin = Self::get_admin(env.clone());
         caller.require_auth();
         if caller != admin {
-            panic!("unauthorized: admin required");
+            panic_with_error!(env, RegistryError::Unauthorized);
         }
     }
 
@@ -650,7 +699,7 @@ impl StrategyRegistry {
 
     fn require_not_paused(env: &Env) {
         if Self::is_paused(env.clone()) {
-            panic!("strategy registry is paused");
+            env.panic_with_error(RegistryError::Paused);
         }
     }
 
@@ -688,8 +737,9 @@ mod tests {
 
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Env, Symbol, Vec};
+    use soroban_sdk::{Env, Symbol, TryFromVal, Vec};
     use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::{Env, Symbol, TryFromVal, Vec};
 
     fn fee_structure() -> FeeStructure {
         FeeStructure {
@@ -1086,6 +1136,84 @@ mod tests {
         }
     }
 
+    // ==================== Typed error paths ====================
+
+    #[test]
+    fn test_register_strategy_reports_typed_errors() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, creator, client) = setup(&env);
+
+        // min_investment of 0 is rejected with its own code.
+        let err = client
+            .try_register_strategy(
+                &creator,
+                &Symbol::new(&env, "Tiny"),
+                &Symbol::new(&env, "Zero_min_investment"),
+                &2,
+                &0i128,
+                &500_000i128,
+                &fee_structure(),
+                &strategy_parameters(&env),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RegistryError::MinInvestmentMustBePositive.into());
+
+        // max_investment below min_investment is a distinct code.
+        let err = client
+            .try_register_strategy(
+                &creator,
+                &Symbol::new(&env, "Inverted"),
+                &Symbol::new(&env, "Max_below_min"),
+                &2,
+                &1_000i128,
+                &500i128,
+                &fee_structure(),
+                &strategy_parameters(&env),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RegistryError::MaxInvestmentBelowMinimum.into());
+
+        // A risk level outside 1..=3 is a distinct code.
+        let err = client
+            .try_register_strategy(
+                &creator,
+                &Symbol::new(&env, "Risky"),
+                &Symbol::new(&env, "Risk_level_zero"),
+                &0,
+                &1_000i128,
+                &500_000i128,
+                &fee_structure(),
+                &strategy_parameters(&env),
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RegistryError::InvalidRiskLevel.into());
+    }
+
+    #[test]
+    fn test_get_strategy_unknown_id_is_typed() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, _creator, client) = setup(&env);
+
+        let err = client.try_get_strategy(&42).unwrap_err().unwrap();
+        assert_eq!(err, RegistryError::StrategyNotFound.into());
+    }
+
+    #[test]
+    fn test_non_admin_pause_is_typed_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (_admin, _creator, client) = setup(&env);
+
+        let stranger = Address::generate(&env);
+        let err = client.try_pause(&stranger).unwrap_err().unwrap();
+        assert_eq!(err, RegistryError::Unauthorized.into());
+    }
+
     // --- Security checklist verification (docs/SECURITY_CHECKLIST.md) ---
 
     #[test]
@@ -1166,6 +1294,16 @@ mod tests {
         assert!(client.is_paused_view());
     }
 
+    /// Topic of the only event published by the most recent invocation.
+    ///
+    /// `env.events().all()` only exposes the events of the latest contract
+    /// call, so each event has to be inspected before the next call is made.
+    fn last_event_topic(env: &Env) -> Symbol {
+        let events = env.events().all();
+        let (_contract, topics, _data) = events.last().unwrap();
+        Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap()
+    }
+
     #[test]
     fn test_pause_emits_audit_events() {
         let env = Env::default();
@@ -1173,19 +1311,28 @@ mod tests {
         let (admin, _creator, client) = setup(&env);
 
         client.pause(&admin);
-        client.unpause(&admin);
-
-        let events = env.events().all();
+        let pause_events = env.events().all();
         let mut saw_pause = false;
-        let mut saw_unpause = false;
-        for (topics, _data) in events.iter() {
-            let first = topics.get(0).unwrap();
-            let sym: Symbol = first.try_into().unwrap();
-            if sym == Symbol::new(&env, "registry_paused") {
-                saw_pause = true;
+        for (_contract_id, topics, _data) in pause_events.iter() {
+            if let Some(first) = topics.get(0) {
+                if let Ok(sym) = Symbol::try_from_val(&env, &first) {
+                    if sym == Symbol::new(&env, "registry_paused") {
+                        saw_pause = true;
+                    }
+                }
             }
-            if sym == Symbol::new(&env, "registry_unpaused") {
-                saw_unpause = true;
+        }
+
+        client.unpause(&admin);
+        let unpause_events = env.events().all();
+        let mut saw_unpause = false;
+        for (_contract_id, topics, _data) in unpause_events.iter() {
+            if let Some(first) = topics.get(0) {
+                if let Ok(sym) = Symbol::try_from_val(&env, &first) {
+                    if sym == Symbol::new(&env, "registry_unpaused") {
+                        saw_unpause = true;
+                    }
+                }
             }
         }
         assert!(saw_pause, "pause must emit registry_paused event");

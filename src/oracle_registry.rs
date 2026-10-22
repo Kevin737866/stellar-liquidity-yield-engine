@@ -485,7 +485,14 @@ mod tests {
         let pool = Address::generate(&env);
 
         let feeders = soroban_sdk::vec![&env, feeder_a.clone()];
-        client.register_feed(&admin, &pool, &feeders, &DEFAULT_FRESHNESS_SECS, &pool, &false);
+        client.register_feed(
+            &admin,
+            &pool,
+            &feeders,
+            &DEFAULT_FRESHNESS_SECS,
+            &pool,
+            &false,
+        );
 
         // feeder_b not yet authorised.
         set_timestamp(&env, 1000);
@@ -523,7 +530,14 @@ mod tests {
         let pool = Address::generate(&env);
 
         let feeders = soroban_sdk::vec![&env, feeder_a.clone(), feeder_b.clone()];
-        client.register_feed(&admin, &pool, &feeders, &DEFAULT_FRESHNESS_SECS, &pool, &false);
+        client.register_feed(
+            &admin,
+            &pool,
+            &feeders,
+            &DEFAULT_FRESHNESS_SECS,
+            &pool,
+            &false,
+        );
 
         // Remove feeder_a.
         client.remove_feeder(&admin, &pool, &feeder_a);
@@ -556,7 +570,14 @@ mod tests {
         let pool = Address::generate(&env);
         let feeders = soroban_sdk::vec![&env, feeder.clone()];
 
-        client.register_feed(&admin, &pool, &feeders, &DEFAULT_FRESHNESS_SECS, &pool, &false);
+        client.register_feed(
+            &admin,
+            &pool,
+            &feeders,
+            &DEFAULT_FRESHNESS_SECS,
+            &pool,
+            &false,
+        );
 
         let err = client
             .try_add_feeder(&admin, &pool, &feeder)
@@ -580,7 +601,14 @@ mod tests {
         let pool = Address::generate(&env);
         let feeders = soroban_sdk::vec![&env, feeder.clone()];
 
-        client.register_feed(&admin, &pool, &feeders, &DEFAULT_FRESHNESS_SECS, &pool, &false);
+        client.register_feed(
+            &admin,
+            &pool,
+            &feeders,
+            &DEFAULT_FRESHNESS_SECS,
+            &pool,
+            &false,
+        );
 
         let err = client
             .try_remove_feeder(&admin, &pool, &stranger)
@@ -604,7 +632,14 @@ mod tests {
         let pool = Address::generate(&env);
         let feeders = soroban_sdk::vec![&env, feeder_a.clone(), feeder_b.clone()];
 
-        client.register_feed(&admin, &pool, &feeders, &DEFAULT_FRESHNESS_SECS, &pool, &false);
+        client.register_feed(
+            &admin,
+            &pool,
+            &feeders,
+            &DEFAULT_FRESHNESS_SECS,
+            &pool,
+            &false,
+        );
 
         // Alternate between feeders to fill the window beyond MAX_OBSERVATIONS.
         for i in 0..(MAX_OBSERVATIONS + 2) {
@@ -635,8 +670,22 @@ mod tests {
         let pool_strict = Address::generate(&env);
         let feeders = soroban_sdk::vec![&env, feeder.clone()];
 
-        client.register_feed(&admin, &pool_relaxed, &feeders, &600_u64, &pool_relaxed, &false);
-        client.register_feed(&admin, &pool_strict, &feeders, &30_u64, &pool_strict, &false);
+        client.register_feed(
+            &admin,
+            &pool_relaxed,
+            &feeders,
+            &600_u64,
+            &pool_relaxed,
+            &false,
+        );
+        client.register_feed(
+            &admin,
+            &pool_strict,
+            &feeders,
+            &30_u64,
+            &pool_strict,
+            &false,
+        );
 
         set_timestamp(&env, 1000);
         client.publish_price(&feeder, &pool_relaxed, &500_i128);
@@ -662,8 +711,22 @@ mod tests {
         let pool_fallback = Address::generate(&env);
         let feeders = soroban_sdk::vec![&env, feeder.clone()];
 
-        client.register_feed(&admin, &pool_fallback, &feeders, &600_u64, &pool_fallback, &false);
-        client.register_feed(&admin, &pool_primary, &feeders, &30_u64, &pool_fallback, &true);
+        client.register_feed(
+            &admin,
+            &pool_fallback,
+            &feeders,
+            &600_u64,
+            &pool_fallback,
+            &false,
+        );
+        client.register_feed(
+            &admin,
+            &pool_primary,
+            &feeders,
+            &30_u64,
+            &pool_fallback,
+            &true,
+        );
 
         set_timestamp(&env, 1000);
         client.publish_price(&feeder, &pool_primary, &100_i128);

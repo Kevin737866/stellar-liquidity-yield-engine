@@ -332,6 +332,53 @@ mod tests {
         );
     }
 
+    /// Emergency history must be append-only: a completed rebalance entry is
+    /// retained in order and cannot be overwritten by later activity.
+    #[test]
+    fn test_emergency_history_is_append_only_and_ordered() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let f = setup_engine(&env);
+
+        let token_a = env.register_stellar_asset_contract_v2(f.admin.clone());
+        let token_b = env.register_stellar_asset_contract_v2(f.admin.clone());
+        let from_pool = token_a.address();
+        let to_pool = token_b.address();
+        StellarAssetClient::new(&env, &from_pool).mint(&from_pool, &1_000);
+        StellarAssetClient::new(&env, &to_pool).mint(&f.engine_id, &1_000);
+
+        let proposal = RebalanceProposal {
+            from_pool: from_pool.clone(),
+            to_pool: to_pool.clone(),
+            amount_a: 100,
+            amount_b: 100,
+            expected_apy_improvement: 500,
+            estimated_gas_cost: 10,
+            timestamp: env.ledger().timestamp(),
+        };
+
+        assert!(f.engine.execute_rebalance(&f.admin, &proposal));
+        let count_after_first = f.engine.get_history_count();
+        assert_eq!(count_after_first, 1);
+
+        // A pause must not mutate or remove the existing entry.
+        f.engine.pause(&f.admin);
+        assert_eq!(
+            f.engine.get_history_count(),
+            count_after_first,
+            "pausing must not alter existing emergency history"
+        );
+
+        // After unpausing, a further rebalance appends rather than overwrites.
+        f.engine.unpause(&f.admin);
+        assert!(f.engine.execute_rebalance(&f.admin, &proposal));
+        assert_eq!(
+            f.engine.get_history_count(),
+            count_after_first + 1,
+            "new rebalances must append to history, preserving prior entries"
+        );
+    }
+
     /// A rebalance that completes first, followed by a pause, must leave the
     /// completed entry intact and refuse the next one.
     #[test]
@@ -380,6 +427,71 @@ mod tests {
             f.engine.get_history_count(),
             history_after_rebalance,
             "the completed rebalance must remain the last recorded entry"
+        );
+    }
+
+    /// A tripped breaker can be cleared by an authorized admin reset, after
+    /// which the keeper cycle resumes without a redeployment.
+    #[test]
+    fn test_manual_reset_clears_tripped_breaker_and_restores_rebalance() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let f = setup_engine(&env);
+        let strategy_id = create_strategy_with_proposals(&env, &f);
+
+        // The breaker trips automatically on a failed execution.
+        let bad_proposal = RebalanceProposal {
+            from_pool: Address::generate(&env),
+            to_pool: Address::generate(&env),
+            amount_a: 100,
+            amount_b: 100,
+            expected_apy_improvement: 500,
+            estimated_gas_cost: 10,
+            timestamp: env.ledger().timestamp(),
+        };
+        assert!(
+            f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err(),
+            "an unfunded rebalance must fail and trip the breaker"
+        );
+        assert!(
+            f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err(),
+            "the tripped breaker must refuse further executions"
+        );
+
+        // An authorized admin reset clears the tripped breaker.
+        f.engine.reset_circuit_breaker(&f.admin);
+
+        // The keeper cycle can run again without redeployment.
+        let proposals = f.engine.analyze_rebalance_opportunities(&strategy_id);
+        assert!(
+            !proposals.is_empty(),
+            "analysis should work again after a manual reset"
+        );
+    }
+
+    /// The manual reset is admin-gated: a non-admin caller cannot clear a
+    /// tripped breaker.
+    #[test]
+    fn test_manual_reset_requires_admin_authorization() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let f = setup_engine(&env);
+
+        let bad_proposal = RebalanceProposal {
+            from_pool: Address::generate(&env),
+            to_pool: Address::generate(&env),
+            amount_a: 100,
+            amount_b: 100,
+            expected_apy_improvement: 500,
+            estimated_gas_cost: 10,
+            timestamp: env.ledger().timestamp(),
+        };
+        assert!(f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err());
+
+        let intruder = Address::generate(&env);
+        assert!(
+            f.engine.try_reset_circuit_breaker(&intruder).is_err(),
+            "a non-admin must not be able to reset the breaker"
         );
     }
 

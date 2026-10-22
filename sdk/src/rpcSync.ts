@@ -6,7 +6,16 @@
  * measures the gap between the newest ledger the process has observed and the
  * ledger head the node reports, and classifies it so operators can be warned
  * before staleness affects keeper decisions.
+ *
+ * The monitor can keep its "highest processed ledger" marker in a
+ * {@link CheckpointStore}. Without it, a keeper that restarts after an outage
+ * starts the marker at zero and immediately reports the node as critically
+ * behind, even though the keeper is in fact resuming from a known-good
+ * position. With it, the marker is restored along with the rest of the
+ * keeper's state.
  */
+
+import { createCheckpoint, type CheckpointStore, type KeeperCheckpoint } from './persistence';
 
 /** Stellar closes a ledger roughly every 5 seconds. */
 export const LEDGER_CLOSE_TIME_SECONDS = 5;
@@ -40,6 +49,14 @@ export interface RpcLagOptions extends RpcLagThresholds {
   ledgerCloseTimeSeconds?: number;
   /** Clock, injectable for tests. Defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Durable store for the "highest processed ledger" marker.
+   *
+   * When set, {@link RpcLagMonitor.restore} can seed the marker from a
+   * checkpoint written before an outage, and {@link RpcLagMonitor.persist}
+   * writes it back.
+   */
+  store?: CheckpointStore;
 }
 
 export interface RpcLagReport {
@@ -241,6 +258,44 @@ export class RpcLagMonitor {
   /** The highest ledger recorded so far (0 before anything is processed). */
   getProcessedLedger(): number {
     return this.processedLedger;
+  }
+
+  /**
+   * Restore the "highest processed ledger" marker from the configured store.
+   *
+   * Called after an outage the marker would otherwise restart at zero and the
+   * node would look critically behind. Returns `true` when a checkpoint was
+   * applied.
+   *
+   * @throws {CheckpointError} when the stored checkpoint cannot be read.
+   */
+  async restore(): Promise<boolean> {
+    const store = this.options.store;
+    if (!store) return false;
+
+    const checkpoint = await store.load();
+    if (!checkpoint) return false;
+
+    // The marker never moves backwards, so a checkpoint that is behind the
+    // in-memory value is simply ignored.
+    this.recordProcessedLedger(Math.max(0, checkpoint.lastProcessedLedger));
+    return true;
+  }
+
+  /**
+   * Write the current marker to the configured store.
+   *
+   * @returns The checkpoint that was written, or `null` when no store is
+   *   configured.
+   */
+  async persist(): Promise<KeeperCheckpoint | null> {
+    const store = this.options.store;
+    if (!store) return null;
+
+    const now = this.options.now ?? Date.now;
+    const checkpoint = createCheckpoint(this.processedLedger + 1, now());
+    await store.save(checkpoint);
+    return checkpoint;
   }
 
   /** Check the node's head against the locally processed ledger. */

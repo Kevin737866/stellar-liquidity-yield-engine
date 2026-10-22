@@ -64,6 +64,19 @@ const CONTRACT_ADDRESSES: string[] = RAW_ADDRESSES
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? '5000', 10);
 
 // ---------------------------------------------------------------------------
+// Structured logging for skipped / aborted actions
+// ---------------------------------------------------------------------------
+
+/**
+ * Log an action that was attempted but never submitted to the chain.
+ * Each entry carries enough context (action, contract, reason, ledger) to
+ * debug why a decision never reached the chain.
+ */
+function logSkippedAction(action: string, details: Record<string, unknown>): void {
+  console.warn(`[SKIPPED] action=${action} ${JSON.stringify(details)}`);
+}
+
+// ---------------------------------------------------------------------------
 // Set up the RPC server and listener
 // ---------------------------------------------------------------------------
 
@@ -162,6 +175,16 @@ async function main(): Promise<void> {
     if (!known.includes(String(topicStr))) {
       console.log(`[UNKNOWN]  contract=${evt.contractId}  topic[0]=${topicStr}  ledger=${evt.ledger}`);
     }
+
+    // Example: an unknown event shape may indicate an action we chose not to
+    // submit. Log it with structured context so it can be traced later.
+    if (!known.includes(String(topicStr))) {
+      logSkippedAction('unknown-event', {
+        contractId: evt.contractId,
+        topic: topicStr,
+        ledger: evt.ledger,
+      });
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -172,6 +195,10 @@ async function main(): Promise<void> {
     console.error(
       `[ERROR] poll failed at ledger ${err.ledger}: ${err.error.message}`,
     );
+    logSkippedAction('poll-error', {
+      ledger: err.ledger,
+      reason: err.error.message,
+    });
     // The listener does NOT stop itself on error; the next poll will retry
     // automatically. Add alerting logic here if needed.
   });
@@ -190,6 +217,14 @@ async function main(): Promise<void> {
   console.log(`    Ledger:   starting from ${startLedger}`);
   console.log(`    Filter:   ${filterSummary}`);
   console.log(`    Interval: ${POLL_INTERVAL_MS} ms\n`);
+
+  // Log interpretation guide:
+  //   [SKIPPED] action=<name> {...}  — an action was attempted but not submitted.
+  //     - action=unknown-event: event shape not recognized; inspect topic/ledger.
+  //     - action=poll-error:    RPC poll failed; reason contains the error message.
+  //   [ERROR] poll failed at ledger N: ...  — raw poll failure (see SKIPPED above).
+  //   [UNKNOWN] contract=... topic[0]=... ledger=...  — unrecognized event shape.
+  console.log('    Log guide: [SKIPPED] = attempted-but-not-submitted; [ERROR] = poll failure; [UNKNOWN] = unrecognized event\n');
 
   listener.start(POLL_INTERVAL_MS);
 
