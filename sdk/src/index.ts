@@ -226,3 +226,13 @@ export const VERSION: string = (() => {
     }
   }
 })();
+
+// Event origin labels: contract events vs Horizon-style ledger events.
+export {
+  CONTRACT_EVENT_ORIGIN,
+  LEDGER_EVENT_ORIGIN,
+  toLedgerEvent,
+  isLedgerEvent,
+  isContractEvent,
+} from './eventOrigin';
+export type { EventOrigin, LedgerEvent } from './eventOrigin';

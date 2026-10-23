@@ -44,6 +44,8 @@
  */
 
 import type { VaultEvent, RebalanceEvent, RewardEvent } from './types';
+import { CONTRACT_EVENT_ORIGIN } from './eventOrigin';
+import type { EventOrigin } from './eventOrigin';
 import {
   createCheckpoint,
   type CheckpointStore,
@@ -130,6 +132,8 @@ export type FilteredRewardEvent = RewardEvent & { contractId: string };
  * shapes. Handlers receive the raw RPC payload.
  */
 export interface UnknownContractEvent {
+  /** Always `contract`: distinguishes these from Horizon-style ledger events. */
+  origin: EventOrigin;
   contractId: string;
   ledger: number;
   ledgerClosedAt: string;
@@ -683,6 +687,7 @@ export class ContractEventListener {
       }
 
       const unknown: UnknownContractEvent = {
+        origin: CONTRACT_EVENT_ORIGIN,
         contractId: raw.contractId,
         ledger: raw.ledger,
         ledgerClosedAt: raw.ledgerClosedAt,
