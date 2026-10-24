@@ -207,3 +207,16 @@ Full backlog drained         : true
   the last position with `cat state/keeper.json`.
 - **Ephemeral deployments.** Use `MemoryCheckpointStore` in tests and anywhere
   a restart is expected to start from scratch.
+
+
+## Durable backoff after consecutive failures
+
+A keeper that keeps failing (for example during an RPC outage) backs off instead of retrying on every tick.
+
+- After `startAfterFailures` consecutive failures (default 2) the keeper waits `baseMs * factor^(failures - startAfterFailures)`, capped at `maxMs` (defaults: 5s base, factor 2, 5 min cap). Jitter only shortens a delay, so `maxMs` is a hard ceiling.
+- While waiting, ticks are skipped: no RPC call is made and no extra failure is counted.
+- One success resets the counter and the wait.
+- The state (`consecutiveFailures`, `nextAttemptAt`) is saved through the keeper's store, so a restart during an outage resumes the remaining wait instead of hammering the RPC again. A wait that is implausibly far in the future (for example after the clock moved backwards) is clamped to `maxMs`.
+- If the store cannot be read or written, the keeper keeps running with in-memory backoff.
+
+See `sdk/src/keeperBackoff.ts` (`KeeperBackoff`, `BackoffPolicy`).

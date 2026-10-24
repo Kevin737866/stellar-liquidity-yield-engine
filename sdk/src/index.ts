@@ -2,7 +2,7 @@
 
 import { Keypair, Networks } from 'stellar-sdk';
 import { GovernanceSDK, type GovernanceContracts } from './governance';
-
+export * from './keeperBackoff';
 export * from './types';
 export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
