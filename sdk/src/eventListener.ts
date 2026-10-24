@@ -314,6 +314,8 @@ export class ContractEventListener {
 
   /** Latest ledger the listener has consumed (exclusive lower bound). */
   private cursor: number;
+  /** Tail of the serialized poll queue; keeps polls from overlapping. */
+  private pollChain: Promise<void> = Promise.resolve();
 
   /** Durable store for the listener's position (optional). */
   private readonly store?: CheckpointStore;

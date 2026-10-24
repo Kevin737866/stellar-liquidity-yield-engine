@@ -13,8 +13,8 @@
 
 export type EventOrigin = 'contract' | 'ledger';
 
-export const CONTRACT_EVENT_ORIGIN: EventOrigin = 'contract';
-export const LEDGER_EVENT_ORIGIN: EventOrigin = 'ledger';
+export const CONTRACT_EVENT_ORIGIN = 'contract' as const;
+export const LEDGER_EVENT_ORIGIN = 'ledger' as const;
 
 /** A Horizon-style ledger-level event (operation/effect record). */
 export interface LedgerEvent {
