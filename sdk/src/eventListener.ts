@@ -44,6 +44,8 @@
  */
 
 import type { VaultEvent, RebalanceEvent, RewardEvent } from './types';
+import { CONTRACT_EVENT_ORIGIN } from './eventOrigin';
+import type { EventOrigin } from './eventOrigin';
 import {
   createCheckpoint,
   type CheckpointStore,
@@ -139,6 +141,8 @@ export type FilteredRewardEvent = RewardEvent & { contractId: string };
  * shapes. Handlers receive the raw RPC payload.
  */
 export interface UnknownContractEvent {
+  /** Always `contract`: distinguishes these from Horizon-style ledger events. */
+  origin: EventOrigin;
   contractId: string;
   ledger: number;
   ledgerClosedAt: string;
@@ -319,6 +323,8 @@ export class ContractEventListener {
 
   /** Latest ledger the listener has consumed (exclusive lower bound). */
   private cursor: number;
+  /** Tail of the serialized poll queue; keeps polls from overlapping. */
+  private pollChain: Promise<void> = Promise.resolve();
 
   /**
    * RPC paging token of the last event received when a page came back full.
@@ -711,6 +717,7 @@ export class ContractEventListener {
       }
 
       const unknown: UnknownContractEvent = {
+        origin: CONTRACT_EVENT_ORIGIN,
         contractId: raw.contractId,
         ledger: raw.ledger,
         ledgerClosedAt: raw.ledgerClosedAt,
