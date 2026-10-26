@@ -228,6 +228,8 @@ export interface RiskAssessment {
   impermanentLossRisk: number; // Basis points
   estimatedSlippage: number; // Basis points
   volatilityScore: number; // 0-100
+  /** Position-size multiplier in basis points. Range: 5000–10000; 10000 = full size. */
+  positionSizeMultiplierBps: number;
   circuitBreakerTriggered: boolean;
   timestamp: number;
 }
