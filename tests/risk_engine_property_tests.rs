@@ -21,8 +21,17 @@ mod tests {
         // Test across full range of price ratios
         for entry in [100, 500, 1000, 5000, 10000, 50000, 100000].iter() {
             for current in [100, 500, 1000, 5000, 10000, 50000, 100000].iter() {
-                let il = client.calculate_impermanent_loss(&pool_id, &(*current as i128), &(*entry as i128));
-                assert!(il <= 10000, "IL must be <= 100% (10000 bps) for entry={}, current={}", entry, current);
+                let il = client.calculate_impermanent_loss(
+                    &pool_id,
+                    &(*current as i128),
+                    &(*entry as i128),
+                );
+                assert!(
+                    il <= 10000,
+                    "IL must be <= 100% (10000 bps) for entry={}, current={}",
+                    entry,
+                    current
+                );
             }
         }
     }
@@ -60,8 +69,12 @@ mod tests {
         // As price moves away from entry, IL should generally increase
         for current in [11000, 12000, 15000, 20000, 50000].iter() {
             let il = client.calculate_impermanent_loss(&pool_id, current, &entry_price);
-            assert!(il >= prev_il || *current == 11000, 
-                "IL should generally increase with price divergence: prev={}, curr={}", prev_il, il);
+            assert!(
+                il >= prev_il || *current == 11000,
+                "IL should generally increase with price divergence: prev={}, curr={}",
+                prev_il,
+                il
+            );
             prev_il = il;
         }
     }
@@ -77,7 +90,12 @@ mod tests {
         for amount in [1, 100, 1000, 10000, 1000000].iter() {
             for liquidity in [1000, 10000, 100000, 1000000].iter() {
                 let slippage = client.estimate_slippage(&pool_id, *amount, *liquidity);
-                assert!(slippage <= 10000, "Slippage must be <= 100% for amount={}, liquidity={}", amount, liquidity);
+                assert!(
+                    slippage <= 10000,
+                    "Slippage must be <= 100% for amount={}, liquidity={}",
+                    amount,
+                    liquidity
+                );
             }
         }
     }
@@ -101,7 +119,10 @@ mod tests {
         let pool_id = Address::generate(&env);
 
         let slippage = client.estimate_slippage(&pool_id, 1000, 0);
-        assert_eq!(slippage, 10000, "Zero liquidity should return 100% slippage");
+        assert_eq!(
+            slippage, 10000,
+            "Zero liquidity should return 100% slippage"
+        );
     }
 
     #[test]
@@ -115,8 +136,12 @@ mod tests {
         let mut prev_slippage = 0;
         for amount in [100, 1000, 10000, 50000].iter() {
             let slippage = client.estimate_slippage(&pool_id, *amount, liquidity);
-            assert!(slippage >= prev_slippage, 
-                "Slippage should increase with amount: prev={}, curr={}", prev_slippage, slippage);
+            assert!(
+                slippage >= prev_slippage,
+                "Slippage should increase with amount: prev={}, curr={}",
+                prev_slippage,
+                slippage
+            );
             prev_slippage = slippage;
         }
     }
@@ -134,7 +159,10 @@ mod tests {
             volatility_7d: 2500,
         };
         let adjustment = client.volatility_adjustment(&metrics);
-        assert!(adjustment >= 5000, "Adjustment should be at least 50% for moderate volatility");
+        assert!(
+            adjustment >= 5000,
+            "Adjustment should be at least 50% for moderate volatility"
+        );
         assert!(adjustment <= 10000, "Adjustment should not exceed 100%");
 
         // High volatility
@@ -144,8 +172,14 @@ mod tests {
             volatility_7d: 10000,
         };
         let adjustment_high = client.volatility_adjustment(&high_vol);
-        assert!(adjustment_high <= 10000, "High volatility should cap at 100%");
-        assert!(adjustment_high >= 5000, "Adjustment should not go below 50%");
+        assert!(
+            adjustment_high <= 10000,
+            "High volatility should cap at 100%"
+        );
+        assert!(
+            adjustment_high >= 5000,
+            "Adjustment should not go below 50%"
+        );
     }
 
     #[test]
@@ -167,7 +201,10 @@ mod tests {
         let pool_id = Address::generate(&env);
 
         let result = client.circuit_breaker_check(&pool_id, &false, &85, &SorobanVec::new(&env));
-        assert!(result, "Circuit breaker should trigger on pool imbalance > 80");
+        assert!(
+            result,
+            "Circuit breaker should trigger on pool imbalance > 80"
+        );
     }
 
     #[test]
@@ -183,7 +220,10 @@ mod tests {
         losses.push_back(false);
 
         let result = client.circuit_breaker_check(&pool_id, &false, &50, &losses);
-        assert!(result, "Circuit breaker should trigger on 3 consecutive losses");
+        assert!(
+            result,
+            "Circuit breaker should trigger on 3 consecutive losses"
+        );
     }
 
     #[test]
@@ -194,7 +234,54 @@ mod tests {
         let pool_id = Address::generate(&env);
 
         let result = client.circuit_breaker_check(&pool_id, &false, &30, &SorobanVec::new(&env));
-        assert!(!result, "Circuit breaker should NOT trigger under normal conditions");
+        assert!(
+            !result,
+            "Circuit breaker should NOT trigger under normal conditions"
+        );
+    }
+
+    #[test]
+    fn test_per_pool_circuit_breaker_thresholds() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let client = setup_risk_engine(&env);
+        let pool_sensitive = Address::generate(&env);
+        let pool_relaxed = Address::generate(&env);
+
+        // Configure sensitive breaker for pool_sensitive
+        client.set_pool_circuit_breaker(
+            &pool_sensitive,
+            &CircuitBreakerConfig {
+                max_imbalance: 60,
+                max_consecutive_losses: 2,
+                gas_surge_protection: true,
+            },
+        );
+
+        // Configure relaxed breaker for pool_relaxed
+        client.set_pool_circuit_breaker(
+            &pool_relaxed,
+            &CircuitBreakerConfig {
+                max_imbalance: 90,
+                max_consecutive_losses: 5,
+                gas_surge_protection: false,
+            },
+        );
+
+        // Imbalance 70 triggers sensitive pool but not relaxed pool
+        assert!(client.circuit_breaker_check(&pool_sensitive, &false, &70, &SorobanVec::new(&env)));
+        assert!(!client.circuit_breaker_check(&pool_relaxed, &false, &70, &SorobanVec::new(&env)));
+
+        // Gas surge triggers sensitive pool but not relaxed pool
+        assert!(client.circuit_breaker_check(&pool_sensitive, &true, &30, &SorobanVec::new(&env)));
+        assert!(!client.circuit_breaker_check(&pool_relaxed, &true, &30, &SorobanVec::new(&env)));
+
+        // 2 consecutive losses trigger sensitive pool but not relaxed pool
+        let mut two_losses = SorobanVec::new(&env);
+        two_losses.push_back(false);
+        two_losses.push_back(false);
+        assert!(client.circuit_breaker_check(&pool_sensitive, &false, &30, &two_losses));
+        assert!(!client.circuit_breaker_check(&pool_relaxed, &false, &30, &two_losses));
     }
 
     #[test]
@@ -280,15 +367,17 @@ mod tests {
         let client = setup_risk_engine(&env);
 
         let (total_cost, total_fee_bp) = client.calculate_total_rebalance_cost(
-            &50000,
-            &100, // 1% IL
+            &50000, &100, // 1% IL
             &50,  // 0.5% slippage
             &25,  // 0.25% entry fee
             &1000000,
         );
 
         assert!(total_cost > 0, "Total cost should be positive");
-        assert!(total_fee_bp > 0, "Total fee basis points should be positive");
+        assert!(
+            total_fee_bp > 0,
+            "Total fee basis points should be positive"
+        );
         // Total fee = 100 + 50 + 25 + 50 (overhead) = 225 bps
         assert_eq!(total_fee_bp, 225, "Total fee should be 225 bps");
     }

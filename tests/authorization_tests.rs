@@ -1,16 +1,13 @@
-use soroban_sdk::{Address, Env, Symbol, Vec as SorobanVec, testutils::Address as _};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec as SorobanVec};
 use stellar_liquidity_yield_engine::{
-    RebalanceEngine, RebalanceEngineClient,
-    YieldVault, YieldVaultClient,
-    StrategyRegistry, StrategyRegistryClient,
-    SwapRouter, SwapRouterClient,
-    MultiRewardDistributor, MultiRewardDistributorClient,
-    StellarLiquidityYieldEngine, StellarLiquidityYieldEngineClient,
+    MultiRewardDistributor, MultiRewardDistributorClient, RebalanceEngine, RebalanceEngineClient,
+    StellarLiquidityYieldEngine, StellarLiquidityYieldEngineClient, StrategyRegistry,
+    StrategyRegistryClient, SwapRouter, SwapRouterClient, YieldVault, YieldVaultClient,
 };
 
 fn main() {}
 
-mod tests {
+mod authorization_tests {
     use super::*;
     use soroban_sdk::token::{StellarAssetClient, TokenClient};
 
@@ -29,7 +26,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.pause(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to pause rebalance engine");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to pause rebalance engine"
+        );
         assert!(!client.is_paused(), "Engine should remain unpaused");
     }
 
@@ -47,7 +47,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.unpause(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to unpause rebalance engine");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to unpause rebalance engine"
+        );
         assert!(client.is_paused(), "Engine should remain paused");
     }
 
@@ -64,7 +67,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.set_rebalance_thresholds(&non_admin, 300, 150, 43200);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to set rebalance thresholds");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to set rebalance thresholds"
+        );
     }
 
     // ==================== YieldVault Authorization ====================
@@ -98,7 +104,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             vault.pause(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to pause yield vault");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to pause yield vault"
+        );
     }
 
     #[test]
@@ -130,7 +139,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             vault.unpause(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to unpause yield vault");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to unpause yield vault"
+        );
         assert!(vault.is_paused(), "Vault should remain paused");
     }
 
@@ -149,7 +161,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.approve_strategy(&non_admin, &1, &Symbol::new(&env, "No"));
         }));
-        assert!(result.is_err(), "Non-admin should not be able to approve strategies");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to approve strategies"
+        );
     }
 
     #[test]
@@ -165,7 +180,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.deactivate_strategy(&non_admin, &1);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to deactivate strategies");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to deactivate strategies"
+        );
     }
 
     #[test]
@@ -181,7 +199,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.pause(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to pause strategy registry");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to pause strategy registry"
+        );
     }
 
     // ==================== SwapRouter Authorization ====================
@@ -199,7 +220,14 @@ mod tests {
         client.initialize(&admin, &treasury, &xlm);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.add_pool(&non_admin, &Address::generate(&env), &Address::generate(&env), &Address::generate(&env), &100, &false);
+            client.add_pool(
+                &non_admin,
+                &Address::generate(&env),
+                &Address::generate(&env),
+                &Address::generate(&env),
+                &100,
+                &false,
+            );
         }));
         assert!(result.is_err(), "Non-admin should not be able to add pools");
     }
@@ -219,7 +247,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.remove_pool(&non_admin, &Address::generate(&env));
         }));
-        assert!(result.is_err(), "Non-admin should not be able to remove pools");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to remove pools"
+        );
     }
 
     #[test]
@@ -237,7 +268,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.update_treasury(&non_admin, &Address::generate(&env));
         }));
-        assert!(result.is_err(), "Non-admin should not be able to update treasury");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to update treasury"
+        );
     }
 
     // ==================== MultiRewardDistributor Authorization ====================
@@ -257,7 +291,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.add_reward_stream(&non_admin, &Address::generate(&env), &1000, &7, &0);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to add reward streams");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to add reward streams"
+        );
     }
 
     #[test]
@@ -275,7 +312,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.pause(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to pause reward distributor");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to pause reward distributor"
+        );
     }
 
     #[test]
@@ -293,7 +333,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.enable_emergency_mode(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to enable emergency mode");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to enable emergency mode"
+        );
     }
 
     // ==================== StellarLiquidityYieldEngine Authorization ====================
@@ -313,7 +356,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.pause(&non_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to pause main engine");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to pause main engine"
+        );
     }
 
     #[test]
@@ -332,7 +378,10 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.update_admin(&non_admin, &new_admin);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to update admin");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to update admin"
+        );
     }
 
     // ==================== Governance Authorization ====================
@@ -348,14 +397,19 @@ mod tests {
         for _ in 0..5 {
             emergency_multisig.push_back(Address::generate(&env));
         }
-        let contract_id = env.register_contract(None, stellar_liquidity_yield_engine::ProtocolGovernor);
-        let client = stellar_liquidity_yield_engine::ProtocolGovernorClient::new(&env, &contract_id);
+        let contract_id =
+            env.register_contract(None, stellar_liquidity_yield_engine::ProtocolGovernor);
+        let client =
+            stellar_liquidity_yield_engine::ProtocolGovernorClient::new(&env, &contract_id);
         client.initialize(&timelock, &admin, &emergency_multisig);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.set_performance_fee(&non_admin, &1000);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to set performance fee");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to set performance fee"
+        );
     }
 
     #[test]
@@ -369,14 +423,19 @@ mod tests {
         for _ in 0..5 {
             emergency_multisig.push_back(Address::generate(&env));
         }
-        let contract_id = env.register_contract(None, stellar_liquidity_yield_engine::ProtocolGovernor);
-        let client = stellar_liquidity_yield_engine::ProtocolGovernorClient::new(&env, &contract_id);
+        let contract_id =
+            env.register_contract(None, stellar_liquidity_yield_engine::ProtocolGovernor);
+        let client =
+            stellar_liquidity_yield_engine::ProtocolGovernorClient::new(&env, &contract_id);
         client.initialize(&timelock, &admin, &emergency_multisig);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.set_rebalance_threshold(&non_admin, &300);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to set rebalance threshold");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to set rebalance threshold"
+        );
     }
 
     #[test]
@@ -390,16 +449,21 @@ mod tests {
         for _ in 0..5 {
             emergency_multisig.push_back(Address::generate(&env));
         }
-        let contract_id = env.register_contract(None, stellar_liquidity_yield_engine::ProtocolGovernor);
-        let client = stellar_liquidity_yield_engine::ProtocolGovernorClient::new(&env, &contract_id);
+        let contract_id =
+            env.register_contract(None, stellar_liquidity_yield_engine::ProtocolGovernor);
+        let client =
+            stellar_liquidity_yield_engine::ProtocolGovernorClient::new(&env, &contract_id);
         client.initialize(&timelock, &admin, &emergency_multisig);
 
         let mut signers = SorobanVec::new(&env);
         signers.push_back(non_admin.clone());
-        
+
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             client.emergency_pause(&signers);
         }));
-        assert!(result.is_err(), "Non-admin should not be able to trigger emergency pause");
+        assert!(
+            result.is_err(),
+            "Non-admin should not be able to trigger emergency pause"
+        );
     }
 }

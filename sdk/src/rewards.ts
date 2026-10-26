@@ -10,6 +10,28 @@ import {
 import { VaultClient } from './vaultClient';
 import { VaultClientConfig } from './types';
 
+/** Maximum router slippage tolerance in basis points (1%). */
+export const MAX_SLIPPAGE_BPS = 100;
+
+/**
+ * Reject values that cannot be encoded as the router's bounded u32 basis-point
+ * tolerance. Keeping this check client-side avoids submitting malformed or
+ * overly permissive quote requests; the contract enforces the same limit.
+ */
+export function validateMaxSlippageBps(maxSlippageBps: number): void {
+    if (
+        typeof maxSlippageBps !== 'number' ||
+        !Number.isFinite(maxSlippageBps) ||
+        !Number.isInteger(maxSlippageBps) ||
+        maxSlippageBps < 0 ||
+        maxSlippageBps > MAX_SLIPPAGE_BPS
+    ) {
+        throw new Error(
+            `maxSlippageBps must be an integer within [0, ${MAX_SLIPPAGE_BPS}]`
+        );
+    }
+}
+
 /**
  * Reward stream information
  */
@@ -330,6 +352,7 @@ export class RewardsSDK {
     }> {
         const user = userKeypair.publicKey();
         const { streams, convertTo, maxSlippageBps = 100, enableAutoRetry = false } = options;
+        validateMaxSlippageBps(maxSlippageBps);
 
         // Get pending rewards to validate
         const pending = await this.getPendingRewards(user, vault);
@@ -694,8 +717,9 @@ export class RewardsSDK {
         inputToken: string,
         outputToken: string,
         inputAmount: string,
-        maxSlippageBps?: number
+        maxSlippageBps: number = MAX_SLIPPAGE_BPS
     ): Promise<SwapQuote> {
+        validateMaxSlippageBps(maxSlippageBps);
         // In production, call swap router contract
         const protocolFee = BigIntString.mul(inputAmount, '25'); // 0.25%
 

@@ -8,34 +8,73 @@ export interface WaitForTransactionOptions {
 }
 
 /**
- * Poll `getTransaction` until the transaction reaches a terminal state
- * (SUCCESS or FAILED). Soroban RPC's `sendTransaction` only reports that a
- * transaction was accepted (PENDING) — the final outcome requires polling
- * `getTransaction`.
- *
- * Returns the last `getTransaction` response. If the configured timeout
- * elapses before the transaction settles, the not-yet-terminal response is
- * returned so callers can decide how to handle it.
+ * Structured log emitted when a contract call is attempted but not submitted
+ * (e.g. skipped due to guards, aborted before send, or timed out waiting for
+ * confirmation). The shape is stable so it can be filtered and alerted on.
  */
+export interface SkippedContractCallLog {
+  /** Discriminator for filtering in log aggregators. */
+  event: 'contract_call_skipped';
+  /** Machine-readable reason code for the skip/abort. */
+  reason:
+    | 'precondition_failed'
+    | 'simulation_failed'
+    | 'send_failed'
+    | 'timeout'
+    | 'already_submitted'
+    | 'unknown';
+  /** Contract method that was attempted (e.g. 'transfer'). */
+  method?: string;
+  /** Contract ID the call targeted. */
+  contractId?: string;
+  /** Additional context for debugging (args, guard results, error messages). */
+  context?: Record<string, unknown>;
+  /** ISO timestamp of when the skip was observed. */
+  timestamp: string;
+}
+
+/**
+ * Emit a structured log for a contract call that was attempted but not
+ * submitted. Uses console.info so it is visible by default and can be
+ * collected by log aggregators via the `contract_call_skipped` event field.
+ */
+export function logSkippedContractCall(
+  log: Omit<SkippedContractCallLog, 'event' | 'timestamp'> &
+    Partial<Pick<SkippedContractCallLog, 'event' | 'timestamp'>>,
+): SkippedContractCallLog {
+  const entry: SkippedContractCallLog = {
+    event: 'contract_call_skipped',
+    timestamp: new Date().toISOString(),
+    ...log,
+  };
+  console.info(JSON.stringify(entry));
+  return entry;
+}
+
 export async function waitForTransaction(
-  server: SorobanRpc.Server,
+  server: SorobanRpc,
   hash: string,
-  options?: WaitForTransactionOptions
-): Promise<SorobanRpc.GetTransactionResponse> {
-  const timeoutMs = options?.timeoutMs ?? 30_000;
-  const intervalMs = options?.intervalMs ?? 1_000;
+  options: WaitForTransactionOptions = {},
+): Promise<unknown> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const intervalMs = options.intervalMs ?? 1_000;
   const deadline = Date.now() + timeoutMs;
 
-  let txResult = await server.getTransaction(hash);
-
-  while (
-    (txResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND ||
-      (txResult.status as string) === 'PENDING') &&
-    Date.now() < deadline
-  ) {
+  while (Date.now() < deadline) {
+    try {
+      const result = await server.getTransaction(hash);
+      if (result) {
+        return result;
+      }
+    } catch {
+      // Transaction not yet found; keep polling until deadline.
+    }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    txResult = await server.getTransaction(hash);
   }
 
-  return txResult;
+  logSkippedContractCall({
+    reason: 'timeout',
+    context: { hash, timeoutMs, intervalMs },
+  });
+  throw new Error(`Timed out waiting for transaction ${hash}`);
 }

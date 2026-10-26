@@ -1,16 +1,17 @@
-import { 
-  Address, 
-  Account, 
-  Contract, 
-  Keypair, 
-  SorobanRpc, 
-  Transaction, 
-  TransactionBuilder, 
+import {
+  Address,
+  Account,
+  Contract,
+  Keypair,
+  SorobanRpc,
+  Transaction,
+  TransactionBuilder,
   Networks,
   BASE_FEE,
   xdr,
   scValToNative
 } from 'stellar-sdk';
+import { EventEmitter } from 'events';
 import {
   VaultInfo,
   UserPosition,
@@ -21,11 +22,13 @@ import {
   TransactionResult,
   VaultError,
   NetworkConfig,
-  VaultClientOptions
+  VaultClientOptions,
+  PauseReason,
+  VaultEvent
 } from './types';
 import { waitForTransaction } from './utils/transaction';
 
-export class VaultClient {
+export class VaultClient extends EventEmitter {
   private contract: Contract;
   private server: SorobanRpc.Server;
   private networkConfig: NetworkConfig;
@@ -36,6 +39,7 @@ export class VaultClient {
     networkConfig: NetworkConfig,
     options: VaultClientOptions = {}
   ) {
+    super();
     this.contract = new Contract(vaultAddress.toString());
     this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
     this.networkConfig = networkConfig;
@@ -367,11 +371,20 @@ export class VaultClient {
 
   /**
    * Pause vault (admin only)
+   * @param adminKeyPair - Admin keypair for signing
+   * @param reason - Reason for the pause (e.g., 'security', 'circuit_breaker', 'maintenance')
+   * @param reasonDetails - Additional context about the pause reason
+   * @param options - Transaction options
    */
-  async pause(adminKeyPair: any, options?: TransactionOptions): Promise<TransactionResult> {
+  async pause(
+    adminKeyPair: any,
+    reason?: PauseReason,
+    reasonDetails?: string,
+    options?: TransactionOptions
+  ): Promise<TransactionResult> {
     try {
       const account = await this.server.getAccount(await this.resolvePublicKey(adminKeyPair));
-      
+
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
         networkPassphrase: this.getNetworkPassphrase()
@@ -393,13 +406,20 @@ export class VaultClient {
       }
 
       const txResult = await this.confirmTransaction(result.hash);
-      return {
+      const transactionResult = {
         hash: result.hash,
         success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
         gasUsed: 0,
         error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
-    } catch (error) {
+
+      // Emit pause event with reason if successful
+      if (transactionResult.success && reason) {
+        this.emitPauseEvent(reason, reasonDetails);
+      }
+
+      return transactionResult;
+    } catch (error: any) {
       throw new VaultError(`Pause failed: ${error.message}`, 'PAUSE_ERROR');
     }
   }
@@ -410,7 +430,7 @@ export class VaultClient {
   async unpause(adminKeyPair: any, options?: TransactionOptions): Promise<TransactionResult> {
     try {
       const account = await this.server.getAccount(await this.resolvePublicKey(adminKeyPair));
-      
+
       const tx = new TransactionBuilder(account, {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
         networkPassphrase: this.getNetworkPassphrase()
@@ -432,15 +452,50 @@ export class VaultClient {
       }
 
       const txResult = await this.confirmTransaction(result.hash);
-      return {
+      const transactionResult = {
         hash: result.hash,
         success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
         gasUsed: 0,
         error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
       };
-    } catch (error) {
+
+      // Emit unpause event if successful
+      if (transactionResult.success) {
+        this.emitUnpauseEvent();
+      }
+
+      return transactionResult;
+    } catch (error: any) {
       throw new VaultError(`Unpause failed: ${error.message}`, 'UNPAUSE_ERROR');
     }
+  }
+
+  /**
+   * Emit a pause event with reason for monitoring and dashboards
+   */
+  private emitPauseEvent(reason: PauseReason, reasonDetails?: string): void {
+    const event: VaultEvent = {
+      type: 'pause',
+      vault: this.contract.address(),
+      timestamp: Math.floor(Date.now() / 1000),
+      reason,
+      reasonDetails
+    };
+    this.emit('pause', event);
+    this.emit('vaultEvent', event);
+  }
+
+  /**
+   * Emit an unpause event for monitoring and dashboards
+   */
+  private emitUnpauseEvent(): void {
+    const event: VaultEvent = {
+      type: 'unpause',
+      vault: this.contract.address(),
+      timestamp: Math.floor(Date.now() / 1000)
+    };
+    this.emit('unpause', event);
+    this.emit('vaultEvent', event);
   }
 
   // History / Analytics (Issue #128)

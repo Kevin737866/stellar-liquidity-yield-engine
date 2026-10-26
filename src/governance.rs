@@ -194,7 +194,10 @@ impl GovernanceToken {
     }
 
     fn get_admin(env: &Env) -> Address {
-        env.storage().instance().get(&GovTokenDataKey::Admin).unwrap()
+        env.storage()
+            .instance()
+            .get(&GovTokenDataKey::Admin)
+            .unwrap_or_else(|| panic!("admin not configured"))
     }
 
     /// Mint new tokens (only by governance)
@@ -657,7 +660,7 @@ impl ProtocolGovernor {
         let snapshot_block = env.ledger().sequence() as u64;
 
         let proposal = GovernanceProposal::new(
-            &e,
+            &env,
             proposer,
             description,
             call_data,

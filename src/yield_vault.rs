@@ -1,7 +1,56 @@
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token::TokenClient, unwrap::UnwrapOptimized, Address,
-    Env, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token::TokenClient,
+    Address, Env, Map, Symbol, Vec,
 };
+
+/// Typed failures of the yield vault.
+///
+/// Anticipated invalid inputs - a caller who is not the admin, a deposit below
+/// the configured minimum, a withdrawal that would redeem nothing - fail with
+/// one of these codes instead of an opaque string panic. A caller (or an
+/// off-chain client) can therefore tell the cases apart and handle them.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VaultError {
+    /// The caller is not the stored admin.
+    Unauthorized = 1,
+    /// The vault is paused and refuses state-changing operations.
+    Paused = 2,
+    /// The vault has not been initialized, so its configuration is missing.
+    NotInitialized = 3,
+    /// A deposit leg is below the configured minimum.
+    AmountBelowMinimum = 4,
+    /// Both deposit legs are zero.
+    DepositMustBePositive = 5,
+    /// The deposit is too small: it would mint zero shares.
+    DepositTooSmall = 6,
+    /// The deposit minted fewer shares than the caller's `min_shares`.
+    InsufficientSharesReceived = 7,
+    /// The requested share amount is not positive.
+    SharesMustBePositive = 8,
+    /// The requested withdrawal is below the configured minimum shares.
+    WithdrawalBelowMinimum = 9,
+    /// The caller holds fewer shares than the withdrawal asks for.
+    InsufficientShares = 10,
+    /// The vault has no shares outstanding, so there is nothing to price against.
+    NoSharesOutstanding = 11,
+    /// A partial withdrawal would redeem zero tokens.
+    WithdrawalTooSmall = 12,
+    /// The redeemed token A is below the caller's `min_amount_a`.
+    InsufficientAmountA = 13,
+    /// The redeemed token B is below the caller's `min_amount_b`.
+    InsufficientAmountB = 14,
+    /// A configured minimum deposit amount is negative.
+    NegativeMinimumDeposit = 15,
+    /// The configured minimum withdrawal must be positive.
+    MinSharesMustBePositive = 16,
+    /// A configured token price is negative.
+    NegativePrice = 17,
+    /// The emergency multisig threshold must be at least 1.
+    ThresholdMustBePositive = 18,
+    /// Fewer authorized emergency signers than the threshold were supplied.
+    InsufficientEmergencySignatures = 19,
+}
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +74,57 @@ pub struct UserPosition {
     pub deposited_amount_b: i128,
 }
 
+/// Pacing limits applied to withdrawals, expressed in basis points of the
+/// shares held when the current window opened.
+///
+/// Both dimensions are off by default (zero), which preserves the historical
+/// behaviour; an operator enables pacing for a vault that must not be drained
+/// in a single ledger window. Pacing is active when `window_seconds` is
+/// positive and at least one of the two limits is non-zero.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawPacing {
+    /// Maximum share of one user's position (bps) withdrawable per window.
+    pub user_max_bps: u32,
+    /// Maximum share of the vault's total shares (bps) withdrawable per window.
+    pub vault_max_bps: u32,
+    /// Length of the pacing window, in seconds.
+    pub window_seconds: u64,
+}
+
+/// Withdrawal consumption inside one pacing window.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawWindow {
+    /// Ledger timestamp that opened the window; 0 means no window yet.
+    pub window_started_at: u64,
+    /// Shares already withdrawn inside this window.
+    pub shares_withdrawn: i128,
+    /// Shares the measured party held when the window opened.
+    pub window_start_shares: i128,
+}
+
+/// An economic-parameter change waiting out its time lock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PendingAdminAction {
+    Prices(i128, i128),
+    MinDepositAmounts(i128, i128),
+    MinWithdrawShares(i128),
+    Treasury(Address),
+    TimelockDelay(u64),
+}
+
+/// A queued change with the timestamp at which it becomes executable.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAction {
+    pub id: u64,
+    pub action: PendingAdminAction,
+    pub proposer: Address,
+    pub executable_at: u64,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VaultMetrics {
@@ -36,6 +136,18 @@ pub struct VaultMetrics {
     pub last_harvest: u64,
 }
 
+/// The most recent annualized yield observation captured at a harvest event.
+/// This lets a vault report a defensible APY even when no new rewards have been
+/// harvested since the last snapshot, while still keeping the value scoped to
+/// the actual harvest history rather than a continuously guessed rate.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HarvestSnapshot {
+    pub timestamp: u64,
+    pub tvl: i128,
+    pub apy: u32,
+}
+
 #[contract]
 pub struct YieldVault;
 
@@ -44,7 +156,7 @@ const SECONDS_PER_YEAR: u128 = 31_536_000;
 
 /// Default minimum deposit per leg: 0, because a single-leg deposit is a valid
 /// operation. The combined deposit must still be positive, and an admin can
-/// raise either leg with `set_min_deposit_amounts`.
+/// raise either leg through the timelocked `propose_set_min_deposit_amounts`.
 pub const DEFAULT_MIN_DEPOSIT: i128 = 0;
 
 /// Smallest accepted withdrawal, in shares, when the admin has not configured a
@@ -54,6 +166,13 @@ pub const DEFAULT_MIN_WITHDRAW_SHARES: i128 = 1;
 /// A tracked balance at or below this is dust. It is swept into a full exit
 /// instead of being stranded in the vault forever.
 pub const DUST_THRESHOLD: i128 = 1;
+
+/// Default delay applied to admin changes of economic parameters: 48 hours.
+///
+/// This gives depositors and integrators a window to see a pending change - and
+/// to exit - before it takes effect. The admin can change the delay, but only
+/// through the timelock itself, so it cannot be shortened instantly.
+pub const DEFAULT_TIMELOCK_DELAY: u64 = 48 * 60 * 60;
 
 // The contract's entrypoints are exported only when the vault itself is the
 // contract being deployed. The rebalance engine depends on this module's types
@@ -98,6 +217,16 @@ impl YieldVault {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &false);
+
+        // Time lock for economic-parameter changes, and the queue of changes
+        // waiting out that delay.
+        env.storage().instance().set(
+            &Symbol::new(&env, "timelock_delay"),
+            &DEFAULT_TIMELOCK_DELAY,
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "next_action_id"), &1u64);
 
         // Emergency multisig state: the emergency signer set starts empty and
         // must be configured by the admin; threshold defaults to 3 approvals.
@@ -150,7 +279,33 @@ impl YieldVault {
         crate::upgrade::mark_migrated(&env, &admin)
     }
 
-    /// Deposit tokens into the vault
+    /// Deposit tokens into the vault in exchange for vault shares.
+    ///
+    /// # Share Calculation & Rounding Semantics
+    /// - **First Deposit (`total_shares == 0`)**:
+    ///   Mints shares 1:1 with the combined deposited token value (`amount_a + amount_b`).
+    /// - **Subsequent Deposits (`total_shares > 0`)**:
+    ///   Mints shares proportionally to the combined pool assets:
+    ///   `shares = (amount_a + amount_b) * total_shares / total_value`
+    ///   where `total_value = total_amount_a + total_amount_b`.
+    /// - **Rounding Semantics**:
+    ///   Integer arithmetic performs floor truncation (rounds down towards zero).
+    ///   When a deposit's combined on-chain value is too small relative to `total_value`,
+    ///   integer division truncates to zero shares (`shares == 0`). Rather than silently
+    ///   crediting zero shares and absorbing the user's tokens as an uncredited donation,
+    ///   an explicit pre-transfer guard rejects the transaction before any tokens move
+    ///   with the panic message: `"deposit too small: mints zero shares"`.
+    /// - **Slippage Protection**:
+    ///   The depositor can specify `min_shares`. If `shares < min_shares`, the transaction
+    ///   aborts with panic `"insufficient shares received"`.
+    ///
+    /// # Panics
+    /// - If the vault is paused (`"contract is paused"`).
+    /// - If `amount_a` is below the configured minimum deposit (`"amount_a below minimum deposit"`).
+    /// - If `amount_b` is below the configured minimum deposit (`"amount_b below minimum deposit"`).
+    /// - If the combined deposit amount is not positive (`"deposit must be positive"`).
+    /// - If the deposit would mint zero shares (`"deposit too small: mints zero shares"`).
+    /// - If the minted shares are less than `min_shares` (`"insufficient shares received"`).
     pub fn deposit(
         env: Env,
         user: Address,
@@ -163,21 +318,18 @@ impl YieldVault {
         // Reject sub-unit and zero deposits before any tokens move, so a dust
         // deposit can never be used to grief the vault or other depositors.
         let (min_a, min_b) = Self::get_min_deposit_amounts(env.clone());
-        require!(amount_a >= min_a, "amount_a below minimum deposit");
-        require!(amount_b >= min_b, "amount_b below minimum deposit");
-        require!(amount_a + amount_b > 0, "deposit must be positive");
+        require!(&env, amount_a >= min_a, VaultError::AmountBelowMinimum);
+        require!(&env, amount_b >= min_b, VaultError::AmountBelowMinimum);
+        require!(
+            &env,
+            amount_a + amount_b > 0,
+            VaultError::DepositMustBePositive
+        );
 
         let vault_info = Self::get_vault_info(env.clone());
         let mut metrics = Self::get_metrics(env.clone());
 
-        // Transfer tokens from user to vault
-        let token_a_client = TokenClient::new(&env, &vault_info.token_a);
-        let token_b_client = TokenClient::new(&env, &vault_info.token_b);
-
-        token_a_client.transfer(&user, &env.current_contract_address(), &amount_a);
-        token_b_client.transfer(&user, &env.current_contract_address(), &amount_b);
-
-        // Calculate shares based on the combined value of both tokens
+        // Calculate shares based on the combined value of both tokens before transferring tokens.
         let shares = if metrics.total_shares == 0 {
             // First deposit - 1:1 shares per unit of combined deposit value
             amount_a + amount_b
@@ -193,11 +345,18 @@ impl YieldVault {
 
         // A deposit that rounds down to nothing would be a pure donation, so it
         // is rejected instead of silently credited to existing holders.
-        require!(shares > 0, "deposit too small: mints zero shares");
+        require!(&env, shares > 0, VaultError::DepositTooSmall);
 
         if shares < min_shares {
-            panic!("insufficient shares received");
+            panic_with_error!(&env, VaultError::InsufficientSharesReceived);
         }
+
+        // Transfer tokens from user to vault
+        let token_a_client = TokenClient::new(&env, &vault_info.token_a);
+        let token_b_client = TokenClient::new(&env, &vault_info.token_b);
+
+        token_a_client.transfer(&user, &env.current_contract_address(), &amount_a);
+        token_b_client.transfer(&user, &env.current_contract_address(), &amount_b);
 
         // Update user position
         let mut position = Self::get_user_position(env.clone(), user.clone());
@@ -213,7 +372,9 @@ impl YieldVault {
         metrics.total_amount_a += amount_a;
         metrics.total_amount_b += amount_b;
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
 
         env.events().publish(
             (Symbol::new(&env, "deposit"),),
@@ -236,10 +397,11 @@ impl YieldVault {
         // Reject zero-share and sub-unit withdrawals before any arithmetic, which
         // also removes the divide-by-zero path when no shares are outstanding.
         let min_withdraw_shares = Self::get_min_withdraw_shares(env.clone());
-        require!(shares > 0, "shares must be positive");
+        require!(&env, shares > 0, VaultError::SharesMustBePositive);
         require!(
+            &env,
             shares >= min_withdraw_shares,
-            "withdrawal below minimum shares"
+            VaultError::WithdrawalBelowMinimum
         );
 
         let vault_info = Self::get_vault_info(env.clone());
@@ -247,10 +409,14 @@ impl YieldVault {
         let mut position = Self::get_user_position(env.clone(), user.clone());
 
         if position.shares < shares {
-            panic!("insufficient shares");
+            panic_with_error!(&env, VaultError::InsufficientShares);
         }
 
-        require!(metrics.total_shares > 0, "no shares outstanding");
+        require!(
+            &env,
+            metrics.total_shares > 0,
+            VaultError::NoSharesOutstanding
+        );
 
         // Calculate withdrawal amounts
         let is_full_exit = shares == position.shares;
@@ -272,8 +438,9 @@ impl YieldVault {
             // A partial exit has to redeem something, otherwise the shares would
             // round-trip to dust.
             require!(
+                &env,
                 withdraw_amount_a > 0 || withdraw_amount_b > 0,
-                "withdrawal too small: redeems zero tokens"
+                VaultError::WithdrawalTooSmall
             );
         }
 
@@ -301,11 +468,15 @@ impl YieldVault {
         let final_amount_b = withdraw_amount_b - fee_amount_b - perf_fee_b;
 
         if final_amount_a < min_amount_a {
-            panic!("insufficient amount A");
+            panic_with_error!(&env, VaultError::InsufficientAmountA);
         }
         if final_amount_b < min_amount_b {
-            panic!("insufficient amount B");
+            panic_with_error!(&env, VaultError::InsufficientAmountB);
         }
+
+        // Pace large exits before any tokens move: a failure here rolls the
+        // whole call back, including the window charge.
+        Self::consume_withdraw_pacing(&env, &user, shares, position.shares, metrics.total_shares);
 
         // Update user position. Withdrawing retires the part of the user's
         // position that was outstanding, so it is also the moment their pending
@@ -322,7 +493,9 @@ impl YieldVault {
         metrics.total_amount_a -= withdraw_amount_a;
         metrics.total_amount_b -= withdraw_amount_b;
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
 
         // Transfer tokens to user
         let token_a_client = TokenClient::new(&env, &vault_info.token_a);
@@ -391,14 +564,15 @@ impl YieldVault {
 
             // Derive an annualized APY from this harvest's yield (net rewards vs the
             // vault's value before reinvestment) over the elapsed wall-clock time.
-            let elapsed = env.ledger().timestamp().saturating_sub(metrics.last_harvest);
+            let elapsed = env
+                .ledger()
+                .timestamp()
+                .saturating_sub(metrics.last_harvest);
             let prev_value = metrics.tvl;
             let reward_value = Self::value_in_usd(&env, net_rewards_a, net_rewards_b);
             if elapsed > 0 && prev_value > 0 && reward_value > 0 {
                 // yield_bp = reward_value / prev_value * seconds_per_year / elapsed * 10000
-                let apy_bp = reward_value as u128
-                    * SECONDS_PER_YEAR
-                    * 10000u128
+                let apy_bp = reward_value as u128 * SECONDS_PER_YEAR * 10000u128
                     / (prev_value as u128 * elapsed as u128);
                 // Cap at 100,000% APY to keep the value sane.
                 metrics.apy = apy_bp.min(1000_0000) as u32;
@@ -411,8 +585,18 @@ impl YieldVault {
 
             // Recompute TVL from the reinvested balances.
             metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
+            let snapshot = HarvestSnapshot {
+                timestamp: metrics.last_harvest,
+                tvl: metrics.tvl,
+                apy: metrics.apy,
+            };
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "harvest_snapshot"), &snapshot);
 
-            env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "metrics"), &metrics);
 
             // Transfer fees to treasury
             if fee_a > 0 || fee_b > 0 {
@@ -464,25 +648,28 @@ impl YieldVault {
         )
     }
 
-    /// Set the minimum accepted deposit per leg (admin only). A minimum of 0
-    /// keeps single-leg deposits open; the combined deposit must be positive
-    /// either way.
-    pub fn set_min_deposit_amounts(env: Env, admin: Address, min_a: i128, min_b: i128) {
+    /// Queue a change to the minimum accepted deposit per leg (admin only).
+    ///
+    /// The change is queued rather than applied: it becomes executable once the
+    /// timelock delay has elapsed. A minimum of 0 keeps single-leg deposits
+    /// open; the combined deposit must be positive either way.
+    ///
+    /// Returns the id of the queued action.
+    pub fn propose_set_min_deposit_amounts(
+        env: Env,
+        admin: Address,
+        min_a: i128,
+        min_b: i128,
+    ) -> u64 {
         Self::require_admin(&env, admin.clone());
-        require!(min_a >= 0, "min_amount_a must not be negative");
-        require!(min_b >= 0, "min_amount_b must not be negative");
+        require!(&env, min_a >= 0, VaultError::NegativeMinimumDeposit);
+        require!(&env, min_b >= 0, VaultError::NegativeMinimumDeposit);
 
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "min_deposit_a"), &min_a);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "min_deposit_b"), &min_b);
-
-        env.events().publish(
-            (Symbol::new(&env, "min_deposit_updated"),),
-            (admin, min_a, min_b),
-        );
+        Self::enqueue(
+            env,
+            admin,
+            PendingAdminAction::MinDepositAmounts(min_a, min_b),
+        )
     }
 
     /// Smallest accepted withdrawal, in shares
@@ -493,36 +680,116 @@ impl YieldVault {
             .unwrap_or(DEFAULT_MIN_WITHDRAW_SHARES)
     }
 
-    /// Set the smallest accepted withdrawal in shares (admin only). Must be
-    /// positive so a zero-share withdrawal is always rejected.
-    pub fn set_min_withdraw_shares(env: Env, admin: Address, min_shares: i128) {
+    /// Queue a change to the smallest accepted withdrawal in shares (admin
+    /// only). Must be positive so a zero-share withdrawal is always rejected.
+    ///
+    /// Returns the id of the queued action.
+    pub fn propose_set_min_withdraw_shares(env: Env, admin: Address, min_shares: i128) -> u64 {
         Self::require_admin(&env, admin.clone());
-        require!(min_shares > 0, "min_shares must be positive");
+        require!(&env, min_shares > 0, VaultError::MinSharesMustBePositive);
 
+        Self::enqueue(
+            env,
+            admin,
+            PendingAdminAction::MinWithdrawShares(min_shares),
+        )
+    }
+
+    /// Current withdrawal pacing limits (all zero when pacing is disabled).
+    pub fn get_withdraw_pacing(env: Env) -> WithdrawPacing {
         env.storage()
             .instance()
-            .set(&Symbol::new(&env, "min_withdraw_shares"), &min_shares);
+            .get(&Symbol::new(&env, "withdraw_pacing"))
+            .unwrap_or(WithdrawPacing {
+                user_max_bps: 0,
+                vault_max_bps: 0,
+                window_seconds: 0,
+            })
+    }
+
+    /// Set withdrawal pacing limits (admin only). A zero window, or zero limits,
+    /// disables pacing entirely.
+    ///
+    /// A withdrawal is measured against the position held when the current
+    /// window opened, so lowering the limit cannot strand shares that were
+    /// withdrawable when the window began.
+    pub fn set_withdraw_pacing(
+        env: Env,
+        admin: Address,
+        user_max_bps: u32,
+        vault_max_bps: u32,
+        window_seconds: u64,
+    ) {
+        Self::require_admin(&env, admin.clone());
+
+        require!(
+            user_max_bps <= 10000,
+            "user_max_bps must not exceed 10000 bps"
+        );
+        require!(
+            vault_max_bps <= 10000,
+            "vault_max_bps must not exceed 10000 bps"
+        );
+        let enabled = user_max_bps > 0 || vault_max_bps > 0;
+        require!(
+            !enabled || window_seconds > 0,
+            "window_seconds must be positive when pacing is enabled"
+        );
+
+        let pacing = WithdrawPacing {
+            user_max_bps,
+            vault_max_bps,
+            window_seconds,
+        };
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "withdraw_pacing"), &pacing);
 
         env.events().publish(
-            (Symbol::new(&env, "min_withdraw_shares_updated"),),
-            (admin, min_shares),
+            (Symbol::new(&env, "withdraw_pacing_updated"),),
+            (admin, user_max_bps, vault_max_bps, window_seconds),
         );
     }
 
+    /// One user's withdrawal consumption in the current window.
+    pub fn get_user_withdraw_window(env: Env, user: Address) -> WithdrawWindow {
+        Self::get_withdraw_windows(env.clone())
+            .get(user)
+            .unwrap_or(Self::default_withdraw_window())
+    }
+
+    /// Vault-wide withdrawal consumption in the current window.
+    pub fn get_vault_withdraw_window(env: Env) -> WithdrawWindow {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "vault_withdraw_window"))
+            .unwrap_or(Self::default_withdraw_window())
+    }
+
     /// Get vault information
+    ///
+    /// Fails with [`VaultError::NotInitialized`] before `initialize` has run.
     pub fn get_vault_info(env: Env) -> VaultInfo {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "vault_info"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(VaultError::NotInitialized))
     }
 
     /// Get vault metrics, recomputing TVL on the fly from the current balances
     /// and the configured token prices so it can never get stuck at 0 once
-    /// prices are provided. APY is derived from harvest history in `harvest`.
+    /// prices are provided. APY is derived from the last stored harvest snapshot
+    /// when no new harvest has run yet.
     pub fn get_metrics(env: Env) -> VaultMetrics {
         let mut metrics = Self::stored_metrics(&env);
         metrics.tvl = Self::value_in_usd(&env, metrics.total_amount_a, metrics.total_amount_b);
+        if metrics.apy == 0 {
+            if let Some(snapshot) = Self::get_harvest_snapshot(&env) {
+                if snapshot.apy > 0 {
+                    metrics.apy = snapshot.apy;
+                }
+            }
+        }
         metrics
     }
 
@@ -536,9 +803,22 @@ impl YieldVault {
         })
     }
 
-    /// Get APY for the vault (in basis points)
+    /// Get APY for the vault (in basis points).
+    ///
+    /// This uses the last persisted harvest snapshot as a fallback when no fresh
+    /// harvest has run since the most recent annualized observation. That keeps
+    /// APY reporting stable between harvests while still reflecting real
+    /// historical yield rather than silently collapsing to zero.
     pub fn get_apy(env: Env) -> u32 {
-        Self::get_metrics(env).apy
+        let metrics = Self::get_metrics(env.clone());
+        if metrics.apy > 0 {
+            return metrics.apy;
+        }
+
+        match Self::get_harvest_snapshot(&env) {
+            Some(snapshot) if snapshot.apy > 0 => snapshot.apy,
+            _ => 0,
+        }
     }
 
     /// Get TVL for the vault (USD, scaled by the configured token price scale)
@@ -551,22 +831,35 @@ impl YieldVault {
     pub fn set_prices(env: Env, admin: Address, price_a: i128, price_b: i128) {
         let current_admin = Self::get_admin(env.clone());
         if admin != current_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, VaultError::Unauthorized);
         }
         if price_a < 0 || price_b < 0 {
-            panic!("negative price");
+            panic_with_error!(&env, VaultError::NegativePrice);
         }
 
-        env.storage().instance().set(&Symbol::new(&env, "price_a"), &price_a);
-        env.storage().instance().set(&Symbol::new(&env, "price_b"), &price_b);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "price_a"), &price_a);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "price_b"), &price_b);
 
         let metrics = Self::get_metrics(env.clone());
-        env.storage().instance().set(&Symbol::new(&env, "metrics"), &metrics);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "metrics"), &metrics);
+    }
 
-        env.events().publish(
-            (Symbol::new(&env, "prices_updated"),),
-            (admin, price_a, price_b),
-        );
+    /// Queue a change to the USD prices (scaled) used for TVL (admin only).
+    ///
+    /// Prices are an economic parameter: they change the value backing every
+    /// share, so the change is queued behind the timelock. Returns the id of the
+    /// queued action.
+    pub fn propose_set_prices(env: Env, admin: Address, price_a: i128, price_b: i128) -> u64 {
+        Self::require_admin(&env, admin.clone());
+        require!(price_a >= 0 && price_b >= 0, "price must not be negative");
+
+        Self::enqueue(env, admin, PendingAdminAction::Prices(price_a, price_b))
     }
 
     /// Get the currently configured token prices as (price_a, price_b).
@@ -575,30 +868,98 @@ impl YieldVault {
     }
 
     /// Get treasury address that receives protocol fees
+    ///
+    /// Fails with [`VaultError::NotInitialized`] before `initialize` has run.
     pub fn get_treasury(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "treasury"))
-            .unwrap_optimized()
+            .unwrap_or_else(|| env.panic_with_error(VaultError::NotInitialized))
     }
 
-    /// Point protocol fee routing at a new treasury/DAO address (admin only).
+    /// Queue a change to the treasury/DAO address that receives protocol fees
+    /// (admin only).
     ///
-    /// The treasury is set at initialization like `reward_distributor` does, but it
-    /// can be rotated so a DAO can move its own treasury without redeploying the
-    /// vault. Only affects fees collected after the call.
-    pub fn set_treasury(env: Env, admin: Address, treasury: Address) {
+    /// The treasury is set at initialization like `reward_distributor` does, but
+    /// it can be rotated so a DAO can move its own treasury without redeploying
+    /// the vault. Because fee routing is an economic parameter, the rotation is
+    /// queued behind the timelock and only affects fees collected after it is
+    /// executed. Returns the id of the queued action.
+    pub fn propose_set_treasury(env: Env, admin: Address, treasury: Address) -> u64 {
         Self::require_admin(&env, admin.clone());
 
-        let previous = Self::get_treasury(env.clone());
+        Self::enqueue(env, admin, PendingAdminAction::Treasury(treasury))
+    }
+
+    /// Queue a change to the timelock delay itself (admin only).
+    ///
+    /// The delay can only be changed through the timelock, so a compromised or
+    /// impatient admin cannot shorten the notice window and then act on it in
+    /// the same ledger. Returns the id of the queued action.
+    pub fn propose_set_timelock_delay(env: Env, admin: Address, delay: u64) -> u64 {
+        Self::require_admin(&env, admin.clone());
+        Self::enqueue(env, admin, PendingAdminAction::TimelockDelay(delay))
+    }
+
+    /// Execute a queued action once its timelock has elapsed (admin only).
+    ///
+    /// Executing early is rejected; the action stays queued, so it can still be
+    /// executed after the delay. Executing removes it, so it cannot be replayed.
+    pub fn execute_pending_action(env: Env, admin: Address, action_id: u64) {
+        Self::require_admin(&env, admin.clone());
+
+        let mut pending = Self::get_pending_actions(env.clone());
+        let action = match pending.get(action_id) {
+            Some(action) => action,
+            None => panic!("no pending action with that id"),
+        };
+        require!(
+            env.ledger().timestamp() >= action.executable_at,
+            "action is still timelocked"
+        );
+
+        pending.remove(action_id);
         env.storage()
             .instance()
-            .set(&Symbol::new(&env, "treasury"), &treasury);
+            .set(&Symbol::new(&env, "pending_actions"), &pending);
+
+        Self::apply_action(&env, &action.action);
 
         env.events().publish(
-            (Symbol::new(&env, "treasury_updated"),),
-            (admin, previous, treasury),
+            (Symbol::new(&env, "action_executed"), action_id),
+            (admin, action.executable_at),
         );
+    }
+
+    /// Cancel a queued action (admin only), discarding it without effect.
+    pub fn cancel_pending_action(env: Env, admin: Address, action_id: u64) {
+        Self::require_admin(&env, admin.clone());
+
+        let mut pending = Self::get_pending_actions(env.clone());
+        require!(
+            pending.contains_key(action_id),
+            "no pending action with that id"
+        );
+        pending.remove(action_id);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "pending_actions"), &pending);
+
+        env.events()
+            .publish((Symbol::new(&env, "action_cancelled"), action_id), (admin,));
+    }
+
+    /// A queued action by id, if it is still pending.
+    pub fn get_pending_action(env: Env, action_id: u64) -> Option<PendingAction> {
+        Self::get_pending_actions(env).get(action_id)
+    }
+
+    /// The delay applied to economic-parameter changes, in seconds.
+    pub fn get_timelock_delay(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "timelock_delay"))
+            .unwrap_or(DEFAULT_TIMELOCK_DELAY)
     }
 
     /// Read the raw stored metrics without recomputing TVL
@@ -614,6 +975,13 @@ impl YieldVault {
                 tvl: 0,
                 last_harvest: 0,
             })
+    }
+
+    /// Most recent harvest-level APY snapshot, if any has been recorded.
+    fn get_harvest_snapshot(env: &Env) -> Option<HarvestSnapshot> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "harvest_snapshot"))
     }
 
     /// Configured USD price of token_a, defaulting to 0 when unset
@@ -668,26 +1036,221 @@ impl YieldVault {
         1000i128
     }
 
+    /// A zeroed withdrawal window, used when none has been recorded yet.
+    fn default_withdraw_window() -> WithdrawWindow {
+        WithdrawWindow {
+            window_started_at: 0,
+            shares_withdrawn: 0,
+            window_start_shares: 0,
+        }
+    }
+
+    /// Per-user withdrawal windows, keyed by user address.
+    fn get_withdraw_windows(env: Env) -> Map<Address, WithdrawWindow> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "withdraw_windows"))
+            .unwrap_or(Map::new(&env))
+    }
+
+    /// Enforce withdrawal pacing and, if the withdrawal is allowed, charge it
+    /// against both the user's and the vault's current window.
+    ///
+    /// `position_shares` and `total_shares` are the balances *before* this
+    /// withdrawal; they size the allowances when a window opens. When pacing is
+    /// disabled (the default) this is a no-op, so unpaced vaults keep their
+    /// previous behaviour.
+    fn consume_withdraw_pacing(
+        env: &Env,
+        user: &Address,
+        shares: i128,
+        position_shares: i128,
+        total_shares: i128,
+    ) {
+        let pacing = Self::get_withdraw_pacing(env.clone());
+        if pacing.window_seconds == 0 || (pacing.user_max_bps == 0 && pacing.vault_max_bps == 0) {
+            return;
+        }
+
+        let now = env.ledger().timestamp();
+        // `window_start_shares` is the "is a window open" flag: it is always
+        // positive when one opened (both parties hold shares here), which keeps
+        // a window opened at ledger timestamp 0 distinct from "no window yet".
+        let window_expired = |window: &WithdrawWindow| {
+            window.window_start_shares == 0
+                || now.saturating_sub(window.window_started_at) >= pacing.window_seconds
+        };
+
+        let mut windows = Self::get_withdraw_windows(env.clone());
+        let mut user_window = windows
+            .get(user.clone())
+            .unwrap_or(Self::default_withdraw_window());
+        if window_expired(&user_window) {
+            user_window.window_started_at = now;
+            user_window.shares_withdrawn = 0;
+            user_window.window_start_shares = position_shares;
+        }
+
+        let mut vault_window = Self::get_vault_withdraw_window(env.clone());
+        if window_expired(&vault_window) {
+            vault_window.window_started_at = now;
+            vault_window.shares_withdrawn = 0;
+            vault_window.window_start_shares = total_shares;
+        }
+
+        // Round the allowance up: a limit expressed in bps must never make a
+        // positive position completely unwithdrawable at small share counts.
+        if pacing.user_max_bps > 0 {
+            let allowance =
+                (user_window.window_start_shares * pacing.user_max_bps as i128 + 9999) / 10000;
+            require!(
+                user_window.shares_withdrawn + shares <= allowance,
+                "withdrawal exceeds per-user pacing limit"
+            );
+        }
+        if pacing.vault_max_bps > 0 {
+            let allowance =
+                (vault_window.window_start_shares * pacing.vault_max_bps as i128 + 9999) / 10000;
+            require!(
+                vault_window.shares_withdrawn + shares <= allowance,
+                "withdrawal exceeds vault pacing limit"
+            );
+        }
+
+        user_window.shares_withdrawn += shares;
+        vault_window.shares_withdrawn += shares;
+        windows.set(user.clone(), user_window);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "withdraw_windows"), &windows);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "vault_withdraw_window"), &vault_window);
+    }
+
+    /// The queued timelocked actions, keyed by action id.
+    fn get_pending_actions(env: Env) -> Map<u64, PendingAction> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "pending_actions"))
+            .unwrap_or(Map::new(&env))
+    }
+
+    /// Allocate the next action id.
+    fn next_action_id(env: &Env) -> u64 {
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "next_action_id"))
+            .unwrap_or(1);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "next_action_id"), &(id + 1));
+        id
+    }
+
+    /// Queue `action` so it becomes executable after the current timelock delay.
+    fn enqueue(env: Env, proposer: Address, action: PendingAdminAction) -> u64 {
+        let id = Self::next_action_id(&env);
+        let executable_at = env
+            .ledger()
+            .timestamp()
+            .saturating_add(Self::get_timelock_delay(env.clone()));
+
+        let mut pending = Self::get_pending_actions(env.clone());
+        pending.set(
+            id,
+            PendingAction {
+                id,
+                action,
+                proposer: proposer.clone(),
+                executable_at,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "pending_actions"), &pending);
+
+        env.events().publish(
+            (Symbol::new(&env, "action_proposed"), id),
+            (proposer, executable_at),
+        );
+
+        id
+    }
+
+    /// Apply a matured action to storage. Only `execute_pending_action` calls
+    /// this, after checking the delay and removing the action from the queue.
+    fn apply_action(env: &Env, action: &PendingAdminAction) {
+        match action.clone() {
+            PendingAdminAction::Prices(price_a, price_b) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "price_a"), &price_a);
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "price_b"), &price_b);
+
+                // Recompute TVL so the new prices are reflected immediately.
+                let metrics = Self::get_metrics(env.clone());
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "metrics"), &metrics);
+
+                env.events()
+                    .publish((Symbol::new(env, "prices_updated"),), (price_a, price_b));
+            }
+            PendingAdminAction::MinDepositAmounts(min_a, min_b) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "min_deposit_a"), &min_a);
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "min_deposit_b"), &min_b);
+
+                env.events()
+                    .publish((Symbol::new(env, "min_deposit_updated"),), (min_a, min_b));
+            }
+            PendingAdminAction::MinWithdrawShares(min_shares) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "min_withdraw_shares"), &min_shares);
+
+                env.events().publish(
+                    (Symbol::new(env, "min_withdraw_shares_updated"),),
+                    (min_shares,),
+                );
+            }
+            PendingAdminAction::Treasury(treasury) => {
+                let previous = Self::get_treasury(env.clone());
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "treasury"), &treasury);
+
+                env.events().publish(
+                    (Symbol::new(env, "treasury_updated"),),
+                    (previous, treasury),
+                );
+            }
+            PendingAdminAction::TimelockDelay(delay) => {
+                env.storage()
+                    .instance()
+                    .set(&Symbol::new(env, "timelock_delay"), &delay);
+
+                env.events()
+                    .publish((Symbol::new(env, "timelock_delay_updated"),), (delay,));
+            }
+        }
+    }
+
     /// Get admin address
+    ///
+    /// Fails with [`VaultError::NotInitialized`] before `initialize` has run.
     fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&Symbol::new(&env, "admin"))
-            .unwrap_optimized()
-    }
-
-    /// Integer square root (Babylonian method) for share calculations
-    fn isqrt(n: u128) -> u128 {
-        if n == 0 {
-            return 0;
-        }
-        let mut x = n;
-        let mut y = (x + 1) / 2;
-        while y < x {
-            x = y;
-            y = (x + n / x) / 2;
-        }
-        x
+            .unwrap_or_else(|| env.panic_with_error(VaultError::NotInitialized))
     }
 
     /// Check if vault is paused
@@ -701,7 +1264,7 @@ impl YieldVault {
     /// Require vault not paused
     fn require_not_paused(env: &Env) {
         if Self::is_paused(env.clone()) {
-            panic!("vault is paused");
+            env.panic_with_error(VaultError::Paused);
         }
     }
 
@@ -709,7 +1272,7 @@ impl YieldVault {
     pub fn pause(env: Env, admin: Address) {
         let current_admin = Self::get_admin(env.clone());
         if admin != current_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, VaultError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -722,7 +1285,7 @@ impl YieldVault {
     pub fn unpause(env: Env, admin: Address) {
         let current_admin = Self::get_admin(env.clone());
         if admin != current_admin {
-            panic!("unauthorized");
+            panic_with_error!(&env, VaultError::Unauthorized);
         }
         env.storage()
             .instance()
@@ -735,7 +1298,7 @@ impl YieldVault {
     fn require_admin(env: &Env, caller: Address) {
         let admin = Self::get_admin(env.clone());
         if caller != admin {
-            panic!("unauthorized");
+            env.panic_with_error(VaultError::Unauthorized);
         }
     }
 
@@ -755,7 +1318,7 @@ impl YieldVault {
     pub fn set_emergency_threshold(env: Env, admin: Address, threshold: u32) {
         Self::require_admin(&env, admin);
         if threshold == 0 {
-            panic!("threshold must be at least 1");
+            panic_with_error!(&env, VaultError::ThresholdMustBePositive);
         }
         env.storage()
             .instance()
@@ -795,7 +1358,7 @@ impl YieldVault {
         }
 
         if valid < threshold {
-            panic!("insufficient signatures for emergency action");
+            env.panic_with_error(VaultError::InsufficientEmergencySignatures);
         }
     }
 
@@ -827,10 +1390,10 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::{
         token::{StellarAssetClient, TokenClient},
-        Env, IntoVal, Symbol,
+        Env, Symbol,
     };
 
     fn setup(
@@ -839,11 +1402,11 @@ mod tests {
         harvest_fee: u32,
         withdrawal_fee: u32,
     ) -> (
-        YieldVaultClient,
-        TokenClient,
-        TokenClient,
-        StellarAssetClient,
-        StellarAssetClient,
+        YieldVaultClient<'_>,
+        TokenClient<'_>,
+        TokenClient<'_>,
+        StellarAssetClient<'_>,
+        StellarAssetClient<'_>,
         Address,
         Address,
         Address,
@@ -859,7 +1422,7 @@ mod tests {
         let token_b_admin = StellarAssetClient::new(env, &token_b.address());
         let pool_id = Address::generate(env);
 
-        let vault_id = env.register_contract(None, YieldVault);
+        let vault_id = env.register(YieldVault, ());
         let vault = YieldVaultClient::new(env, &vault_id);
 
         vault.initialize(
@@ -888,8 +1451,8 @@ mod tests {
     }
 
     fn mint_pair(
-        token_a_client: &TokenClient,
-        token_b_client: &TokenClient,
+        _token_a_client: &TokenClient,
+        _token_b_client: &TokenClient,
         token_a_admin: &StellarAssetClient,
         token_b_admin: &StellarAssetClient,
         to: &Address,
@@ -908,7 +1471,15 @@ mod tests {
             setup(&env, 0, 0, 0);
 
         // Token-B-only first deposit must still mint shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 0, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            0,
+            100,
+        );
         let shares = vault.deposit(&user, &0, &100, &0);
 
         assert_eq!(shares, 100);
@@ -925,17 +1496,41 @@ mod tests {
         let user3 = Address::generate(&env);
 
         // First deposit: 100 A + 100 B -> 200 shares (1:1 combined value)
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user1, 100, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user1,
+            100,
+            100,
+        );
         let shares1 = vault.deposit(&user1, &100, &100, &0);
         assert_eq!(shares1, 200);
 
         // Token-B-only deposit: 100 B out of 200 total value -> 100 shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user2, 0, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user2,
+            0,
+            100,
+        );
         let shares2 = vault.deposit(&user2, &0, &100, &0);
         assert_eq!(shares2, 100);
 
         // Mixed deposit: 50 A + 50 B out of 200 total value -> 100 shares
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user3, 50, 50);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user3,
+            50,
+            50,
+        );
         let shares3 = vault.deposit(&user3, &50, &50, &0);
         assert_eq!(shares3, 100);
 
@@ -953,7 +1548,15 @@ mod tests {
         let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 10, 10);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            10,
+            10,
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             vault.deposit(&user, &10, &10, &100);
         }));
@@ -965,7 +1568,7 @@ mod tests {
     fn test_first_deposit_balanced_mints_combined_value_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &1000);
@@ -981,7 +1584,7 @@ mod tests {
     fn test_first_deposit_unbalanced_uses_nonzero_amount() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &2000);
@@ -995,7 +1598,7 @@ mod tests {
     fn test_subsequent_deposit_mints_proportional_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &1000);
@@ -1010,11 +1613,72 @@ mod tests {
         assert_eq!(second_shares, 1000);
     }
 
+    /// A deposit that rounds down to zero shares due to integer truncation
+    /// is rejected with a clear panic rather than silently crediting nothing.
+    #[test]
+    fn test_deposit_that_would_mint_zero_shares_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, _, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+        let dust_user = Address::generate(&env);
+
+        // A large first position makes every later share expensive.
+        token_a_admin.mint(&user, &1_000_000);
+        token_b_admin.mint(&user, &1_000_000);
+        vault.deposit(&user, &1_000_000, &1_000_000, &0);
+
+        // Harvesting raises the value per share above 1, so a 1 unit deposit
+        // now mints 2_000_000 * 1 / 2_002_000 == 0 shares due to integer truncation.
+        vault.harvest(&admin);
+
+        token_a_admin.mint(&dust_user, &1);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.deposit(&dust_user, &1, &0, &0);
+        }));
+
+        assert!(result.is_err(), "a zero-share deposit must be rejected");
+        assert_eq!(vault.get_user_position(&dust_user).shares, 0);
+        // The dust deposit was rejected before transfer, so the balance is untouched.
+        assert_eq!(token_a_client.balance(&dust_user), 1);
+    }
+
+    /// A marginal-but-valid deposit whose share calculation truncates to at least 1 share
+    /// still succeeds and mints the expected non-zero shares.
+    #[test]
+    fn test_marginal_valid_deposit_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, _, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+        let marginal_user = Address::generate(&env);
+
+        // Establish the same pool state:
+        // total_shares = 2_000_000, total_amount_a = 1_000_000, total_amount_b = 1_000_000
+        token_a_admin.mint(&user, &1_000_000);
+        token_b_admin.mint(&user, &1_000_000);
+        vault.deposit(&user, &1_000_000, &1_000_000, &0);
+
+        // Harvesting raises total_value to 2_002_000 while total_shares remains 2_000_000.
+        vault.harvest(&admin);
+
+        // A marginal deposit of 2 units:
+        // (2 + 0) * 2_000_000 / 2_002_000 = 4_000_000 / 2_002_000 = 1 share.
+        // 1 unit was rejected, but 2 units marginally succeeds with 1 share.
+        token_a_admin.mint(&marginal_user, &2);
+
+        let shares = vault.deposit(&marginal_user, &2, &0, &0);
+        assert_eq!(shares, 1, "marginal deposit of 2 units must mint 1 share");
+        assert_eq!(vault.get_user_position(&marginal_user).shares, 1);
+        assert_eq!(token_a_client.balance(&marginal_user), 0);
+    }
+
     #[test]
     fn test_withdraw_returns_tokens_and_burns_shares() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
-        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+        let (vault, _token_a_client, _token_b_client, token_a_admin, token_b_admin, user, _, _) =
             setup(&env, 0, 0, 0);
 
         token_a_admin.mint(&user, &1000);
@@ -1123,6 +1787,158 @@ mod tests {
         assert_eq!(token_b_client.balance(&admin), 0);
     }
 
+    // ============ WITHDRAWAL PACING TESTS (Issue #302) ============
+
+    #[test]
+    fn test_withdraw_pacing_is_disabled_by_default() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, _, _) =
+            setup(&env, 0, 0, 0);
+
+        let pacing = vault.get_withdraw_pacing();
+        assert_eq!(pacing.user_max_bps, 0);
+        assert_eq!(pacing.vault_max_bps, 0);
+        assert_eq!(pacing.window_seconds, 0);
+
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        vault.deposit(&user, &1000, &1000, &0);
+
+        // With pacing off the historical behaviour is unchanged: one call can
+        // still close the whole position.
+        vault.withdraw(&user, &2000, &0, &0);
+        assert_eq!(vault.get_user_position(&user).shares, 0);
+    }
+
+    #[test]
+    fn test_user_pacing_limits_an_abrupt_exit() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+
+        env.ledger().set_timestamp(1_000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        vault.deposit(&user, &1000, &1000, &0);
+
+        // At most half of the position may leave per one-hour window.
+        vault.set_withdraw_pacing(&admin, &5000, &0, &3600);
+
+        vault.withdraw(&user, &1000, &0, &0);
+        assert_eq!(vault.get_user_withdraw_window(&user).shares_withdrawn, 1000);
+
+        let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.withdraw(&user, &1000, &0, &0);
+        }));
+        assert!(
+            blocked.is_err(),
+            "a second 50% exit in the same window must be rejected"
+        );
+        assert_eq!(vault.get_user_position(&user).shares, 1000);
+
+        // A fresh window resets the budget: 50% of the remaining 1000 shares.
+        env.ledger().set_timestamp(1_000 + 3601);
+        vault.withdraw(&user, &500, &0, &0);
+        assert_eq!(vault.get_user_position(&user).shares, 500);
+    }
+
+    #[test]
+    fn test_vault_pacing_caps_a_mass_exit() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, token_a_client, token_b_client, token_a_admin, token_b_admin, user, admin, _) =
+            setup(&env, 0, 0, 0);
+        let other = Address::generate(&env);
+
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &other,
+            1000,
+            1000,
+        );
+        vault.deposit(&user, &1000, &1000, &0); // 2000 shares
+        vault.deposit(&other, &1000, &1000, &0); // 4000 shares total
+
+        // At most 30% of the vault's shares may leave per one-hour window.
+        vault.set_withdraw_pacing(&admin, &0, &3000, &3600);
+
+        // 25% of the vault leaves with the first user.
+        vault.withdraw(&user, &1000, &0, &0);
+        assert_eq!(vault.get_vault_withdraw_window().shares_withdrawn, 1000);
+
+        // A second 25% would take the window to 50%: constrained to the 30%.
+        let blocked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.withdraw(&other, &1000, &0, &0);
+        }));
+        assert!(blocked.is_err(), "the vault-wide cap must bound mass exits");
+
+        // 5% more fits exactly inside the remaining 5% of the allowance.
+        vault.withdraw(&other, &200, &0, &0);
+        assert_eq!(vault.get_vault_withdraw_window().shares_withdrawn, 1200);
+    }
+
+    #[test]
+    fn test_set_withdraw_pacing_is_admin_only() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, ..) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_withdraw_pacing(&stranger, &5000, &0, &3600);
+        }));
+
+        assert!(result.is_err(), "pacing limits must be admin only");
+        assert_eq!(vault.get_withdraw_pacing().user_max_bps, 0);
+    }
+
+    #[test]
+    fn test_set_withdraw_pacing_validates_limits() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        // Above 100% is not a meaningful limit.
+        let too_high = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_withdraw_pacing(&admin, &10001, &0, &3600);
+        }));
+        assert!(too_high.is_err());
+
+        // An enabled limit needs a window to apply over.
+        let no_window = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_withdraw_pacing(&admin, &0, &5000, &0);
+        }));
+        assert!(no_window.is_err());
+    }
+
     #[test]
     fn test_set_treasury_requires_admin() {
         let env = Env::default();
@@ -1132,7 +1948,7 @@ mod tests {
         let new_treasury = Address::generate(&env);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            vault.set_treasury(&stranger, &new_treasury);
+            vault.propose_set_treasury(&stranger, &new_treasury);
         }));
 
         assert!(result.is_err(), "treasury rotation must be admin only");
@@ -1155,7 +1971,10 @@ mod tests {
         ) = setup(&env, 0, 0, 100);
         let new_treasury = Address::generate(&env);
 
-        vault.set_treasury(&admin, &new_treasury);
+        // Rotation is timelocked: propose, wait out the delay, then execute.
+        let action = vault.propose_set_treasury(&admin, &new_treasury);
+        env.ledger().set_timestamp(vault.get_timelock_delay() + 1);
+        vault.execute_pending_action(&admin, &action);
         assert_eq!(vault.get_treasury(), new_treasury);
 
         token_a_admin.mint(&user, &1000);
@@ -1169,6 +1988,168 @@ mod tests {
         assert_eq!(token_a_client.balance(&treasury), 0);
     }
 
+    // ============ ADMIN TIMELOCK TESTS (Issue #301) ============
+
+    #[test]
+    fn test_default_timelock_delay_is_applied_at_initialize() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, ..) = setup(&env, 0, 0, 0);
+        assert_eq!(vault.get_timelock_delay(), DEFAULT_TIMELOCK_DELAY);
+    }
+
+    #[test]
+    fn test_economic_param_change_requires_the_timelock_to_elapse() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        let action = vault.propose_set_prices(&admin, &11, &22);
+
+        // Queued, not applied.
+        assert_eq!(vault.get_prices(), (0, 0));
+        assert_eq!(vault.get_pending_action(&action).unwrap().id, action);
+
+        // Executing early is rejected and leaves the action queued.
+        let early = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &action);
+        }));
+        assert!(early.is_err(), "an unexpired change must be rejected");
+        assert_eq!(vault.get_prices(), (0, 0));
+        assert!(vault.get_pending_action(&action).is_some());
+
+        // Once the delay has elapsed it applies, and cannot be replayed.
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        vault.execute_pending_action(&admin, &action);
+        assert_eq!(vault.get_prices(), (11, 22));
+        assert!(vault.get_pending_action(&action).is_none());
+
+        let replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &action);
+        }));
+        assert!(replay.is_err(), "an executed action must not be replayable");
+    }
+
+    #[test]
+    fn test_pending_action_can_be_cancelled() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        let action = vault.propose_set_min_deposit_amounts(&admin, &5, &5);
+        assert!(vault.get_pending_action(&action).is_some());
+
+        vault.cancel_pending_action(&admin, &action);
+        assert!(vault.get_pending_action(&action).is_none());
+
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        let executed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &action);
+        }));
+        assert!(executed.is_err(), "a cancelled action must not apply");
+
+        // The previous minimum is untouched.
+        assert_eq!(
+            vault.get_min_deposit_amounts(),
+            (DEFAULT_MIN_DEPOSIT, DEFAULT_MIN_DEPOSIT)
+        );
+    }
+
+    #[test]
+    fn test_each_economic_action_takes_effect_after_the_delay() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let new_treasury = Address::generate(&env);
+
+        let deposits = vault.propose_set_min_deposit_amounts(&admin, &11, &22);
+        let withdrawals = vault.propose_set_min_withdraw_shares(&admin, &33);
+        let prices = vault.propose_set_prices(&admin, &44, &55);
+        let treasury = vault.propose_set_treasury(&admin, &new_treasury);
+
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        vault.execute_pending_action(&admin, &deposits);
+        vault.execute_pending_action(&admin, &withdrawals);
+        vault.execute_pending_action(&admin, &prices);
+        vault.execute_pending_action(&admin, &treasury);
+
+        assert_eq!(vault.get_min_deposit_amounts(), (11, 22));
+        assert_eq!(vault.get_min_withdraw_shares(), 33);
+        assert_eq!(vault.get_prices(), (44, 55));
+        assert_eq!(vault.get_treasury(), new_treasury);
+    }
+
+    #[test]
+    fn test_timelock_delay_can_only_be_changed_through_the_timelock() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        // Even setting the delay to zero has to wait out the current delay.
+        let change = vault.propose_set_timelock_delay(&admin, &0);
+        let early = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&admin, &change);
+        }));
+        assert!(early.is_err());
+        assert_eq!(vault.get_timelock_delay(), DEFAULT_TIMELOCK_DELAY);
+
+        env.ledger().set_timestamp(DEFAULT_TIMELOCK_DELAY + 1);
+        vault.execute_pending_action(&admin, &change);
+        assert_eq!(vault.get_timelock_delay(), 0);
+
+        // With a zero delay, propose and execute happen in the same ledger.
+        let action = vault.propose_set_prices(&admin, &7, &9);
+        vault.execute_pending_action(&admin, &action);
+        assert_eq!(vault.get_prices(), (7, 9));
+    }
+
+    #[test]
+    fn test_timelock_operations_are_admin_only() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+
+        let proposed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_prices(&stranger, &1, &1);
+        }));
+        assert!(proposed.is_err(), "only the admin may queue changes");
+
+        let action = vault.propose_set_prices(&admin, &1, &1);
+
+        let executed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.execute_pending_action(&stranger, &action);
+        }));
+        assert!(executed.is_err(), "only the admin may execute changes");
+
+        let cancelled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.cancel_pending_action(&stranger, &action);
+        }));
+        assert!(cancelled.is_err(), "only the admin may cancel changes");
+    }
+
+    #[test]
+    fn test_invalid_values_are_rejected_when_the_action_is_proposed() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+
+        let negative_price = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_prices(&admin, &-1, &1);
+        }));
+        assert!(negative_price.is_err());
+
+        let negative_minimum = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_min_deposit_amounts(&admin, &-1, &0);
+        }));
+        assert!(negative_minimum.is_err());
+
+        let zero_withdraw_minimum = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.propose_set_min_withdraw_shares(&admin, &0);
+        }));
+        assert!(zero_withdraw_minimum.is_err());
+    }
+
     // ─── Per-user harvest tracking (Issue #116) ───────────────────────────────
 
     #[test]
@@ -1179,7 +2160,15 @@ mod tests {
             setup(&env, 0, 0, 0);
 
         env.ledger().set_timestamp(1_000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 1000, 1000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
         vault.deposit(&user, &1000, &1000, &0);
         assert_eq!(vault.get_user_position(&user).last_harvest, 1_000);
 
@@ -1191,7 +2180,10 @@ mod tests {
             position.last_harvest, 5_500,
             "withdraw must stamp the withdrawing user's last harvest"
         );
-        assert_eq!(position.shares, 1500, "partial exit keeps the remaining shares");
+        assert_eq!(
+            position.shares, 1500,
+            "partial exit keeps the remaining shares"
+        );
     }
 
     #[test]
@@ -1202,7 +2194,15 @@ mod tests {
             setup(&env, 0, 0, 0);
 
         env.ledger().set_timestamp(1_000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 1000, 1000);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
         vault.deposit(&user, &1000, &1000, &0);
 
         env.ledger().set_timestamp(9_000);
@@ -1223,8 +2223,24 @@ mod tests {
         let other = Address::generate(&env);
 
         env.ledger().set_timestamp(1_000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &user, 1000, 1000);
-        mint_pair(&token_a_client, &token_b_client, &token_a_admin, &token_b_admin, &other, 100, 100);
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &user,
+            1000,
+            1000,
+        );
+        mint_pair(
+            &token_a_client,
+            &token_b_client,
+            &token_a_admin,
+            &token_b_admin,
+            &other,
+            100,
+            100,
+        );
         vault.deposit(&user, &1000, &1000, &0);
         vault.deposit(&other, &100, &100, &0);
 
@@ -1269,6 +2285,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_get_apy_uses_last_harvest_snapshot_when_no_new_harvest_runs() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, _) = setup(&env, 0, 0, 0);
+        let snapshot = HarvestSnapshot {
+            timestamp: 1_000,
+            tvl: 10_000,
+            apy: 2_500,
+        };
+
+        env.storage().instance().set(
+            &Symbol::new(&env, "harvest_snapshot"),
+            &snapshot,
+        );
+        env.storage().instance().set(
+            &Symbol::new(&env, "metrics"),
+            &VaultMetrics {
+                total_shares: 10,
+                total_amount_a: 5_000,
+                total_amount_b: 5_000,
+                apy: 0,
+                tvl: 10_000,
+                last_harvest: 1_000,
+            },
+        );
+
+        env.ledger().set_timestamp(20_000);
+
+        assert_eq!(vault.get_apy(), 2_500);
+        assert_eq!(vault.get_metrics().apy, 2_500);
+    }
+
     // ─── Insurance Integration ────────────────────────────────────────────────
     //
     // These helpers were written as if they lived inside the contract's
@@ -1276,107 +2325,97 @@ mod tests {
     // does not resolve. Wrapping them in an inherent impl keeps them compiled
     // and callable from tests without exposing them as contract entrypoints.
     impl YieldVault {
-    /// One-click deposit + insurance purchase.
-    ///
-    /// Deposits tokens into the vault and simultaneously purchases an insurance
-    /// policy covering the deposit against impermanent loss.
-    /// Returns (shares_minted, policy_id).
-    pub fn deposit_with_insurance(
-        env: Env,
-        user: Address,
-        amount_a: i128,
-        amount_b: i128,
-        min_shares: i128,
-        coverage_period: u64,
-        current_price_ratio_scaled: i128,
-        historical_volatility_bps: u32,
-        pool_correlation_bps: u32,
-        auto_renew: bool,
-        insurance_contract: Address,
-        reserve_token: Address,
-    ) -> (i128, u64) {
-        Self::require_not_paused(&env);
+        /// One-click deposit + insurance purchase.
+        ///
+        /// Deposits tokens into the vault and simultaneously purchases an insurance
+        /// policy covering the deposit against impermanent loss.
+        /// Returns (shares_minted, policy_id).
+        pub fn deposit_with_insurance(
+            env: Env,
+            user: Address,
+            amount_a: i128,
+            amount_b: i128,
+            min_shares: i128,
+            coverage_period: u64,
+            current_price_ratio_scaled: i128,
+            historical_volatility_bps: u32,
+            pool_correlation_bps: u32,
+            auto_renew: bool,
+            _insurance_contract: Address,
+            reserve_token: Address,
+        ) -> (i128, u64) {
+            Self::require_not_paused(&env);
 
-        // Step 1: Standard deposit
-        let shares = Self::deposit(
-            env.clone(),
-            user.clone(),
-            amount_a,
-            amount_b,
-            min_shares,
-        );
+            // Step 1: Standard deposit
+            let shares = Self::deposit(env.clone(), user.clone(), amount_a, amount_b, min_shares);
 
-        // Step 2: Purchase insurance covering deposit amount_a as proxy for coverage
-        // The coverage amount is the value of token_a deposited (simplified)
-        use crate::il_insurance::ILInsurance;
-        let policy_id = ILInsurance::purchase_insurance(
-            env.clone(),
-            user.clone(),
-            amount_a,
-            coverage_period,
-            current_price_ratio_scaled,
-            historical_volatility_bps,
-            pool_correlation_bps,
-            auto_renew,
-            reserve_token,
-        );
+            // Step 2: Purchase insurance covering deposit amount_a as proxy for coverage
+            // The coverage amount is the value of token_a deposited (simplified)
+            use crate::il_insurance::ILInsurance;
+            let policy_id = ILInsurance::purchase_insurance(
+                env.clone(),
+                user.clone(),
+                amount_a,
+                coverage_period,
+                current_price_ratio_scaled,
+                historical_volatility_bps,
+                pool_correlation_bps,
+                auto_renew,
+                reserve_token,
+            );
 
-        env.events().publish(
-            (Symbol::new(&env, "insured_deposit"), user),
-            (shares, policy_id, amount_a, coverage_period),
-        );
+            env.events().publish(
+                (Symbol::new(&env, "insured_deposit"), user),
+                (shares, policy_id, amount_a, coverage_period),
+            );
 
-        (shares, policy_id)
-    }
-
-    /// Returns the effective APY net of insurance premium cost.
-    ///
-    /// insured_apy = vault_apy - annualised_premium_cost_bps
-    /// where annualised_premium_cost = (premium_bps / coverage_days) * 365
-    pub fn get_insured_apy(
-        env: Env,
-        coverage_period_days: u32,
-        premium_bps: u32,
-    ) -> i32 {
-        let metrics = Self::get_metrics(env);
-        let vault_apy = metrics.apy as i32;
-
-        if coverage_period_days == 0 {
-            return vault_apy;
+            (shares, policy_id)
         }
 
-        // Annualise the premium: (premium_bps / coverage_days) * 365
-        let annualised_premium_bps = (premium_bps as i32 * 365) / coverage_period_days as i32;
+        /// Returns the effective APY net of insurance premium cost.
+        ///
+        /// insured_apy = vault_apy - annualised_premium_cost_bps
+        /// where annualised_premium_cost = (premium_bps / coverage_days) * 365
+        pub fn get_insured_apy(env: Env, coverage_period_days: u32, premium_bps: u32) -> i32 {
+            let metrics = Self::get_metrics(env);
+            let vault_apy = metrics.apy as i32;
 
-        vault_apy - annualised_premium_bps
-    }
+            if coverage_period_days == 0 {
+                return vault_apy;
+            }
 
-    /// Check if a policy is eligible for auto-renewal and return the renewal premium.
-    /// Auto-renewal extends coverage using harvested yield from the user's position.
-    /// Returns (eligible, estimated_premium) – both zero if not eligible.
-    pub fn check_auto_renewal_eligibility(
-        env: Env,
-        user: Address,
-        min_yield_threshold: i128,
-    ) -> (bool, i128) {
-        let position = Self::get_user_position(env.clone(), user.clone());
-        let metrics = Self::get_metrics(env);
+            // Annualise the premium: (premium_bps / coverage_days) * 365
+            let annualised_premium_bps = (premium_bps as i32 * 365) / coverage_period_days as i32;
 
-        // Estimate accrued yield for the user's share of the vault
-        if metrics.total_shares == 0 {
-            return (false, 0);
+            vault_apy - annualised_premium_bps
         }
-        let user_share_of_total = position.shares * 10000 / metrics.total_shares;
-        let estimated_yield_a =
-            metrics.total_amount_a * user_share_of_total / 10000 - position.deposited_amount_a;
 
-        if estimated_yield_a >= min_yield_threshold {
-            // Estimated premium for 30-day renewal at base rate (0.5%)
-            let renewal_premium = position.deposited_amount_a * 50 / 10000;
-            (true, renewal_premium)
-        } else {
-            (false, 0)
+        /// Check if a policy is eligible for auto-renewal and return the renewal premium.
+        /// Auto-renewal extends coverage using harvested yield from the user's position.
+        /// Returns (eligible, estimated_premium) – both zero if not eligible.
+        pub fn check_auto_renewal_eligibility(
+            env: Env,
+            user: Address,
+            min_yield_threshold: i128,
+        ) -> (bool, i128) {
+            let position = Self::get_user_position(env.clone(), user.clone());
+            let metrics = Self::get_metrics(env);
+
+            // Estimate accrued yield for the user's share of the vault
+            if metrics.total_shares == 0 {
+                return (false, 0);
+            }
+            let user_share_of_total = position.shares * 10000 / metrics.total_shares;
+            let estimated_yield_a =
+                metrics.total_amount_a * user_share_of_total / 10000 - position.deposited_amount_a;
+
+            if estimated_yield_a >= min_yield_threshold {
+                // Estimated premium for 30-day renewal at base rate (0.5%)
+                let renewal_premium = position.deposited_amount_a * 50 / 10000;
+                (true, renewal_premium)
+            } else {
+                (false, 0)
+            }
         }
-    }
     }
 }
