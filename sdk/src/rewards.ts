@@ -721,7 +721,14 @@ export class RewardsSDK {
     ): Promise<SwapQuote> {
         validateMaxSlippageBps(maxSlippageBps);
         // In production, call swap router contract
-        const protocolFee = BigIntString.mul(inputAmount, '25'); // 0.25%
+        // Protocol fee: 0.25% (25 basis points), matching PROTOCOL_TREASURY_FEE_BPS in
+        // the swap_router contract.  The fee is transferred directly to the treasury
+        // address stored in the SwapRouter contract state; it does NOT flow to stakers
+        // immediately.  To distribute collected fees to stakers the treasury must call
+        // `collect_fees` on the FeeDistributor contract, after which stakers can claim
+        // their proportional weekly share via `claim_week`.
+        const PROTOCOL_FEE_BPS = 25n;
+        const protocolFee = (BigInt(inputAmount) * PROTOCOL_FEE_BPS / 10_000n).toString();
 
         return {
             inputToken,

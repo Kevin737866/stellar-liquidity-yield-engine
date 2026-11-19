@@ -30,6 +30,32 @@ const CONFIG = {
   timelock: 'TIMELOCK_CONTRACT_ADDRESS',
 };
 
+// ===== Fee Routing: How Protocol Fees Flow =====
+//
+// Every swap executed through the SwapRouter contract deducts a 0.25%
+// protocol fee (PROTOCOL_TREASURY_FEE_BPS = 25 basis points) from the
+// output amount.  That fee is transferred directly to the treasury address
+// stored in SwapRouter's on-chain state — it does NOT go to stakers yet.
+//
+// Two-step flow:
+//   1. SwapRouter  →  treasury address
+//        The router calls token.transfer(contract, treasury, protocol_fee).
+//
+//   2. Treasury    →  FeeDistributor (manual step)
+//        The treasury account must call FeeDistributor.collect_fees(caller, amount)
+//        to register the amount with the distributor.  Only the treasury
+//        address is authorised to call collect_fees; any other caller panics
+//        with "unauthorized: treasury required".
+//
+//   3. Stakers     ←  FeeDistributor (per-week claim)
+//        Each staker calls FeeDistributor.claim_week(user, week) to receive
+//        their share: week_fees * user_stake / total_stake.
+//        Stakers can also call claim_week for up to the previous 52 weeks.
+//
+// Governance can change the performance fee (5–15%) and withdrawal fee
+// (0.1–1%) via proposal.  These are charged by the vault, not the router,
+// and are also forwarded to the treasury before reaching stakers.
+
 // ===== Initialize SDK =====
 const userKeypair = Keypair.random(); // In production, use actual keypair
 

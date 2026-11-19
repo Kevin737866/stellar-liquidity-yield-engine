@@ -137,6 +137,51 @@ describe('slippage tolerance validation', () => {
   });
 });
 
+// ===== Fee-routing alignment: SDK quote matches contract constant =====
+//
+// The swap_router contract uses PROTOCOL_TREASURY_FEE_BPS = 25 (0.25%).
+// The fee is computed as: expected_output * 25 / 10_000.
+// The SDK must reproduce the same arithmetic so callers see accurate quotes.
+//
+// Fee-routing flow (from contract source):
+//   SwapRouter.swap  →  transfers fee to the treasury address stored in the
+//                       router's own state.
+//   Treasury account →  calls FeeDistributor.collect_fees(caller, amount)
+//                       to register the week's fees (only the treasury may
+//                       call this — any other caller panics).
+//   Stakers          ←  call FeeDistributor.claim_week(user, week) to
+//                       receive their proportional share of that week's fees.
+describe('getSwapQuote fee-routing alignment', () => {
+  it('computes protocolFee as amount * 25 / 10_000, matching PROTOCOL_TREASURY_FEE_BPS = 25', async () => {
+    const rewardsSDK = createRewardsSDK();
+    const inputAmount = '10000'; // 10 000 stroops
+
+    const quote = await rewardsSDK.getSwapQuote('USDC', 'XLM', inputAmount);
+
+    // 10 000 * 25 / 10 000 = 25
+    expect(quote.protocolFee).toBe('25');
+  });
+
+  it('rounds down (integer division) for amounts that do not divide evenly', async () => {
+    const rewardsSDK = createRewardsSDK();
+    // 1 stroop * 25 / 10_000 = 0 (truncated)
+    expect((await rewardsSDK.getSwapQuote('USDC', 'XLM', '1')).protocolFee).toBe('0');
+
+    // 399 * 25 / 10_000 = 0  (< 1 after truncation)
+    expect((await rewardsSDK.getSwapQuote('USDC', 'XLM', '399')).protocolFee).toBe('0');
+
+    // 400 * 25 / 10_000 = 1
+    expect((await rewardsSDK.getSwapQuote('USDC', 'XLM', '400')).protocolFee).toBe('1');
+  });
+
+  it('scales linearly for large amounts', async () => {
+    const rewardsSDK = createRewardsSDK();
+    // 1_000_000 * 25 / 10_000 = 2_500
+    const quote = await rewardsSDK.getSwapQuote('USDC', 'XLM', '1000000');
+    expect(quote.protocolFee).toBe('2500');
+  });
+});
+
 describe('RewardsSDK claim deadlines', () => {
   afterEach(() => {
     jest.restoreAllMocks();
