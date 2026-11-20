@@ -213,6 +213,10 @@ export function createGovernanceClient(
   );
 }
 
+// SDK API compatibility: exported surface is covered by regression tests
+// (see sdk/tests/apiCompatibility.test.ts) so that removing or renaming a
+// public export is caught before a release ships.
+
 // Version - single source of truth from package.json
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 export const VERSION: string = (() => {
