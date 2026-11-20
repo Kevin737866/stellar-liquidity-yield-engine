@@ -2,7 +2,9 @@
 
 import { Keypair, Networks } from 'stellar-sdk';
 import { GovernanceSDK, type GovernanceContracts } from './governance';
+import { createNetworkConfig } from './networkConfig';
 export * from './keeperBackoff';
+export * from './networkConfig';
 export * from './types';
 export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
@@ -125,51 +127,12 @@ export {
   GOVERNANCE_CONSTANTS
 } from './governance';
 
-// Required contract IDs are read from the environment rather than hardcoded,
-// since a hardcoded placeholder address is not a usable/deployed contract.
-// Set these to the real contract IDs from your deployment before using a
-// network config - see the README / examples for the full variable list.
-function requiredEnvContract(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `Missing required environment variable ${name}: set it to a real deployed contract ID before using this network config.`
-    );
-  }
-  return value;
-}
-
-function contractsFromEnv() {
-  return {
-    get yieldEngine() { return requiredEnvContract('YIELD_ENGINE_CONTRACT_ID'); },
-    get rewardDistributor() { return requiredEnvContract('REWARD_DISTRIBUTOR_CONTRACT_ID'); },
-    get rebalanceEngine() { return requiredEnvContract('REBALANCE_ENGINE_CONTRACT_ID'); },
-    get strategyRegistry() { return requiredEnvContract('STRATEGY_REGISTRY_CONTRACT_ID'); },
-    get governanceToken() { return requiredEnvContract('GOVERNANCE_TOKEN_CONTRACT_ID'); },
-    get votingEscrow() { return requiredEnvContract('VOTING_ESCROW_CONTRACT_ID'); },
-    get stakingContract() { return requiredEnvContract('STAKING_CONTRACT_ID'); },
-    get feeDistributor() { return requiredEnvContract('FEE_DISTRIBUTOR_CONTRACT_ID'); }
-  };
-}
-
 // Network configurations
-//
-// Public endpoints are only defaults: every one of them can be pointed at a
-// custom RPC via the environment, which is what `Soroban_RPC_URL` /
-// `HORIZON_URL` in `.env.example` are for. See `.emdfile` for the convention.
-export const TESTNET_CONFIG = {
-  network: 'testnet' as const,
-  horizonUrl: process.env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
-  sorobanRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
-  contracts: contractsFromEnv()
-};
-
-export const MAINNET_CONFIG = {
-  network: 'mainnet' as const,
-  horizonUrl: process.env.MAINNET_HORIZON_URL || 'https://horizon.stellar.org',
-  sorobanRpcUrl: process.env.MAINNET_SOROBAN_RPC_URL || 'https://soroban.stellar.org',
-  contracts: contractsFromEnv()
-};
+// Public endpoints are defaults. Operators may override endpoints and contract
+// IDs through the documented environment variables. Legacy *_ADDRESS names
+// remain accepted for backward compatibility.
+export const TESTNET_CONFIG = createNetworkConfig('testnet');
+export const MAINNET_CONFIG = createNetworkConfig('mainnet');
 
 // Utility functions
 export function createVaultClient(vaultAddress: string, network: 'testnet' | 'mainnet' = 'testnet') {

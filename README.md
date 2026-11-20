@@ -401,6 +401,10 @@ Real-time monitoring of:
 
 ## 🌐 Network Support
 
+For the complete operator reference—including environment variable names,
+custom endpoints, passphrases, failure behavior, and startup checks—see
+[Network Configuration Reference](docs/NETWORK_CONFIGURATION.md).
+
 ### Testnet
 - **RPC**: `https://soroban-testnet.stellar.org`
 - **Horizon**: `https://horizon-testnet.stellar.org`
@@ -425,12 +429,16 @@ cp .env.example .env
 STELLAR_NETWORK=testnet
 SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 HORIZON_URL=https://horizon-testnet.stellar.org
+TESTNET_NETWORK_PASSPHRASE=
+MAINNET_SOROBAN_RPC_URL=https://soroban.stellar.org
+MAINNET_HORIZON_URL=https://horizon.stellar.org
+MAINNET_NETWORK_PASSPHRASE=
 
-# Contract addresses
-YIELD_ENGINE_ADDRESS=...
-REWARD_DISTRIBUTOR_ADDRESS=...
-REBALANCE_ENGINE_ADDRESS=...
-STRATEGY_REGISTRY_ADDRESS=...
+# Contract addresses (legacy *_ADDRESS names remain accepted)
+YIELD_ENGINE_CONTRACT_ID=...
+REWARD_DISTRIBUTOR_CONTRACT_ID=...
+REBALANCE_ENGINE_CONTRACT_ID=...
+STRATEGY_REGISTRY_CONTRACT_ID=...
 
 # Bot configuration
 BOT_PRIVATE_KEY=...
