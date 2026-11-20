@@ -37,6 +37,13 @@ async function setupAutoCompounding() {
     // 1. Get vault information
     console.log('📊 Fetching vault information...');
     const vaultInfo = await vaultClient.getVaultInfo();
+    // All three fees are routed directly to the protocol treasury by the
+    // yield_vault contract:
+    //   - feeRate (performance fee): deducted from realized gains on withdraw
+    //   - harvestFee: deducted from raw rewards before reinvestment
+    //   - withdrawalFee: deducted from the gross withdrawal amount
+    // None of these amounts stay in the vault or are distributed to LPs;
+    // they are transferred to the treasury address stored on-chain.
     console.log('Vault Info:', {
       name: vaultInfo.name,
       tokenA: vaultInfo.tokenA,
