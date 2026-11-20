@@ -595,6 +595,10 @@ class YieldCalculator {
 }
 ```
 
+## SDK Error and Retry API
+
+For domain error types, retry options, transient-error detection, RPC wrapper behavior, and write-retry safety guidance, see [SDK Error and Retry API Reference](docs/SDK_ERROR_RETRY_API.md).
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.

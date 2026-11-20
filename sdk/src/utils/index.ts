@@ -3,7 +3,12 @@
 export { waitForTransaction } from './transaction';
 export type { WaitForTransactionOptions } from './transaction';
 
-export { withRetry, createRetryWrapper, DEFAULT_RETRY_OPTIONS } from './retry';
+export {
+  withRetry,
+  createRetryWrapper,
+  DEFAULT_RETRY_OPTIONS,
+  RetryConfigurationError,
+} from './retry';
 export type { RetryOptions, RetryResult } from './retry';
 
 export {
