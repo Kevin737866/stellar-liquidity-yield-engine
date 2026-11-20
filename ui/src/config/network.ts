@@ -39,6 +39,33 @@ export type ContractRole =
 export type ContractAddresses = Record<ContractRole, string>;
 
 /**
+ * Wallet providers the UI can sign with, and the permissions each one needs.
+ *
+ * This is documentation-as-code: the UI only ever signs through Freighter
+ * (see `src/lib/freighter.ts`), and this record makes that support matrix
+ * explicit so operators and contributors can check it without reading the
+ * wallet integration code.
+ */
+export type WalletPermission = 'read-public-key' | 'sign-transaction' | 'read-network';
+
+export interface WalletProviderSupport {
+  /** Human-readable provider name. */
+  name: string;
+  /** Whether the UI currently supports this provider. */
+  supported: boolean;
+  /** Permissions the provider must grant before the UI can operate. */
+  permissions: WalletPermission[];
+}
+
+export const SUPPORTED_WALLET_PROVIDERS: Record<string, WalletProviderSupport> = {
+  freighter: {
+    name: 'Freighter',
+    supported: true,
+    permissions: ['read-public-key', 'sign-transaction', 'read-network'],
+  },
+};
+
+/**
  * Public endpoints used when the matching environment variable is unset.
  * These are defaults, not hardcoding: every one is overridable below.
  */
