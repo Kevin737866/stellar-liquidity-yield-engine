@@ -97,6 +97,15 @@ pub struct RebalanceProposal {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedDataAge {
+    pub updated_at: u64,
+    pub age_seconds: u64,
+    pub max_age_seconds: u64,
+    pub fresh: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RebalanceHistory {
     pub timestamp: u64,
     pub from_pool: Address,
@@ -247,9 +256,10 @@ impl RebalanceEngine {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_apy_age"), &DEFAULT_MAX_APY_AGE);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "max_slippage_bps"), &DEFAULT_MAX_SLIPPAGE_BPS);
+        env.storage().instance().set(
+            &Symbol::new(&env, "max_slippage_bps"),
+            &DEFAULT_MAX_SLIPPAGE_BPS,
+        );
         // Record the storage schema version of this build; `migrate` moves it
         // forward after an upgrade swaps the code.
         crate::upgrade::set_storage_version(&env, crate::upgrade::STORAGE_VERSION);
@@ -471,7 +481,10 @@ impl RebalanceEngine {
     /// Set the maximum slippage tolerated at execution time (admin only).
     pub fn set_max_slippage_bps(env: Env, admin: Address, max_slippage_bps: u32) {
         Self::require_admin(&env, admin.clone());
-        require!(max_slippage_bps <= 10000, "max_slippage_bps must not exceed 10000");
+        require!(
+            max_slippage_bps <= 10000,
+            "max_slippage_bps must not exceed 10000"
+        );
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_slippage_bps"), &max_slippage_bps);
@@ -1067,11 +1080,18 @@ impl RebalanceEngine {
             return 0;
         }
 
-        // r scaled by 10000: (current / entry) * 10000
-        let r_scaled = (price_ratio * 10000) / initial_price_ratio;
+        // Use the larger/smaller ratio to make the result symmetric for
+        // reciprocal price moves and clamp the intermediate to remain overflow-safe.
+        let larger = price_ratio.max(initial_price_ratio) as u128;
+        let smaller = price_ratio.min(initial_price_ratio) as u128;
+        let r_scaled = larger
+            .checked_mul(10000)
+            .and_then(|numerator| numerator.checked_div(smaller))
+            .unwrap_or(u128::MAX)
+            .min(1_000_000_000);
 
         // sqrt(r) scaled by 10000 = sqrt(r_scaled * 10000)
-        let sqrt_r_scaled = Self::isqrt((r_scaled as u128) * 10000);
+        let sqrt_r_scaled = Self::isqrt(r_scaled * 10000);
 
         // term = (2 * sqrt(r) / (1 + r)) * 10000
         let denominator = r_scaled as u128 + 10000;
@@ -1751,7 +1771,12 @@ impl RebalanceEngine {
     }
 
     /// Set consecutive failure breaker threshold for a specific strategy (admin only).
-    pub fn set_strategy_breaker_threshold(env: Env, admin: Address, strategy_id: u32, threshold: u32) {
+    pub fn set_strategy_breaker_threshold(
+        env: Env,
+        admin: Address,
+        strategy_id: u32,
+        threshold: u32,
+    ) {
         Self::require_admin(&env, admin.clone());
         require!(threshold > 0, "threshold must be greater than zero");
         let mut thresholds: Map<u32, u32> = env
@@ -1764,7 +1789,10 @@ impl RebalanceEngine {
             .instance()
             .set(&Symbol::new(&env, "strat_breaker_thresh"), &thresholds);
         env.events().publish(
-            (Symbol::new(&env, "strat_breaker_thresh_updated"), strategy_id),
+            (
+                Symbol::new(&env, "strat_breaker_thresh_updated"),
+                strategy_id,
+            ),
             (admin, threshold),
         );
     }
@@ -2312,6 +2340,8 @@ mod tests {
 
         let err = client.try_get_strategy(&7).unwrap_err().unwrap();
         assert_eq!(err, RebalanceError::StrategyNotFound.into());
+    }
+
     // ============ REBALANCE PACING TESTS (Issue #302) ============
 
     /// Real token contracts for a rebalance leg: the engine pulls the `from`
@@ -2547,7 +2577,10 @@ mod tests {
 
         assert_eq!(client.get_pool_breaker_threshold(&pool_a), 2);
         assert_eq!(client.get_pool_breaker_threshold(&pool_b), 4);
-        assert_eq!(client.get_pool_breaker_threshold(&pool_c), EMERGENCY_STOP_WINDOW);
+        assert_eq!(
+            client.get_pool_breaker_threshold(&pool_c),
+            EMERGENCY_STOP_WINDOW
+        );
 
         // Record 2 failures for Pool A
         client.execute_rebalance(&caller, &failed_proposal(&env, &pool_a));

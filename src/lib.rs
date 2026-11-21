@@ -1,4 +1,4 @@
-#`!no_std]
+#![no_std]
 // Contract entrypoints are part of the on-chain ABI: their argument lists are
 // fixed by the deployed interface (the SDK, UI and tests call them
 // positionally), so bundling parameters into structs just to satisfy the lint
@@ -72,14 +72,12 @@ mod oracle_registry;
 mod rebalance_engine;
 #[cfg(feature = "reward-distributor")]
 mod reward_distributor;
+#[cfg(feature = "risk-engine")]
+mod risk_engine;
 #[cfg(feature = "strategy-registry")]
 mod strategy_registry;
 #[cfg(any(feature = "yield-vault", feature = "rebalance-engine"))]
 mod yield_vault;
-#[cfg(feature = "oracle-registry")]
-mod oracle_registry;
-#[cfg(feature = "risk-engine")]
-mod risk_engine;
 
 #[cfg(feature = "actuary")]
 pub use actuary::*;
@@ -87,18 +85,18 @@ pub use actuary::*;
 pub use il_insurance::*;
 #[cfg(feature = "oracle-registry")]
 pub use oracle_registry::*;
+#[cfg(feature = "oracle-registry")]
+pub use oracle_registry::*;
 #[cfg(feature = "rebalance-engine")]
 pub use rebalance_engine::*;
 #[cfg(feature = "reward-distributor")]
 pub use reward_distributor::*;
+#[cfg(feature = "risk-engine")]
+pub use risk_engine::*;
 #[cfg(feature = "strategy-registry")]
 pub use strategy_registry::*;
 #[cfg(feature = "yield-vault")]
 pub use yield_vault::*;
-#[cfg(feature = "oracle-registry")]
-pub use oracle_registry::*;
-#[cfg(feature = "risk-engine")]
-pub use risk_engine::*;
 
 #[cfg(feature = "engine")]
 #[contract]
@@ -121,8 +119,7 @@ const EMERGENCY_HISTORY_ITEM: Symbol = Symbol::new(&Env::empty(), "emergency_his
 /// order can be verified independently of storage iteration ordering.
 #[cfg(feature = "engine")]
 #[contracttype]
-#[derive(Clone, Debug, Eq)
-#[derive(PartialEq, PartialOrder)]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd)]
 pub struct EmergencyRecord {
     /// Zero-based position in the append-only history.
     pub index: u32,
@@ -135,7 +132,7 @@ pub struct EmergencyRecord {
 }
 
 #[cfg(feature = "engine")]
-#[contractimpls]
+#[contractimpl]
 impl StellarLiquidityYieldEngine {
     /// Initialize the yield engine with admin and registry
     pub fn initialize(
@@ -169,7 +166,7 @@ impl StellarLiquidityYieldEngine {
 
     /// Replace this contract's code in place, keeping its address and storage
     /// (admin only). See [crate::upgrade] and `docs/UPGRADING.md`.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdkz:BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
     }
@@ -341,7 +338,7 @@ impl StellarLiquidityYieldEngine {
             .get(&EMERGENCY_HISTORY_LEN)
             .unwrap_or(0);
         if index >= len {
-            panic("emergency history index out of bounds")
+            panic!("emergency history index out of bounds");
         }
         env.storage()
             .persistent()
@@ -377,10 +374,8 @@ impl StellarLiquidityYieldEngine {
             .instance()
             .set(&EMERGENCY_HISTORY_LEN, &(index + 1));
 
-        env.events().publish(
-            ("emergency_record_appended",),
-            (index, action, admin),
-        );
+        env.events()
+            .publish(("emergency_record_appended",), (index, action, admin));
     }
 
     /// Panic unless the contract is unpaused.

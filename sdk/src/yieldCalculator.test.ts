@@ -1,5 +1,6 @@
 import { YieldCalculator } from './yieldCalculator';
 import { PoolInfo } from './types';
+import fc from 'fast-check';
 
 describe('YieldCalculator.calculateImpermanentLoss', () => {
   it('returns zero IL when the price ratio has not changed', () => {
@@ -49,6 +50,44 @@ describe('YieldCalculator.calculateImpermanentLoss', () => {
     expect(result.initialPriceRatio).toBe(1.2);
     expect(result.currentPriceRatio).toBe(0.9);
     expect(result.timeElapsed).toBe(60);
+  });
+
+  it('satisfies key properties across generated positive prices', () => {
+    fc.assert(
+      fc.property(
+        fc.double({ min: 0.000001, max: 1_000_000, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 0.000001, max: 1_000_000, noNaN: true, noDefaultInfinity: true }),
+        (initial, current) => {
+          const result = YieldCalculator.calculateImpermanentLoss(initial, current, 1);
+          const reciprocal = YieldCalculator.calculateImpermanentLoss(current, initial, 1);
+
+          expect(result.ilPercent).toBeGreaterThanOrEqual(-100);
+          expect(result.ilPercent).toBeLessThanOrEqual(0);
+          expect(result.ilPercent).not.toBeNaN();
+          expect(reciprocal.ilPercent).toBeCloseTo(result.ilPercent, 10);
+
+          if (initial === current) {
+            expect(result.ilPercent).toBe(0);
+          }
+        }
+      ),
+      { numRuns: 500 }
+    );
+  });
+
+  it('returns zero for zero and negative price edges', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.constant(0), fc.double({ min: -1_000_000, max: -0.000001, noNaN: true })),
+        (edgePrice) => {
+          const invalidBaseline = YieldCalculator.calculateImpermanentLoss(edgePrice, 1, 1);
+          const invalidCurrent = YieldCalculator.calculateImpermanentLoss(1, edgePrice, 1);
+
+          expect(invalidBaseline.ilPercent).toBe(0);
+          expect(invalidCurrent.ilPercent).toBe(0);
+        }
+      )
+    );
   });
 });
 
