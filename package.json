@@ -4,12 +4,17 @@
   "description": "TypeScript SDK for Stellar liquidity and yield optimization engine",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "type": "module",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "jest",
     "lint": "eslint src/**/*.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "validate:docs": "node scripts/validate-docs.js",
+    "validate:snippets": "node scripts/validate-docs.js --snippets-only",
+    "validate:links": "node scripts/validate-docs.js --links-only",
+    "validate": "npm run validate:docs && npm run validate:snippets"
   },
   "dependencies": {
     "axios": "^1.6.0",
