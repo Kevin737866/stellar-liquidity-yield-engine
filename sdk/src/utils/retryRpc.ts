@@ -120,8 +120,8 @@ export class RetryRpcServer {
    * Get events with retry for transient errors.
    */
   async getEvents(
-    request: SorobanRpc.Api.GetEventsRequest
-  ): Promise<SorobanRpc.Api.GetEventsResponse> {
+    request: Parameters<SorobanRpc.Server["getEvents"]>[0]
+  ): Promise<Awaited<ReturnType<SorobanRpc.Server["getEvents"]>>> {
     if (!this.options.retryReads) {
       return this.server.getEvents(request);
     }

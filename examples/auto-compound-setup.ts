@@ -96,8 +96,6 @@ async function setupAutoCompounding() {
     // 5. Configure auto-compounding settings
     console.log('\n⚙️ Configuring auto-compounding settings...');
     
-    // In a real implementation, this would call a configuration function
-    // For now, we'll simulate the configuration
     const autoCompoundConfig = {
       enabled: true,
       harvestFrequency: 86400, // Every 24 hours
