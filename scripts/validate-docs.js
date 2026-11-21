@@ -278,11 +278,11 @@ async function validateUrl(url, filePath, lineNumber) {
       error: `HTTP ${response.status}: ${response.statusText}` 
     };
   } catch (error) {
-    if (error.name === 'AbortError') {
-      return { valid: false, error: 'Request timeout' };
-    }
     if (isAllowedUnreachable(url)) {
       return { valid: true, ignored: true, warning: `Unreachable but allowed: ${error.message}` };
+    }
+    if (error.name === 'AbortError') {
+      return { valid: false, error: 'Request timeout' };
     }
     return { valid: false, error: error.message };
   }
