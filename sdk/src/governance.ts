@@ -6,9 +6,7 @@
  */
 
 import { 
-  Address,
   Keypair, 
-  nativeToScVal,
   SorobanRpc, 
   Transaction, 
   TransactionBuilder,
@@ -782,14 +780,13 @@ export class GovernanceSDK {
   }
 
   /**
-   * Cast a vote on a proposal. `reason` is retained for compatibility; the
-   * current governor contract ABI does not accept or store it.
+   * Cast a vote on a proposal
    */
   async castVote(
     proposalId: number,
     support: boolean,
     amount: bigint,
-    _reason?: string
+    reason?: string
   ): Promise<Transaction> {
     if (!this.keypair) {
       throw new Error('Keypair required');
@@ -809,6 +806,7 @@ export class GovernanceSDK {
         proposal_id: proposalId,
         support: support,
         amount: amount.toString(),
+        reason: reason || ''
       }
     );
 
@@ -1069,20 +1067,20 @@ export class GovernanceSDK {
         .addOperation(
           contract.call(
             functionName,
-            ...this.encodeContractArgs(args)
+            ...Object.entries(args).map(([, value]) => value)
           )
         )
-        .setTimeout(180)
         .build()
     );
 
-    if ('error' in simResult) {
-      throw new Error(`Soroban simulation failed: ${simResult.error}`);
+    if (
+      simResult.result &&
+      (simResult.result as any).status === 'SUCCESS' &&
+      (simResult.result as any).returnValue
+    ) {
+      return scValToNative((simResult.result as any).returnValue);
     }
-    if (!('result' in simResult) || !simResult.result) {
-      throw new Error('Soroban simulation returned no result');
-    }
-    return scValToNative(simResult.result.retval);
+    return null;
   }
 
   /**
@@ -1103,48 +1101,13 @@ export class GovernanceSDK {
       .addOperation(
         contract.call(
           functionName,
-          ...this.encodeContractArgs(args)
+          ...Object.entries(args).map(([, value]) => value)
         )
       )
       .setTimeout(180)
       .build();
 
     return tx;
-  }
-
-  private encodeContractArgs(args: Record<string, any>) {
-    return Object.entries(args).map(([name, value]) => {
-      if (name === 'call_data') {
-        return nativeToScVal(
-          (value as CallData[]).map((call) => ({
-            contract_address: Address.fromString(call.contractAddress),
-            function_name: nativeToScVal(call.functionName, { type: 'symbol' }),
-            args: nativeToScVal(call.args.map((arg) => nativeToScVal(arg))),
-          })),
-          {
-            type: {
-              contract_address: ['symbol', null],
-              function_name: ['symbol', null],
-              args: ['symbol', null],
-            },
-          }
-        );
-      }
-
-      if (['from', 'to', 'user', 'addr', 'proposer', 'voter'].includes(name)) {
-        return Address.fromString(value).toScVal();
-      }
-      if (name === 'proposal_id') {
-        return nativeToScVal(value, { type: 'u32' });
-      }
-      if (name === 'amount') {
-        return nativeToScVal(BigInt(value), { type: 'i128' });
-      }
-      if (['duration', 'new_duration', 'voting_duration', 'week'].includes(name)) {
-        return nativeToScVal(value, { type: 'u64' });
-      }
-      return nativeToScVal(value);
-    });
   }
 
   /**
