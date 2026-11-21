@@ -135,3 +135,6 @@ jobs:
       # ProtocolGovernor, ...), so they are excluded until they are repaired.
       - name: Run contract test suite
         run: cargo test --all-features --lib --test upgrade_tests --test swap_router_fuzz
+
+      - name: Verify contribution contract checklist
+        run: cargo test --test documentation_contract_checklist
