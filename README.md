@@ -528,6 +528,13 @@ cd ui/
 npm test
 ```
 
+The SDK governance tests exercise proposal creation, voting, queueing,
+execution, cancellation, and transaction failures against a mocked Soroban RPC.
+They verify SDK transaction construction, signing, submission, and response
+decoding; they do not execute the governor contract. The governance module
+remains incomplete and excluded from the build—see
+[GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
+
 ### Integration Tests
 ```bash
 # Run full integration suite
