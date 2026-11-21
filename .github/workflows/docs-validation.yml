@@ -1,0 +1,43 @@
+name: Documentation Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - '.github/workflows/docs-validation.yml'
+      - 'scripts/validate-docs.js'
+      - 'package.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - '.github/workflows/docs-validation.yml'
+      - 'scripts/validate-docs.js'
+      - 'package.json'
+
+jobs:
+  validate-docs:
+    name: Validate Documentation Links and Code Snippets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Validate documentation
+        run: npm run validate:docs
+
+      - name: Validate code snippets
+        run: npm run validate:snippets
