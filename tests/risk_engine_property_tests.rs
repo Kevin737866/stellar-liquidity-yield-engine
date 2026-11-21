@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Vec as SorobanVec, Symbol, testutils::Address as _};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec as SorobanVec};
 use stellar_liquidity_yield_engine::{RiskEngine, RiskEngineClient};
 
 fn main() {}
@@ -76,6 +76,63 @@ mod tests {
                 il
             );
             prev_il = il;
+        }
+    }
+
+    #[test]
+    fn test_impermanent_loss_grid_invariants() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let client = setup_risk_engine(&env);
+        let pool_id = Address::generate(&env);
+        let prices = [
+            1i128,
+            10,
+            100,
+            500,
+            1000,
+            5000,
+            10000,
+            15000,
+            20000,
+            50000,
+            100000,
+            1_000_000,
+            i128::MAX,
+        ];
+
+        for entry in prices {
+            for current in prices {
+                let il = client.calculate_impermanent_loss(&pool_id, &current, &entry);
+
+                assert!(
+                    il <= 10000,
+                    "IL must remain bounded: entry={entry}, current={current}, il={il}"
+                );
+
+                if entry == current {
+                    assert_eq!(il, 0, "Equal positive prices must have zero IL");
+                }
+
+                if entry > 0 && current > 0 {
+                    let reciprocal = client.calculate_impermanent_loss(&pool_id, &entry, &current);
+                    assert!(
+                        il.abs_diff(reciprocal) <= 1,
+                        "IL must be symmetric for reciprocal ratios: entry={entry}, current={current}, il={il}, reciprocal={reciprocal}"
+                    );
+                }
+            }
+        }
+
+        for zero_or_negative in [0i128, -1, -10000, i128::MIN] {
+            assert_eq!(
+                client.calculate_impermanent_loss(&pool_id, &zero_or_negative, &10000),
+                0
+            );
+            assert_eq!(
+                client.calculate_impermanent_loss(&pool_id, &10000, &zero_or_negative),
+                0
+            );
         }
     }
 
@@ -309,15 +366,32 @@ mod tests {
             SorobanVec::new(&env),
         );
 
-        assert!(assessment.impermanent_loss_risk <= 10000, "IL risk should be capped");
-        assert!(assessment.estimated_slippage <= 10000, "Slippage should be capped");
-        assert!(assessment.volatility_score <= 100, "Volatility score should be 0-100");
-        assert!(!assessment.circuit_breaker_triggered, "Should not trigger under normal conditions");
+        assert!(
+            assessment.impermanent_loss_risk <= 10000,
+            "IL risk should be capped"
+        );
+        assert!(
+            assessment.estimated_slippage <= 10000,
+            "Slippage should be capped"
+        );
+        assert!(
+            assessment.volatility_score <= 100,
+            "Volatility score should be 0-100"
+        );
+        assert!(
+            !assessment.circuit_breaker_triggered,
+            "Should not trigger under normal conditions"
+        );
         // position_size_multiplier_bps for vol_24h=500, vol_7d=500 → avg=500 → 10000-500=9500
-        assert_eq!(assessment.position_size_multiplier_bps, 9500,
-            "position_size_multiplier_bps should be 9500 for avg 500 bp volatility");
-        assert!(assessment.position_size_multiplier_bps >= 5000 && assessment.position_size_multiplier_bps <= 10000,
-            "multiplier must be in [5000, 10000]");
+        assert_eq!(
+            assessment.position_size_multiplier_bps, 9500,
+            "position_size_multiplier_bps should be 9500 for avg 500 bp volatility"
+        );
+        assert!(
+            assessment.position_size_multiplier_bps >= 5000
+                && assessment.position_size_multiplier_bps <= 10000,
+            "multiplier must be in [5000, 10000]"
+        );
     }
 
     #[test]
@@ -334,10 +408,20 @@ mod tests {
         };
 
         let assessment = client.assess_arbitrage_risk(
-            &pool_id, 10000, 10000, 1000000, 10000, metrics, false, 0, SorobanVec::new(&env),
+            &pool_id,
+            10000,
+            10000,
+            1000000,
+            10000,
+            metrics,
+            false,
+            0,
+            SorobanVec::new(&env),
         );
-        assert_eq!(assessment.position_size_multiplier_bps, 10000,
-            "zero volatility should give full position (10000)");
+        assert_eq!(
+            assessment.position_size_multiplier_bps, 10000,
+            "zero volatility should give full position (10000)"
+        );
     }
 
     #[test]
@@ -354,10 +438,20 @@ mod tests {
         };
 
         let assessment = client.assess_arbitrage_risk(
-            &pool_id, 10000, 10000, 1000000, 10000, metrics, false, 0, SorobanVec::new(&env),
+            &pool_id,
+            10000,
+            10000,
+            1000000,
+            10000,
+            metrics,
+            false,
+            0,
+            SorobanVec::new(&env),
         );
-        assert_eq!(assessment.position_size_multiplier_bps, 5000,
-            "very high volatility should floor position multiplier at 5000");
+        assert_eq!(
+            assessment.position_size_multiplier_bps, 5000,
+            "very high volatility should floor position multiplier at 5000"
+        );
     }
 
     #[test]
