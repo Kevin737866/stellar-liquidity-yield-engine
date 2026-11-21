@@ -18,12 +18,7 @@ interface StrategySelectorProps {
 
 /** Build a minimal NetworkConfig for the registry client from a network string and optional registry address. */
 function networkConfigFor(network: 'testnet' | 'mainnet', registryAddress?: string) {
-  const envAddress =
-    typeof process !== 'undefined'
-      ? process.env?.NEXT_PUBLIC_STRATEGY_REGISTRY_CONTRACT_ID ||
-        process.env?.STRATEGY_REGISTRY_CONTRACT_ID ||
-        ''
-      : '';
+  const envAddress = getNetworkConfig(network).contracts.strategyRegistry;
 
   return {
     network,

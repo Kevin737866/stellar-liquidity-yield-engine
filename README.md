@@ -76,8 +76,15 @@ npm run build
 ```bash
 cd ui/
 npm install
+npm run build
 npm run dev
 ```
+
+Before starting or building the dashboard, copy `ui/.env.example` to
+`ui/.env.local` and set only the values needed for the target deployment.
+The dashboard's complete variable reference, precedence rules, public-value
+constraints, and missing-contract behavior are documented in
+[Dashboard environment variables](docs/DASHBOARD_ENVIRONMENT.md).
 
 ## 🔧 Quick Start
 
@@ -442,6 +449,31 @@ CHECK_INTERVAL=300000
 (`GOVERNANCE_CONTRACT`, `VOTING_ESCROW_CONTRACT`, etc.) read by
 `sdk/src/governance.ts`. There is no working contract to deploy for those
 yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
+
+### Dashboard environment variables
+
+For the Next.js dashboard, use `ui/.env.example` as the source of truth.
+Dashboard variables use the `NEXT_PUBLIC_` prefix because Next.js exposes
+their values to browser code. Copy it to `ui/.env.local` for local
+development; deployment platforms should set the variables in their
+environment. Values are inlined at build time, so rebuild/redeploy after a
+change.
+
+Precedence, from highest to lowest, is:
+
+1. existing shell or deployment-platform environment
+2. `ui/.env.local`
+3. `ui/.env.development.local` or `ui/.env.production.local`
+4. `ui/.env.development` or `ui/.env.production`
+5. `ui/.env`
+6. built-in public testnet defaults, or an empty contract ID
+
+An invalid or unknown `NEXT_PUBLIC_STELLAR_NETWORK` value defaults to
+`testnet`. Blank or unset endpoint variables use the public endpoint for the
+selected network, while blank or unset contract IDs remain empty and produce
+an actionable unconfigured-contract error. Never put private keys or seed
+phrases in dashboard variables. Full details and the variable table are in
+[Dashboard environment variables](docs/DASHBOARD_ENVIRONMENT.md).
 
 ### Contract Deployment
 
