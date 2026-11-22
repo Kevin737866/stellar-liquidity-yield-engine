@@ -134,6 +134,7 @@ Then open a Pull Request against `main` on GitHub.
 - [ ] New and existing tests pass
 - [ ] Documentation updated where needed
 - [ ] No unrelated files included in the PR
+- [ ] `npm run check:secrets` passes: no `.env` files, keys, or seeds committed (see [docs/SECRET_SCANNING.md](docs/SECRET_SCANNING.md))
 
 ## Issue Reporting
 
