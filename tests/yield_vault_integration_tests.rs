@@ -5,7 +5,6 @@ mod testutils;
 
 fn main() {}
 
-#[module]
 mod tests {
     use super::*;
     use crate::testutils::{fund_vault_user, setup_yield_vault};
@@ -17,14 +16,14 @@ mod tests {
         let fixture = setup_yield_vault(&env);
 
         // Fund user
-        fund_vault_user(&fixture, &\u0010000);
+        fund_vault_user(&fixture, &10000);
 
         // Record balances before deposit
         let user_a_before = fixture.token_a.balance(&fixture.user);
         let user_b_before = fixture.token_b.balance(&fixture.user);
 
         // Deposit
-        let shares = fixture.vault.deposit(&fixture.user, &\u00105000, &\u00105000, &0);
+        let shares = fixture.vault.deposit(&fixture.user, &5000, &5000, &0);
         assert!(shares > 0, "Should receive shares on deposit");
 
         // Verify vault metrics updated
@@ -68,10 +67,10 @@ mod tests {
         let fixture = setup_yield_vault(&env);
 
         // Fund user with withdrawal fee
-        fund_vault_user(&fixture, &\u0010000);
+        fund_vault_user(&fixture, &10000);
 
         // Deposit with 2.5% withdrawal fee
-        let shares = fixture.vault.deposit(&fixture.user, &\u00105000, &\u00105000, &0);
+        let shares = fixture.vault.deposit(&fixture.user, &5000, &5000, &0);
 
         // Withdraw all shares
         let (withdrawn_a, withdrawn_b) =
@@ -101,8 +100,8 @@ mod tests {
         let fixture = setup_yield_vault(&env);
 
         // Fund user and deposit
-        fund_vault_user(&fixture, &\u0010000);
-        fixture.vault.deposit(&fixture.user, &\u0010000, &\u0010000, &0);
+        fund_vault_user(&fixture, &10000);
+        fixture.vault.deposit(&fixture.user, &10000, &10000, &0);
 
         // Harvest
         fixture.vault.harvest(&fixture.user);
@@ -123,20 +122,20 @@ mod tests {
         let fixture = setup_yield_vault(&env);
 
         // Fund user
-        fund_vault_user(&fixture, &\u0010000);
+        fund_vault_user(&fixture, &10000);
 
         // Pause vault
         fixture.vault.pause(&fixture.admin);
 
         // Deposit should fail when paused
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            fixture.vault.deposit(&fixture.user, &\u0010000, &\u0010000, &0);
+            fixture.vault.deposit(&fixture.user, &10000, &10000, &0);
         }));
-        assert!(result.is_error(), "Deposit should fail when vault is paused");
+        assert!(result.is_err(), "Deposit should fail when vault is paused");
 
         // Unpause and verify deposit works again
         fixture.vault.unpause(&fixture.admin);
-        let shares = fixture.vault.deposit(&fixture.user, &\u0010000, &\u0010000, &0);
+        let shares = fixture.vault.deposit(&fixture.user, &10000, &10000, &0);
         assert!(shares > 0, "Deposit should work after unpause");
     }
 
@@ -147,11 +146,11 @@ mod tests {
         let fixture = setup_yield_vault(&env);
 
         // Fund user with asymmetric amounts
-        fixture.token_a_admin.mint(&fixture.user, &\u0010000);
-        fixture.token_b_admin.mint(&fixture.user, &\u00100);
+        fixture.token_a_admin.mint(&fixture.user, &10000);
+        fixture.token_b_admin.mint(&fixture.user, &100);
 
         // First deposit uses geometric mean
-        let shares = fixture.vault.deposit(&fixture.user, &\u0010000, &\u00100, &0);
+        let shares = fixture.vault.deposit(&fixture.user, &10000, &100, &0);
         assert!(shares > 0, "First deposit should mint shares");
 
         // Geometric mean of 10000 * 100 = 1,000,000 -> sqrt = 1000

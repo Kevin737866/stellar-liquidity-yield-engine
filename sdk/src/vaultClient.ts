@@ -262,6 +262,115 @@ export class VaultClient extends EventEmitter {
   }
 
   /**
+   * Minimum seconds between two harvests for this vault (zero = unlimited).
+   */
+  async getHarvestInterval(): Promise<number> {
+    return this.readHarvestConfig('get_harvest_interval', 'GET_HARVEST_INTERVAL_ERROR');
+  }
+
+  /**
+   * Seconds remaining before the next harvest is allowed (zero = allowed now).
+   */
+  async getSecondsUntilNextHarvest(): Promise<number> {
+    return this.readHarvestConfig(
+      'get_seconds_until_next_harvest',
+      'GET_SECONDS_UNTIL_NEXT_HARVEST_ERROR'
+    );
+  }
+
+  /**
+   * Whether this vault's configured harvest cadence currently allows a harvest.
+   */
+  async canHarvest(): Promise<boolean> {
+    try {
+      const result = await this.server.simulateTransaction(
+        new TransactionBuilder(await this.getSimulationAccount(), {
+          fee: BASE_FEE,
+          networkPassphrase: this.getNetworkPassphrase()
+        })
+          .addOperation(this.contract.call('can_harvest'))
+          .build()
+      );
+
+      if (result.result?.status !== 'SUCCESS') {
+        throw new Error('Failed to check harvest availability');
+      }
+
+      return Boolean(scValToNative(result.result.returnValue));
+    } catch (error: any) {
+      throw new VaultError(`Failed to check harvest availability: ${error.message}`, 'CAN_HARVEST_ERROR');
+    }
+  }
+
+  /**
+   * Configure this vault's harvest cadence in seconds (admin only).
+   * Pass zero to restore unlimited permissionless harvesting.
+   */
+  async setHarvestInterval(
+    adminKeyPair: any,
+    intervalSeconds: number,
+    options?: TransactionOptions
+  ): Promise<TransactionResult> {
+    try {
+      const adminAddress = await this.resolvePublicKey(adminKeyPair);
+      const account = await this.server.getAccount(adminAddress);
+
+      const tx = new TransactionBuilder(account, {
+        fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
+        networkPassphrase: this.getNetworkPassphrase()
+      })
+        .addOperation(
+          this.contract.call('set_harvest_interval', adminAddress, intervalSeconds.toString())
+        )
+        .setTimeout(options?.timeout || 30)
+        .build();
+
+      const signedTx = await this.signWith(adminKeyPair, tx);
+      const result = await this.server.sendTransaction(signedTx);
+
+      if (result.status === 'ERROR') {
+        return {
+          hash: result.hash,
+          success: false,
+          gasUsed: 0,
+          error: result.errorResult?.toXDR('base64')
+        };
+      }
+
+      const txResult = await this.confirmTransaction(result.hash);
+      return {
+        hash: result.hash,
+        success: txResult.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
+        gasUsed: 0,
+        error: txResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED ? txResult.status : undefined
+      };
+    } catch (error: any) {
+      throw new VaultError(`Set harvest interval failed: ${error.message}`, 'SET_HARVEST_INTERVAL_ERROR');
+    }
+  }
+
+  private async readHarvestConfig(method: string, code: string): Promise<number> {
+    try {
+      const result = await this.server.simulateTransaction(
+        new TransactionBuilder(await this.getSimulationAccount(), {
+          fee: BASE_FEE,
+          networkPassphrase: this.getNetworkPassphrase()
+        })
+          .addOperation(this.contract.call(method))
+          .build()
+      );
+
+      if (result.result?.status !== 'SUCCESS') {
+        throw new Error(`Failed to read ${method}`);
+      }
+
+      return Number(scValToNative(result.result.returnValue));
+    } catch (error: any) {
+      throw new VaultError(error.message, code);
+    }
+  }
+
+  /**
    * Get user position
    */
   async getUserPosition(userAddress: Address): Promise<UserPosition> {

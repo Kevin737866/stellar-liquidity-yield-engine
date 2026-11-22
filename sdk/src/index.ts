@@ -52,15 +52,6 @@ export {
 } from './rpcSync';
 export type { RpcLagReport, RpcLagOptions, RpcLagThresholds, LagSeverity, LedgerHeadSource, RpcLagMonitorOptions } from './rpcSync';
 
-// Keeper health metrics for ops monitoring.
-export { KeeperMetrics, KEEPER_METRICS_PREFIX, } from './keeperMetrics';
-export type {
-  KeeperMetricsSnapshot,
-  KeeperMetricsOptions,
-  MetricSample,
-  MetricType,
-} from './keeperMetrics';
-
 // Address-filtered contract event listener for off-chain keepers.
 // Operators running multiple contracts can restrict a single listener to only
 // the contract addresses they care about, eliminating noise from unrelated

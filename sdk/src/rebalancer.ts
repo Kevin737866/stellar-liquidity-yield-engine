@@ -23,6 +23,7 @@ import {
   TransactionSigner,
   RebalanceError,
   NetworkConfig,
+  PauseReason,
 } from "./types";
 import { waitForTransaction } from "./utils/transaction";
 
@@ -30,12 +31,33 @@ export class RebalancerClient extends EventEmitter {
   private contract: Contract;
   private server: SorobanRpc.Server;
   private networkConfig: NetworkConfig;
+  private knownPoolIds: Set<string>;
 
-  constructor(networkConfig: NetworkConfig) {
+  constructor(networkConfig: NetworkConfig, knownPoolIds: string[] = []) {
     super();
     this.contract = new Contract(networkConfig.contracts.rebalanceEngine);
     this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
     this.networkConfig = networkConfig;
+    this.knownPoolIds = new Set(knownPoolIds);
+  }
+
+  setKnownPoolIds(poolIds: string[]): void {
+    this.knownPoolIds = new Set(poolIds);
+  }
+
+  private validateKnownPools(allocations: PoolAllocation[]): void {
+    if (this.knownPoolIds.size === 0) {
+      return;
+    }
+
+    for (const allocation of allocations) {
+      if (!this.knownPoolIds.has(allocation.poolId.toString())) {
+        throw new RebalanceError(
+          `Unknown pool reference: ${allocation.poolId.toString()}`,
+          "UNKNOWN_POOL",
+        );
+      }
+    }
   }
 
   /**
@@ -51,6 +73,8 @@ export class RebalancerClient extends EventEmitter {
     allocations: PoolAllocation[],
     options?: TransactionOptions,
   ): Promise<TransactionResult & { strategyId: number }> {
+    this.validateKnownPools(allocations);
+
     try {
       const account = await this.server.getAccount(adminKeyPair.publicKey());
 
@@ -117,6 +141,8 @@ export class RebalancerClient extends EventEmitter {
     allocations: PoolAllocation[],
     options?: TransactionOptions,
   ): Promise<TransactionResult> {
+    this.validateKnownPools(allocations);
+
     try {
       const account = await this.server.getAccount(adminKeyPair.publicKey());
 
@@ -631,6 +657,8 @@ export class RebalancerClient extends EventEmitter {
    */
   async pause(
     adminKeyPair: any,
+    reason?: PauseReason,
+    reasonDetails?: string,
     options?: TransactionOptions,
   ): Promise<TransactionResult> {
     try {
@@ -647,14 +675,13 @@ export class RebalancerClient extends EventEmitter {
       const signedTx = adminKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
 
-      return {
+      const transactionResult: TransactionResult = {
         hash: result.hash,
         success: result.status === "SUCCESS",
         gasUsed: 0,
         error: result.status === "ERROR" ? result.errorResult : undefined,
       };
 
-      // Emit pause event with reason if successful
       if (transactionResult.success && reason) {
         this.emitPauseEvent(reason, reasonDetails);
       }
@@ -878,6 +905,135 @@ export class RebalancerClient extends EventEmitter {
     }
   }
 
+  async registerKnownPool(
+    adminKeyPair: Keypair | TransactionSigner,
+    poolId: Address | string,
+    options?: TransactionOptions,
+  ): Promise<TransactionResult> {
+    try {
+      const publicKey = await this.resolvePublicKey(adminKeyPair);
+      const account = await this.server.getAccount(publicKey);
+      const tx = new TransactionBuilder(account, {
+        fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
+        networkPassphrase: this.getNetworkPassphrase(),
+      })
+        .addOperation(
+          this.contract.call("register_known_pool", publicKey, poolId.toString()),
+        )
+        .setTimeout(options?.timeout || 30)
+        .build();
+
+      const signedTx = await this.signTransaction(adminKeyPair, tx);
+      const result = await this.server.sendTransaction(signedTx);
+
+      return {
+        hash: result.hash,
+        success: result.status === "SUCCESS",
+        gasUsed: 0,
+        error: result.status === "ERROR" ? result.errorResult : undefined,
+      };
+    } catch (error: any) {
+      throw new RebalanceError(
+        `Register known pool failed: ${error.message}`,
+        "REGISTER_KNOWN_POOL_ERROR",
+      );
+    }
+  }
+
+  async unregisterKnownPool(
+    adminKeyPair: Keypair | TransactionSigner,
+    poolId: Address | string,
+    options?: TransactionOptions,
+  ): Promise<TransactionResult> {
+    try {
+      const publicKey = await this.resolvePublicKey(adminKeyPair);
+      const account = await this.server.getAccount(publicKey);
+      const tx = new TransactionBuilder(account, {
+        fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
+        networkPassphrase: this.getNetworkPassphrase(),
+      })
+        .addOperation(
+          this.contract.call("unregister_known_pool", publicKey, poolId.toString()),
+        )
+        .setTimeout(options?.timeout || 30)
+        .build();
+
+      const signedTx = await this.signTransaction(adminKeyPair, tx);
+      const result = await this.server.sendTransaction(signedTx);
+
+      return {
+        hash: result.hash,
+        success: result.status === "SUCCESS",
+        gasUsed: 0,
+        error: result.status === "ERROR" ? result.errorResult : undefined,
+      };
+    } catch (error: any) {
+      throw new RebalanceError(
+        `Unregister known pool failed: ${error.message}`,
+        "UNREGISTER_KNOWN_POOL_ERROR",
+      );
+    }
+  }
+
+  async isKnownPool(poolId: Address | string): Promise<boolean> {
+    try {
+      const result = await this.server.simulateTransaction(
+        new TransactionBuilder(
+          await this.server.getAccount(
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+          ),
+          {
+            fee: BASE_FEE,
+            networkPassphrase: this.getNetworkPassphrase(),
+          },
+        )
+          .addOperation(this.contract.call("is_known_pool", poolId.toString()))
+          .build(),
+      );
+
+      if (result.result?.status !== "SUCCESS") {
+        throw new Error("Failed to check known pool");
+      }
+
+      return Boolean(scValToNative(result.result.returnValue));
+    } catch (error: any) {
+      throw new RebalanceError(
+        `Failed to check known pool: ${error.message}`,
+        "IS_KNOWN_POOL_ERROR",
+      );
+    }
+  }
+
+  async getKnownPools(): Promise<string[]> {
+    try {
+      const result = await this.server.simulateTransaction(
+        new TransactionBuilder(
+          await this.server.getAccount(
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+          ),
+          {
+            fee: BASE_FEE,
+            networkPassphrase: this.getNetworkPassphrase(),
+          },
+        )
+          .addOperation(this.contract.call("get_known_pools"))
+          .build(),
+      );
+
+      if (result.result?.status !== "SUCCESS") {
+        throw new Error("Failed to get known pools");
+      }
+
+      const pools = scValToNative(result.result.returnValue) as any[];
+      return Array.isArray(pools) ? pools.map((pool) => pool.toString()) : [];
+    } catch (error: any) {
+      throw new RebalanceError(
+        `Failed to get known pools: ${error.message}`,
+        "GET_KNOWN_POOLS_ERROR",
+      );
+    }
+  }
+
   async setMaxApyAge(
     adminKeyPair: Keypair | TransactionSigner,
     maxAge: number,
@@ -899,17 +1055,12 @@ export class RebalancerClient extends EventEmitter {
       const signedTx = await this.signTransaction(adminKeyPair, tx);
       const result = await this.server.sendTransaction(signedTx);
 
-      return {
+      const transactionResult: TransactionResult = {
         hash: result.hash,
         success: result.status === "SUCCESS",
         gasUsed: 0,
         error: result.status === "ERROR" ? result.errorResult : undefined,
       };
-
-      // Emit unpause event if successful
-      if (transactionResult.success) {
-        this.emitUnpauseEvent();
-      }
 
       return transactionResult;
     } catch (error: any) {

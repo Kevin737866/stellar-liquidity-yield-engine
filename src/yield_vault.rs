@@ -50,6 +50,8 @@ pub enum VaultError {
     ThresholdMustBePositive = 18,
     /// Fewer authorized emergency signers than the threshold were supplied.
     InsufficientEmergencySignatures = 19,
+    /// A harvest was attempted before the configured interval had elapsed.
+    HarvestTooEarly = 20,
 }
 
 #[contracttype]
@@ -173,6 +175,11 @@ pub const DUST_THRESHOLD: i128 = 1;
 /// to exit - before it takes effect. The admin can change the delay, but only
 /// through the timelock itself, so it cannot be shortened instantly.
 pub const DEFAULT_TIMELOCK_DELAY: u64 = 48 * 60 * 60;
+
+/// Minimum seconds between two vault harvests. Zero keeps the legacy behaviour
+/// (no on-chain cadence), so existing vaults and keepers keep working; an admin
+/// can opt in to a per-vault cadence with `set_harvest_interval` (Issue #261).
+pub const DEFAULT_HARVEST_INTERVAL: u64 = 0;
 
 // The contract's entrypoints are exported only when the vault itself is the
 // contract being deployed. The rebalance engine depends on this module's types
@@ -549,6 +556,17 @@ impl YieldVault {
         let vault_info = Self::get_vault_info(env.clone());
         let mut metrics = Self::get_metrics(env.clone());
 
+        let interval = Self::get_harvest_interval(env.clone());
+        let elapsed = env
+            .ledger()
+            .timestamp()
+            .saturating_sub(metrics.last_harvest);
+        require!(
+            &env,
+            interval == 0 || elapsed >= interval,
+            VaultError::HarvestTooEarly
+        );
+
         // Claim rewards from AMM pool (simplified - would call AMM contract)
         // This is a placeholder for actual reward claiming logic
         let rewards_a = Self::calculate_pending_rewards(&env, &vault_info.pool_id);
@@ -564,10 +582,6 @@ impl YieldVault {
 
             // Derive an annualized APY from this harvest's yield (net rewards vs the
             // vault's value before reinvestment) over the elapsed wall-clock time.
-            let elapsed = env
-                .ledger()
-                .timestamp()
-                .saturating_sub(metrics.last_harvest);
             let prev_value = metrics.tvl;
             let reward_value = Self::value_in_usd(&env, net_rewards_a, net_rewards_b);
             if elapsed > 0 && prev_value > 0 && reward_value > 0 {
@@ -749,6 +763,46 @@ impl YieldVault {
             (Symbol::new(&env, "withdraw_pacing_updated"),),
             (admin, user_max_bps, vault_max_bps, window_seconds),
         );
+    }
+
+    // ============ HARVEST CADENCE (Issue #261) ============
+
+    /// Minimum seconds between harvests for this vault. Zero means no cadence.
+    pub fn get_harvest_interval(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "harvest_interval"))
+            .unwrap_or(DEFAULT_HARVEST_INTERVAL)
+    }
+
+    /// Set this vault's harvest interval in seconds (admin only). Zero restores
+    /// the legacy behaviour of unlimited permissionless harvests.
+    pub fn set_harvest_interval(env: Env, admin: Address, interval_seconds: u64) {
+        Self::require_admin(&env, admin.clone());
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "harvest_interval"), &interval_seconds);
+
+        env.events().publish(
+            (Symbol::new(&env, "harvest_interval_updated"),),
+            (admin, interval_seconds),
+        );
+    }
+
+    /// Seconds remaining before the next harvest is allowed; zero when it is.
+    pub fn get_seconds_until_next_harvest(env: Env) -> u64 {
+        let interval = Self::get_harvest_interval(env.clone());
+        if interval == 0 {
+            return 0;
+        }
+
+        let last = Self::get_metrics(env).last_harvest;
+        interval.saturating_sub(env.ledger().timestamp().saturating_sub(last))
+    }
+
+    /// Whether a harvest is currently allowed by this vault's cadence.
+    pub fn can_harvest(env: Env) -> bool {
+        Self::get_seconds_until_next_harvest(env) == 0
     }
 
     /// One user's withdrawal consumption in the current window.
@@ -1758,6 +1812,118 @@ mod tests {
         assert_eq!(token_b_client.balance(&treasury), 10);
         assert_eq!(token_a_client.balance(&admin), 0);
         assert_eq!(token_b_client.balance(&admin), 0);
+    }
+
+    // ============ HARVEST CADENCE TESTS (Issue #261) ============
+
+    #[test]
+    fn test_harvest_interval_defaults_to_zero() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, _, _) = setup(&env, 0, 0, 0);
+
+        assert_eq!(vault.get_harvest_interval(), DEFAULT_HARVEST_INTERVAL);
+        assert!(vault.can_harvest());
+        assert_eq!(vault.get_seconds_until_next_harvest(), 0);
+    }
+
+    #[test]
+    fn test_set_harvest_interval_is_admin_only() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let stranger = Address::generate(&env);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vault.set_harvest_interval(&stranger, &3_600);
+        }));
+        assert!(result.is_err());
+        assert_eq!(vault.get_harvest_interval(), DEFAULT_HARVEST_INTERVAL);
+
+        vault.set_harvest_interval(&admin, &3_600);
+        assert_eq!(vault.get_harvest_interval(), 3_600);
+    }
+
+    #[test]
+    fn test_harvest_interval_blocks_early_harvests() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1_000);
+        let (
+            vault,
+            _token_a_client,
+            _token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            _treasury,
+        ) = setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1_000);
+        token_b_admin.mint(&user, &1_000);
+        vault.deposit(&user, &1_000, &1_000, &0);
+        vault.set_harvest_interval(&admin, &3_600);
+
+        assert_eq!(vault.get_seconds_until_next_harvest(), 3_600);
+        assert!(!vault.can_harvest());
+
+        let err = vault.try_harvest(&user).unwrap_err().unwrap();
+        assert_eq!(err, VaultError::HarvestTooEarly.into());
+
+        env.ledger().set_timestamp(1_000 + 3_600);
+        assert!(vault.can_harvest());
+        assert_eq!(vault.get_seconds_until_next_harvest(), 0);
+        vault.harvest(&user);
+
+        assert_eq!(vault.get_metrics().last_harvest, 4_600);
+        assert_eq!(vault.get_seconds_until_next_harvest(), 3_600);
+    }
+
+    #[test]
+    fn test_harvest_interval_can_be_tuned_and_disabled() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        env.ledger().set_timestamp(1_000);
+        let (
+            vault,
+            _token_a_client,
+            _token_b_client,
+            token_a_admin,
+            token_b_admin,
+            user,
+            admin,
+            _treasury,
+        ) = setup(&env, 0, 0, 0);
+
+        token_a_admin.mint(&user, &1_000);
+        token_b_admin.mint(&user, &1_000);
+        vault.deposit(&user, &1_000, &1_000, &0);
+
+        vault.set_harvest_interval(&admin, &3_600);
+        env.ledger().set_timestamp(4_600);
+        vault.harvest(&user);
+
+        env.ledger().set_timestamp(4_700);
+        assert_eq!(vault.get_seconds_until_next_harvest(), 3_500);
+        vault.set_harvest_interval(&admin, 0);
+
+        assert!(vault.can_harvest());
+        vault.harvest(&user);
+    }
+
+    #[test]
+    fn test_harvest_interval_is_per_vault() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault_a, _, _, _, _, _, admin_a, _) = setup(&env, 0, 0, 0);
+        let (vault_b, _, _, _, _, _, admin_b, _) = setup(&env, 0, 0, 0);
+
+        vault_a.set_harvest_interval(&admin_a, &3_600);
+        vault_b.set_harvest_interval(&admin_b, &86_400);
+
+        assert_eq!(vault_a.get_harvest_interval(), 3_600);
+        assert_eq!(vault_b.get_harvest_interval(), 86_400);
     }
 
     #[test]

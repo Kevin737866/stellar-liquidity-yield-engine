@@ -1,4 +1,4 @@
-#`!no_std]
+#![no_std]
 // Contract entrypoints are part of the on-chain ABI: their argument lists are
 // fixed by the deployed interface (the SDK, UI and tests call them
 // positionally), so bundling parameters into structs just to satisfy the lint
@@ -13,7 +13,7 @@
 // occur on-chain.
 #![allow(ambiguous_glob_reexports)]
 
-use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, Address, BytesN, Env, Symbol};
 
 /// Typed failures of the umbrella engine contract.
 ///
@@ -121,8 +121,7 @@ const EMERGENCY_HISTORY_ITEM: Symbol = Symbol::new(&Env::empty(), "emergency_his
 /// order can be verified independently of storage iteration ordering.
 #[cfg(feature = "engine")]
 #[contracttype]
-#[derive(Clone, Debug, Eq)
-#[derive(PartialEq, PartialOrder)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EmergencyRecord {
     /// Zero-based position in the append-only history.
     pub index: u32,
@@ -135,7 +134,7 @@ pub struct EmergencyRecord {
 }
 
 #[cfg(feature = "engine")]
-#[contractimpls]
+#[contractimpl]
 impl StellarLiquidityYieldEngine {
     /// Initialize the yield engine with admin and registry
     pub fn initialize(
@@ -169,7 +168,7 @@ impl StellarLiquidityYieldEngine {
 
     /// Replace this contract's code in place, keeping its address and storage
     /// (admin only). See [crate::upgrade] and `docs/UPGRADING.md`.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdkz:BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
     }

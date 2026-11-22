@@ -1,4 +1,4 @@
-import { Keypair } from 'stellar-sdk';
+import { Address, Keypair } from 'stellar-sdk';
 import {
   VaultClient,
   RewardDistributorClient,
@@ -113,7 +113,7 @@ class YieldHarvestBot {
     
     // Initialize clients
     this.config.vaultAddresses.forEach(address => {
-      this.vaultClients.set(address, new VaultClient(address, networkConfig));
+      this.vaultClients.set(address, new VaultClient(new Address(address), networkConfig));
       // In production, you'd have separate reward distributor addresses
       this.rewardClients.set(address, new RewardDistributorClient(networkConfig));
     });
@@ -236,12 +236,23 @@ class YieldHarvestBot {
         return false;
       }
 
-      // Check cooldown period
+      // Issue #261: use the vault's on-chain cadence when available, falling
+      // back to the bot-wide cooldown for older deployments.
+      let cooldownMs = this.config.harvestCooldown;
+      try {
+        const intervalSeconds = await vaultClient.getHarvestInterval();
+        if (intervalSeconds > 0) {
+          cooldownMs = intervalSeconds * 1000;
+        }
+      } catch (error) {
+        console.log(`ℹ️ Vault ${vaultAddress} has no on-chain harvest interval configured; using bot cooldown`);
+      }
+
       const lastHarvestTime = this.state.lastHarvestTimes.get(vaultAddress) || 0;
       const timeSinceLastHarvest = Date.now() - lastHarvestTime;
       
-      if (timeSinceLastHarvest < this.config.harvestCooldown) {
-        const remainingTime = (this.config.harvestCooldown - timeSinceLastHarvest) / 1000 / 60;
+      if (timeSinceLastHarvest < cooldownMs) {
+        const remainingTime = (cooldownMs - timeSinceLastHarvest) / 1000 / 60;
         console.log(`⏰ Vault ${vaultAddress} still in cooldown (${remainingTime.toFixed(1)}m remaining)`);
         return false;
       }
