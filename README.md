@@ -519,6 +519,9 @@ and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
 # Run contract tests (run from the repository root)
 cargo test
 
+# Run focused authorization role-change integration tests
+cargo test --test authorization_role_change_tests
+
 # Run SDK tests
 cd sdk/
 npm test
