@@ -1,0 +1,55 @@
+name: Release Notes
+
+# Requires a "## Release notes" section in the PR description whenever a pull
+# request changes contract source (src/**/*.rs, Cargo.toml) or shipped SDK
+# source (sdk/src/** excluding tests, package.json). The required fields and
+# how they are compiled into release notes are documented in
+# docs/RELEASE_NOTES.md.
+#
+# `edited` is included so fixing the PR description re-runs the check without
+# a new push.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: release notes present for contract/SDK changes
+    runs-on: ubuntu-latest
+    steps:
+      # Full history so the merge base with the target branch is available.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The PR body and base ref are passed through env, never interpolated
+      # into the script, so a PR description cannot inject shell commands.
+      - name: Check release notes
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.base_ref }}
+        run: node scripts/check-release-notes.js
+
+  test:
+    name: release notes checker tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run checker unit tests
+        run: npx jest scripts/check-release-notes.test.ts
