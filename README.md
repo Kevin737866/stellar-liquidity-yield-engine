@@ -72,6 +72,13 @@ npm install
 npm run build
 ```
 
+### SDK releases
+
+The SDK uses Semantic Versioning and has a documented release, prerelease,
+backward-compatibility, rollback, and publishing policy. See
+[docs/SDK_RELEASE_AND_SEMVER.md](docs/SDK_RELEASE_AND_SEMVER.md) before
+changing the package version.
+
 ### Setup UI
 ```bash
 cd ui/

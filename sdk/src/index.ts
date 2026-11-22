@@ -214,7 +214,6 @@ export function createGovernanceClient(
 }
 
 // Version - single source of truth from package.json
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 export const VERSION: string = (() => {
   try {
     return require('../../package.json').version;

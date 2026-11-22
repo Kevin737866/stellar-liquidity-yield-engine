@@ -92,6 +92,10 @@ git push -u origin feat/your-feature-name
 ```
 Then open a Pull Request against `main` on GitHub.
 
+For SDK releases, follow
+[docs/SDK_RELEASE_AND_SEMVER.md](docs/SDK_RELEASE_AND_SEMVER.md). Do not publish
+or create a release tag from a feature branch.
+
 ## Code Standards
 
 ### Rust (Smart Contracts)
