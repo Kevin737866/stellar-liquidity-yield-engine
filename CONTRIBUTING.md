@@ -122,10 +122,11 @@ Then open a Pull Request against `main` on GitHub.
 
 1. **Title**: Keep it under 70 characters and use the conventional commit format (e.g. `feat: add governance voting UI`)
 2. **Description**: Fill out the PR template — summary of changes, what was tested, any known limitations
-3. **Linked Issues**: Reference the issue(s) your PR closes with `Closes #123`
-4. **CI Checks**: All CI checks must pass before merge
-5. **Review**: At least one approving review is required
-6. **Squash & Merge**: PRs are merged using squash commits to keep history clean
+3. **Release Notes**: If the PR changes contract source (`src/**/*.rs`, `Cargo.toml`) or SDK source (`sdk/src/**`, `package.json`), add a `## Release notes` section to the description. CI checks it. See [docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md) for the fields
+4. **Linked Issues**: Reference the issue(s) your PR closes with `Closes #123`
+5. **CI Checks**: All CI checks must pass before merge
+6. **Review**: At least one approving review is required
+7. **Squash & Merge**: PRs are merged using squash commits to keep history clean
 
 ### PR Checklist
 - [ ] Code follows the project style guidelines
@@ -134,6 +135,7 @@ Then open a Pull Request against `main` on GitHub.
 - [ ] New and existing tests pass
 - [ ] Documentation updated where needed
 - [ ] No unrelated files included in the PR
+- [ ] `## Release notes` section filled in, if contract or SDK source changed ([docs/RELEASE_NOTES.md](docs/RELEASE_NOTES.md))
 
 ## Issue Reporting
 
