@@ -20,6 +20,7 @@ The implementation lives in:
 | `sdk/src/rpcSync.ts` | Restores and persists the RPC lag monitor's processed-ledger marker. |
 | `sdk/src/bots/autoRebalancer.ts` | Persists the keeper's cooldown so a restart cannot repeat a rebalance. |
 | `sdk/src/recovery.test.ts` | Restart-during-outage scenarios. |
+| `sdk/src/cursorExpiration.test.ts` | Typed cursor-expiration results and resume behaviour. |
 | `examples/restart-during-outage.ts` | Runnable end-to-end demonstration. |
 
 ## The checkpoint
@@ -112,6 +113,47 @@ did not fit on the page. The listener now distinguishes:
 
 A keeper catching up after an outage therefore drains the backlog page by page
 without losing anything.
+
+## Typed cursor expiration
+
+An RPC node keeps only a bounded window of event history. A paging cursor that
+points before that window is rejected, and retrying it will keep failing. That
+is a different failure from a network outage, so the listener exposes it as a
+typed result:
+
+```ts
+const result = await listener.pollWithResult();
+
+switch (result.status) {
+  case 'ok':
+    console.log(`processed ${result.eventsProcessed} events, next ledger ${result.nextLedger}`);
+    break;
+  case 'cursor_expired':
+    console.warn(
+      `cursor ${result.cursor} is ${result.error.reason}; resuming from ledger ${result.resumeFromLedger}`,
+    );
+    break;
+  case 'error':
+    console.error(`poll failed at ledger ${result.ledger}:`, result.error.message);
+    break;
+}
+```
+
+- `cursor_expired` carries a `CursorExpiredError` with the rejected `cursor`, a
+  `reason` (`expired`, `pruned`, or `invalid`), and the ledger the next poll
+  resumes from. The unusable paging token is dropped, so the following poll
+  falls back to the ledger position.
+- `error` covers every other failure, including network and checkpoint errors.
+- `poll()` keeps its original `Promise<void>` contract. Use
+  `pollWithResult()` when the caller must distinguish cursor expiration from a
+  retryable failure.
+- `isCursorExpiredError(error)` and `classifyCursorExpiration(error)` are
+  exported for callers that inspect an RPC error directly.
+
+Recovery may replay part of the last ledger, but it never skips an event.
+Because the RPC cannot expose a stable machine-readable code for this
+condition, detection is message-based and requires both a cursor mention and
+an expiration-like word.
 
 ## The RPC lag monitor
 
