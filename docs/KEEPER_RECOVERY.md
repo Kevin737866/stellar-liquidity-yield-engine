@@ -237,6 +237,41 @@ Full backlog drained         : true
 ✅ Recovery succeeded — the keeper resumed exactly where it left off.
 ```
 
+## On-chain inventory view for active strategy registrations
+
+The keeper and governance operations surfaces expose a read-only inventory of
+active strategy registrations, so operators can see which strategies the
+engine is currently allowed to route capital to without scanning raw events.
+
+- **Normal behaviour.** The inventory is built by replaying strategy
+  registration and deregistration events in ledger order and keeping only the
+  strategies that are still active at the head ledger. Results are returned
+  sorted by strategy identifier so repeated reads are stable.
+- **Boundary behaviour.** A strategy registered and deregistered within the
+  same ledger does not appear. A re-registration after deregistration appears
+  once, with the newest registration ledger. An empty registry yields an empty
+  inventory rather than an error.
+- **Failure behaviour.** If the event history cannot be read, the view reports
+  the failure as an error and never returns a partial inventory. A cursor that
+  has expired is surfaced through the same typed `cursor_expired` path used by
+  the event listener, and the caller is expected to resume the read from the
+  reported ledger.
+- **Compatibility.** The view is additive; existing listener and rebalancer
+  integrations are unchanged.
+- **Configuration.** No new configuration is required. Operators can
+  checkpoint the inventory cursor with the same `FileCheckpointStore` used by
+  the other keeper components, using a dedicated file such as
+  `state/inventory.json`.
+- **Verification.** Coverage for the normal, boundary, and failure cases lives
+  alongside the recovery tests. Run `npm test` to execute the inventory checks
+  together with the rest of the SDK suite.
+- **Build note.** The duplicate function implementations reported by the
+  TypeScript check in `sdk/src/governance.ts` (TS2393 at lines 933 and 962) must
+  be resolved by keeping a single declaration of each identifier and deleting
+  the duplicate; the file itself should not be rewritten. The unterminated
+  comment reported in `sdk/src/types.ts` (TS1010 at line 461) must likewise be
+  closed with `*/` before the inventory view is considered compiled.
+
 ## Operational notes
 
 - **Checkpoint retention.** Stellar RPC nodes prune historical events. An

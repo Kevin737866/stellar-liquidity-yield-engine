@@ -337,6 +337,20 @@ impl StrategyRegistry {
         );
     }
 
+    /// Return the ids of all strategies that are currently active (approved and
+    /// not pending re-approval), in ascending id order. Read-only; not blocked by
+    /// the pause flag so operators can inventory the registry during an incident.
+    pub fn list_active_strategies(env: Env) -> Vec<u32> {
+        let strategies = Self::get_strategies_map(&env);
+        let mut active: Vec<u32> = Vec::new(&env);
+        for (strategy_id, strategy) in strategies.iter() {
+            if strategy.is_active {
+                active.push_back(strategy_id);
+            }
+        }
+        active
+    }
+
     /// Record strategy performance
     pub fn record_performance(
         env: Env,
@@ -737,8 +751,6 @@ mod tests {
 
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Env, Symbol, TryFromVal, Vec};
-    use soroban_sdk::testutils::Events as _;
     use soroban_sdk::{Env, Symbol, TryFromVal, Vec};
 
     fn fee_structure() -> FeeStructure {
