@@ -282,6 +282,28 @@ export class RebalancerClient extends EventEmitter {
   }
 
   /**
+   * Surfaces token transfer failures as structured errors so callers and tests
+   * can distinguish a failed transfer result from a successful one.
+   */
+  private assertTransferSucceeded(
+    transferResult: { success: boolean; error?: string } | undefined,
+    context: string,
+  ): void {
+    if (!transferResult) {
+      throw new RebalanceError(
+        `${context}: token transfer returned no result`,
+        "TRANSFER_NO_RESULT",
+      );
+    }
+    if (!transferResult.success) {
+      throw new RebalanceError(
+        `${context}: token transfer failed${transferResult.error ? `: ${transferResult.error}` : ""}`,
+        "TRANSFER_FAILED",
+      );
+    }
+  }
+
+  /**
    * Get all strategies
    */
   async getStrategies(): Promise<RebalanceStrategy[]> {
@@ -501,36 +523,6 @@ export class RebalancerClient extends EventEmitter {
   }
 
   /**
-   * Check if a pool's APY observation is still fresh (within the configured maximum age).
-   *
-   * Returns true when the pool has an observation that is still within the
-   * configured maximum age, false otherwise.
-   */
-  async isApyFresh(poolId: Address): Promise<boolean> {
-    try {
-      const result = await this.server.simulateTransaction(
-        new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
-          {
-            fee: BASE_FEE,
-            networkPassphrase: this.getNetworkPassphrase()
-          }
-        )
-          .addOperation(this.contract.call('is_apy_fresh', poolId.toString()))
-          .build()
-      );
-
-      if (result.result?.status !== 'SUCCESS') {
-        throw new Error('Failed to check APY freshness');
-      }
-
-      return Boolean(scValToNative(result.result.returnValue));
-    } catch (error: any) {
-      throw new RebalanceError(`Freshness check failed: ${error.message}`, 'FRESHNESS_CHECK_ERROR');
-    }
-  }
-
-  /**
    * Calculate impermanent loss for a pool
    */
   async calculateImpermanentLoss(
@@ -629,42 +621,6 @@ export class RebalancerClient extends EventEmitter {
    * @param reasonDetails - Additional context about the pause reason
    * @param options - Transaction options
    */
-  async pause(
-    adminKeyPair: any,
-    options?: TransactionOptions,
-  ): Promise<TransactionResult> {
-    try {
-      const account = await this.server.getAccount(adminKeyPair.publicKey());
-
-      const tx = new TransactionBuilder(account, {
-        fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
-        networkPassphrase: this.getNetworkPassphrase(),
-      })
-        .addOperation(this.contract.call("pause", adminKeyPair.publicKey()))
-        .setTimeout(options?.timeout || 30)
-        .build();
-
-      const signedTx = adminKeyPair.sign(tx);
-      const result = await this.server.sendTransaction(signedTx);
-
-      return {
-        hash: result.hash,
-        success: result.status === "SUCCESS",
-        gasUsed: 0,
-        error: result.status === "ERROR" ? result.errorResult : undefined,
-      };
-
-      // Emit pause event with reason if successful
-      if (transactionResult.success && reason) {
-        this.emitPauseEvent(reason, reasonDetails);
-      }
-
-      return transactionResult;
-    } catch (error: any) {
-      throw new RebalanceError(`Pause failed: ${error.message}`, "PAUSE_ERROR");
-    }
-  }
-
   /**
    * Unpause rebalance engine (admin only)
    */
@@ -905,13 +861,6 @@ export class RebalancerClient extends EventEmitter {
         gasUsed: 0,
         error: result.status === "ERROR" ? result.errorResult : undefined,
       };
-
-      // Emit unpause event if successful
-      if (transactionResult.success) {
-        this.emitUnpauseEvent();
-      }
-
-      return transactionResult;
     } catch (error: any) {
       throw new RebalanceError(
         `Set max APY age failed: ${error.message}`,
