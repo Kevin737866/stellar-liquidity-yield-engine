@@ -247,9 +247,10 @@ impl RebalanceEngine {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_apy_age"), &DEFAULT_MAX_APY_AGE);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "max_slippage_bps"), &DEFAULT_MAX_SLIPPAGE_BPS);
+        env.storage().instance().set(
+            &Symbol::new(&env, "max_slippage_bps"),
+            &DEFAULT_MAX_SLIPPAGE_BPS,
+        );
         // Record the storage schema version of this build; `migrate` moves it
         // forward after an upgrade swaps the code.
         crate::upgrade::set_storage_version(&env, crate::upgrade::STORAGE_VERSION);
@@ -471,7 +472,10 @@ impl RebalanceEngine {
     /// Set the maximum slippage tolerated at execution time (admin only).
     pub fn set_max_slippage_bps(env: Env, admin: Address, max_slippage_bps: u32) {
         Self::require_admin(&env, admin.clone());
-        require!(max_slippage_bps <= 10000, "max_slippage_bps must not exceed 10000");
+        require!(
+            max_slippage_bps <= 10000,
+            "max_slippage_bps must not exceed 10000"
+        );
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_slippage_bps"), &max_slippage_bps);
@@ -1751,7 +1755,12 @@ impl RebalanceEngine {
     }
 
     /// Set consecutive failure breaker threshold for a specific strategy (admin only).
-    pub fn set_strategy_breaker_threshold(env: Env, admin: Address, strategy_id: u32, threshold: u32) {
+    pub fn set_strategy_breaker_threshold(
+        env: Env,
+        admin: Address,
+        strategy_id: u32,
+        threshold: u32,
+    ) {
         Self::require_admin(&env, admin.clone());
         require!(threshold > 0, "threshold must be greater than zero");
         let mut thresholds: Map<u32, u32> = env
@@ -1764,7 +1773,10 @@ impl RebalanceEngine {
             .instance()
             .set(&Symbol::new(&env, "strat_breaker_thresh"), &thresholds);
         env.events().publish(
-            (Symbol::new(&env, "strat_breaker_thresh_updated"), strategy_id),
+            (
+                Symbol::new(&env, "strat_breaker_thresh_updated"),
+                strategy_id,
+            ),
             (admin, threshold),
         );
     }
@@ -2312,6 +2324,8 @@ mod tests {
 
         let err = client.try_get_strategy(&7).unwrap_err().unwrap();
         assert_eq!(err, RebalanceError::StrategyNotFound.into());
+    }
+
     // ============ REBALANCE PACING TESTS (Issue #302) ============
 
     /// Real token contracts for a rebalance leg: the engine pulls the `from`
@@ -2547,7 +2561,10 @@ mod tests {
 
         assert_eq!(client.get_pool_breaker_threshold(&pool_a), 2);
         assert_eq!(client.get_pool_breaker_threshold(&pool_b), 4);
-        assert_eq!(client.get_pool_breaker_threshold(&pool_c), EMERGENCY_STOP_WINDOW);
+        assert_eq!(
+            client.get_pool_breaker_threshold(&pool_c),
+            EMERGENCY_STOP_WINDOW
+        );
 
         // Record 2 failures for Pool A
         client.execute_rebalance(&caller, &failed_proposal(&env, &pool_a));
