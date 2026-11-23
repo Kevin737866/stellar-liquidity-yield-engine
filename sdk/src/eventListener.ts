@@ -274,6 +274,125 @@ export interface ListenerErrorEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor expiration
+// ---------------------------------------------------------------------------
+
+/** Why the RPC stopped accepting the listener's saved cursor. */
+export type CursorExpirationReason = 'expired' | 'pruned' | 'invalid';
+
+/**
+ * Typed error raised when the RPC rejects a saved cursor.
+ *
+ * Soroban RPC keeps event history for a bounded window. A paging cursor that
+ * points into a ledger older than that window is rejected, which is a
+ * different failure from a network outage: retrying the same cursor will keep
+ * failing, so the listener drops it and resumes from its ledger position.
+ */
+export class CursorExpiredError extends Error {
+  /** The cursor the RPC rejected (a paging token, or a ledger number). */
+  readonly cursor: string | number;
+  /** Ledger the listener will resume from on the next poll. */
+  readonly resumeFromLedger: number;
+  /** Best-effort classification of the RPC rejection. */
+  readonly reason: CursorExpirationReason;
+  /** The original RPC error, kept for logging. */
+  readonly originalError: Error;
+
+  constructor(
+    cursor: string | number,
+    resumeFromLedger: number,
+    reason: CursorExpirationReason,
+    originalError: Error,
+  ) {
+    super(
+      `RPC cursor ${String(cursor)} is no longer usable (${reason}); ` +
+        `resuming from ledger ${resumeFromLedger}`,
+    );
+    this.name = 'CursorExpiredError';
+    this.cursor = cursor;
+    this.resumeFromLedger = resumeFromLedger;
+    this.reason = reason;
+    this.originalError = originalError;
+  }
+}
+
+/** Flatten an unknown thrown value into searchable text. */
+function errorText(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) {
+    const extra = error as Error & {
+      code?: unknown;
+      details?: unknown;
+      response?: { data?: unknown };
+    };
+    return [error.message, extra.code, extra.details, extra.response?.data]
+      .filter((part) => part !== undefined && part !== null)
+      .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
+      .join(' ');
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+/**
+ * Whether an RPC failure means the saved cursor can no longer be used.
+ *
+ * Detection is message-based because Soroban RPC does not expose a stable
+ * machine-readable code for this condition. The check deliberately requires
+ * both a cursor mention and an expiration-like word so an unrelated error that
+ * happens to contain "cursor" is not misclassified.
+ */
+export function isCursorExpiredError(error: unknown): boolean {
+  const text = errorText(error).toLowerCase();
+  if (!text.includes('cursor')) return false;
+  return /(expir|too old|stale|invalid|not found|unknown|pruned|out of range|outside)/.test(
+    text,
+  );
+}
+
+/** Classify a cursor-expiration error for the typed result. */
+export function classifyCursorExpiration(error: unknown): CursorExpirationReason {
+  const text = errorText(error).toLowerCase();
+  if (text.includes('prun')) return 'pruned';
+  if (text.includes('invalid') || text.includes('not found') || text.includes('unknown')) {
+    return 'invalid';
+  }
+  return 'expired';
+}
+
+/** Outcome of a single poll. */
+export type PollResult =
+  | {
+      /** The poll completed and the listener advanced. */
+      status: 'ok';
+      /** Number of raw events returned by the RPC in this poll. */
+      eventsProcessed: number;
+      /** Ledger the next poll will start from. */
+      nextLedger: number;
+    }
+  | {
+      /** The saved cursor was rejected; the listener dropped it. */
+      status: 'cursor_expired';
+      /** Cursor the RPC rejected. */
+      cursor: string | number;
+      /** Ledger the next poll will resume from. */
+      resumeFromLedger: number;
+      /** Typed error also delivered through the error handler. */
+      error: CursorExpiredError;
+    }
+  | {
+      /** Any other poll failure (network, checkpoint, ...). */
+      status: 'error';
+      /** Ledger at the time of the failure. */
+      ledger: number;
+      /** The underlying error. */
+      error: Error;
+    };
+
+// ---------------------------------------------------------------------------
 // ContractEventListener
 // ---------------------------------------------------------------------------
 
@@ -332,9 +451,6 @@ export class ContractEventListener {
    * at {@link cursor}, so a page that ends mid-ledger loses nothing.
    */
   private pagingCursor: string | null = null;
-
-  /** Tail of the poll queue; polls run one after another, never overlapping. */
-  private pollChain: Promise<void> = Promise.resolve();
 
   /** Durable store for the listener's position (optional). */
   private readonly store?: CheckpointStore;
@@ -603,13 +719,32 @@ export class ContractEventListener {
    * poll is in flight waits for it to finish.
    */
   poll(): Promise<void> {
+    return this.pollWithResult().then(() => undefined);
+  }
+
+  /**
+   * Perform a single poll and return a typed outcome.
+   *
+   * Unlike {@link poll}, this distinguishes a rejected cursor from any other
+   * failure. A cursor the RPC has aged out is not retryable with the same
+   * position, so the listener drops the paging token and reports
+   * `cursor_expired` with the ledger it will resume from.
+   *
+   * Polls never overlap: a call made while another poll is in flight waits for
+   * it to finish.
+   */
+  pollWithResult(): Promise<PollResult> {
     // Chain onto the previous poll. Both arms run the next poll so a rejection
     // can never stall the loop permanently.
-    this.pollChain = this.pollChain.then(
+    const run = this.pollChain.then(
       () => this.runPoll(),
       () => this.runPoll(),
     );
-    return this.pollChain;
+    this.pollChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   // -------------------------------------------------------------------------
@@ -620,16 +755,37 @@ export class ContractEventListener {
    * Run a single poll: restore the durable position (first poll only),
    * fetch, dispatch and persist.
    */
-  private async runPoll(): Promise<void> {
+  private async runPoll(): Promise<PollResult> {
     try {
       await this.restoreIfNeeded();
       const request = this.buildRequest();
       const response = await this.source.getEvents(request);
+      const eventsProcessed = response.events.length;
       this.processResponse(response);
       await this.persistIfEnabled();
+      return { status: 'ok', eventsProcessed, nextLedger: this.cursor };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+
+      if (isCursorExpiredError(error)) {
+        const cursor = this.pagingCursor ?? this.cursor;
+        const resumeFromLedger = this.cursor;
+        const expired = new CursorExpiredError(
+          cursor,
+          resumeFromLedger,
+          classifyCursorExpiration(error),
+          error,
+        );
+        // The token is unusable. Dropping it makes the next poll fall back to
+        // the ledger position, which may replay part of the last ledger but
+        // never skips an event.
+        this.pagingCursor = null;
+        this.emitError(expired);
+        return { status: 'cursor_expired', cursor, resumeFromLedger, error: expired };
+      }
+
       this.emitError(error);
+      return { status: 'error', ledger: this.cursor, error };
     }
   }
 

@@ -1,7 +1,14 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, token::TokenClient,
-    Address, Env, Map, Symbol, Vec,
+    Address, Env, Map, String, Symbol, Vec,
 };
+
+/// Maximum length of an emergency action reason, in bytes.
+///
+/// The reason is published in the event payload, so an unbounded string would
+/// let a signer inflate the event size (and the ledger fee) arbitrarily. 256
+/// bytes is enough for a short incident reference.
+pub const MAX_EMERGENCY_REASON_LENGTH: u32 = 256;
 
 /// Typed failures of the yield vault.
 ///
@@ -52,6 +59,10 @@ pub enum VaultError {
     InsufficientEmergencySignatures = 19,
     /// A harvest was attempted before the configured interval had elapsed.
     HarvestTooEarly = 20,
+    /// The emergency action did not include a reason.
+    EmergencyReasonRequired = 20,
+    /// The emergency action reason exceeds [`MAX_EMERGENCY_REASON_LENGTH`].
+    EmergencyReasonTooLong = 21,
 }
 
 #[contracttype]
@@ -1416,26 +1427,48 @@ impl YieldVault {
         }
     }
 
-    /// Emergency pause (multisig required)
-    pub fn emergency_pause(env: Env, signers: Vec<Address>) {
+    /// Reject an emergency reason that is empty or too long.
+    fn require_valid_emergency_reason(env: &Env, reason: &String) {
+        if reason.is_empty() {
+            env.panic_with_error(VaultError::EmergencyReasonRequired);
+        }
+        if reason.len() > MAX_EMERGENCY_REASON_LENGTH {
+            env.panic_with_error(VaultError::EmergencyReasonTooLong);
+        }
+    }
+
+    /// Emergency pause (multisig required).
+    ///
+    /// `reason` is published with the event so an off-chain monitor can tell
+    /// why the vault was paused without reconstructing the multisig session.
+    pub fn emergency_pause(env: Env, signers: Vec<Address>, reason: String) {
         Self::require_multisig(&env, signers);
+        Self::require_valid_emergency_reason(&env, &reason);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &true);
 
-        env.events()
-            .publish(("emergency_pause",), (env.current_contract_address(),));
+        env.events().publish(
+            ("emergency_pause",),
+            (env.current_contract_address(), reason),
+        );
     }
 
-    /// Emergency unpause (multisig required)
-    pub fn emergency_unpause(env: Env, signers: Vec<Address>) {
+    /// Emergency unpause (multisig required).
+    ///
+    /// `reason` is published with the event for the same auditability reason as
+    /// [`Self::emergency_pause`].
+    pub fn emergency_unpause(env: Env, signers: Vec<Address>, reason: String) {
         Self::require_multisig(&env, signers);
+        Self::require_valid_emergency_reason(&env, &reason);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &false);
 
-        env.events()
-            .publish(("emergency_unpause",), (env.current_contract_address(),));
+        env.events().publish(
+            ("emergency_unpause",),
+            (env.current_contract_address(), reason),
+        );
     }
 }
 
@@ -1444,10 +1477,10 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
     use soroban_sdk::{
         token::{StellarAssetClient, TokenClient},
-        Env, Symbol,
+        Env, Symbol, TryFromVal, Val,
     };
 
     fn setup(
@@ -2583,5 +2616,111 @@ mod tests {
                 (false, 0)
             }
         }
+    }
+
+    // ==================== Emergency action audit trail (#239) ====================
+
+    fn configure_emergency_multisig(
+        env: &Env,
+        vault: &YieldVaultClient,
+        admin: &Address,
+    ) -> Vec<Address> {
+        let mut signers = Vec::new(env);
+        signers.push_back(Address::generate(env));
+        signers.push_back(Address::generate(env));
+        signers.push_back(Address::generate(env));
+        vault.set_emergency_signers(admin, &signers);
+        vault.set_emergency_threshold(admin, &3u32);
+        signers
+    }
+
+    fn last_event_data(env: &Env) -> Val {
+        let events = env.events().all();
+        let (_, _, data) = events.last().unwrap();
+        data
+    }
+
+    #[test]
+    fn test_emergency_pause_publishes_reason() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let reason = String::from_str(&env, "oracle deviation above 5%");
+
+        vault.emergency_pause(&signers, &reason);
+
+        let (contract, published_reason): (Address, String) =
+            <(Address, String)>::try_from_val(&env, &last_event_data(&env)).unwrap();
+        assert_eq!(contract, vault.address);
+        assert_eq!(published_reason, reason);
+        assert!(env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_unpause_publishes_reason() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        vault.emergency_pause(&signers, &String::from_str(&env, "incident 42"));
+
+        let unpause_reason = String::from_str(&env, "incident 42 resolved");
+        vault.emergency_unpause(&signers, &unpause_reason);
+
+        let (_, published_reason): (Address, String) =
+            <(Address, String)>::try_from_val(&env, &last_event_data(&env)).unwrap();
+        assert_eq!(published_reason, unpause_reason);
+        assert!(!env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_pause_rejects_empty_reason() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let empty = String::from_str(&env, "");
+
+        let err = vault
+            .try_emergency_pause(&signers, &empty)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, VaultError::EmergencyReasonRequired.into());
+        assert!(!env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_pause_rejects_reason_over_limit() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let bytes = [b'a'; (MAX_EMERGENCY_REASON_LENGTH + 1) as usize];
+        let long_reason = String::from_bytes(&env, &bytes);
+
+        let err = vault
+            .try_emergency_pause(&signers, &long_reason)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, VaultError::EmergencyReasonTooLong.into());
+        assert!(!env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_pause_accepts_reason_at_limit() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let bytes = [b'a'; MAX_EMERGENCY_REASON_LENGTH as usize];
+        let reason = String::from_bytes(&env, &bytes);
+
+        vault.emergency_pause(&signers, &reason);
+
+        let (_, published_reason): (Address, String) =
+            <(Address, String)>::try_from_val(&env, &last_event_data(&env)).unwrap();
+        assert_eq!(published_reason, reason);
+        assert!(env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
     }
 }
