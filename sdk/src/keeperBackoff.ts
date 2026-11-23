@@ -4,6 +4,11 @@
  * After repeated consecutive failures a keeper skips its ticks until `nextAttemptAt`, so a
  * flapping keeper stops hammering the RPC during an outage. The state is persisted through a
  * store, so a restart during the outage does not reset the delay.
+ *
+ * Role rotation note: keeper and governance role rotation must not be driven by a backoff
+ * window that is still active. Callers rotating a keeper role should check `remainingMs()`
+ * (or `canRunNow()`) first, and a rotation that completes while a backoff is pending should
+ * call `reset()` only after the new credential has succeeded at least once via `recordSuccess()`.
  */
 
 export interface BackoffPolicy {
@@ -140,6 +145,20 @@ export class KeeperBackoff {
   /** Milliseconds the keeper must still wait (0 = may run now). */
   remainingMs(): number {
     return Math.max(0, this.state.nextAttemptAt - this.now());
+  }
+
+  /** True when the keeper may call the RPC now. Useful before a role rotation takes effect. */
+  canRunNow(): boolean {
+    return this.remainingMs() === 0;
+  }
+
+  /**
+   * Clears all backoff state, e.g. after a governance-approved role rotation to a new keeper
+   * key. Persists the cleared state so a restart does not reinstate the old delay.
+   */
+  async reset(): Promise<void> {
+    this.state = { consecutiveFailures: 0, nextAttemptAt: 0, updatedAt: this.now() };
+    await this.persist();
   }
 
   async recordSuccess(): Promise<void> {

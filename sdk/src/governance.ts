@@ -201,6 +201,37 @@ export class GovernanceSDK {
     };
   }
 
+  /**
+   * Rotate a single protocol contract address at runtime (e.g. after a
+   * governance-approved upgrade). Only the named role is changed; all other
+   * roles keep their current values. The new ID must be a configured value.
+   *
+   * @throws if `contractId` is not a configured (non-placeholder) address.
+   */
+  rotateContract(role: keyof GovernanceContracts, contractId: string): void {
+    if (!isContractConfigured(contractId)) {
+      throw new Error(
+        `rotateContract: refusing to set "${role}" to an unconfigured contract ID`
+      );
+    }
+    switch (role) {
+      case 'governance':
+        this.governanceContractId = contractId;
+        break;
+      case 'votingEscrow':
+        this.votingEscrowContractId = contractId;
+        break;
+      case 'staking':
+        this.stakingContractId = contractId;
+        break;
+      case 'feeDistributor':
+        this.feeDistributorContractId = contractId;
+        break;
+      default:
+        throw new Error(`rotateContract: unknown contract role "${String(role)}"`);
+    }
+  }
+
   // Validating accessors. Every call site reads the contract through these so
   // an unconfigured deployment fails with an actionable message instead of
   // constructing a `Contract` from a placeholder ID.
@@ -240,6 +271,39 @@ export class GovernanceSDK {
    */
   setKeypair(keypair: Keypair): void {
     this.keypair = keypair;
+  }
+
+  /**
+   * Safely rotate the signer used by this client.
+   *
+   * Validates the new keypair before swapping it in, so a failed rotation
+   * never leaves the client without a usable signer. Returns the previous
+   * signer (if any) so callers can confirm or roll back the rotation.
+   *
+   * Failure behaviour:
+   * - `null` / `undefined` new keypair: throws, current signer is kept.
+   * - Keypair that cannot produce a public key: throws, current signer is kept.
+   * - Rotating to the same public key as the current signer: no-op, returns
+   *   the current signer unchanged.
+   */
+  rotateKeypair(next: Keypair): Keypair | undefined {
+    if (!next) {
+      throw new Error('rotateKeypair: a new keypair is required');
+    }
+    let nextKey: string;
+    try {
+      nextKey = next.publicKey();
+    } catch (error) {
+      throw new Error(
+        `rotateKeypair: supplied keypair is unusable: ${(error as Error).message}`
+      );
+    }
+    const previous = this.keypair;
+    if (previous && previous.publicKey() === nextKey) {
+      return previous;
+    }
+    this.keypair = next;
+    return previous;
   }
 
   /**
