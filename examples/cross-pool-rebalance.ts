@@ -170,7 +170,9 @@ async function analyzeAndRebalance() {
         amountB: fromVault!.userValue / 2n,
         expectedApyImprovement: bestTarget!.currentAPY - fromVault!.currentAPY,
         estimatedGasCost: BigInt(50000),
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        // This example does not model per-pool IL, so nothing is projected.
+        postRebalanceIlBps: 0
       };
     });
 
@@ -397,7 +399,9 @@ export class CrossPoolRebalancer {
           amountB: rebalanceAmount,
           expectedApyImprovement: best.metrics.apy - worst.metrics.apy,
           estimatedGasCost: BigInt(50000),
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          // This example does not model per-pool IL, so nothing is projected.
+          postRebalanceIlBps: 0
         });
       }
     }

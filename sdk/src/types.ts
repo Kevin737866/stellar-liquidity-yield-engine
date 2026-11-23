@@ -69,6 +69,8 @@ export interface RebalanceProposal {
   expectedApyImprovement: number; // Basis points
   estimatedGasCost: bigint;
   timestamp: number;
+  // Projected IL exposure of the strategy after the move, in basis points.
+  postRebalanceIlBps: number;
 }
 
 export interface RebalanceHistory {

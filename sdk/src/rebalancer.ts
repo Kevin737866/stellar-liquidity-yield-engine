@@ -1071,6 +1071,7 @@ export class RebalancerClient extends EventEmitter {
       expected_apy_improvement: proposal.expectedApyImprovement.toString(),
       estimated_gas_cost: proposal.estimatedGasCost.toString(),
       timestamp: proposal.timestamp.toString(),
+      post_rebalance_il_bps: proposal.postRebalanceIlBps.toString(),
     };
   }
 
@@ -1092,6 +1093,7 @@ export class RebalancerClient extends EventEmitter {
       expectedApyImprovement: Number(item.expected_apy_improvement),
       estimatedGasCost: BigInt(item.estimated_gas_cost),
       timestamp: Number(item.timestamp),
+      postRebalanceIlBps: Number(item.post_rebalance_il_bps),
     }));
   }
 
