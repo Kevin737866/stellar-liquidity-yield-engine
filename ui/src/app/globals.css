@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+.skip-link {
+  @apply sr-only;
+}
+
+.skip-link:focus {
+  @apply not-sr-only fixed left-4 top-4 z-50 rounded-md bg-slate-900 px-4 py-2 text-sm font-semibold text-white;
+}
