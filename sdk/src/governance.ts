@@ -14,6 +14,7 @@ import {
   scValToNative, 
   Contract
 } from 'stellar-sdk';
+import { checkRpcHealth, type RpcHealthCheckOptions } from './utils/transaction';
 
 // ===== Configuration =====
 
@@ -130,6 +131,15 @@ export interface SubmittedTransaction {
   ledger?: number;
   /** Why it did not succeed, when `success` is false. */
   error?: string;
+}
+
+export interface SubmitTransactionOptions {
+  /** How long to wait for inclusion (default 60s). */
+  timeoutMs?: number;
+  /** Delay between confirmation polls (default 1s). */
+  pollIntervalMs?: number;
+  /** Opt in to an endpoint health check before submitting the transaction. */
+  rpcHealthCheck?: RpcHealthCheckOptions;
 }
 
 /**
@@ -1136,11 +1146,14 @@ export class GovernanceSDK {
    */
   async submitTransaction(
     transaction: Transaction,
-    options: { timeoutMs?: number; pollIntervalMs?: number } = {}
+    options: SubmitTransactionOptions = {}
   ): Promise<SubmittedTransaction> {
     const timeoutMs = options.timeoutMs ?? 60_000;
     const pollIntervalMs = options.pollIntervalMs ?? 1_000;
 
+    if (options.rpcHealthCheck) {
+      await checkRpcHealth(this.server, options.rpcHealthCheck);
+    }
     const sendResult = await this.server.sendTransaction(transaction);
     const hash = sendResult.hash;
 

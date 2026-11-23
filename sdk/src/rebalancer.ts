@@ -24,7 +24,7 @@ import {
   RebalanceError,
   NetworkConfig,
 } from "./types";
-import { waitForTransaction } from "./utils/transaction";
+import { checkRpcHealth, waitForTransaction } from "./utils/transaction";
 
 export class RebalancerClient extends EventEmitter {
   private contract: Contract;
@@ -74,6 +74,9 @@ export class RebalancerClient extends EventEmitter {
         .build();
 
       const signedTx = adminKeyPair.sign(tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === "SUCCESS") {
@@ -141,6 +144,9 @@ export class RebalancerClient extends EventEmitter {
         .build();
 
       const signedTx = adminKeyPair.sign(tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       return {
@@ -252,6 +258,9 @@ export class RebalancerClient extends EventEmitter {
         signedTx = tx;
       }
 
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === "SUCCESS") {
@@ -645,6 +654,9 @@ export class RebalancerClient extends EventEmitter {
         .build();
 
       const signedTx = adminKeyPair.sign(tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       return {
@@ -684,6 +696,9 @@ export class RebalancerClient extends EventEmitter {
         .build();
 
       const signedTx = adminKeyPair.sign(tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       return {
@@ -718,6 +733,9 @@ export class RebalancerClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signTransaction(adminKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       return {
@@ -789,6 +807,9 @@ export class RebalancerClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signTransaction(keeperKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       return {
@@ -897,6 +918,9 @@ export class RebalancerClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signTransaction(adminKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       return {

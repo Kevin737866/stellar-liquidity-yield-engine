@@ -105,6 +105,7 @@ export {
   GovernanceSDK,
   ProposalState,
   type GovernanceProposal,
+  type SubmitTransactionOptions,
   type CallData,
   type LockInfo,
   type FeeDistribution,

@@ -6,6 +6,7 @@
 
 import { SorobanRpc } from 'stellar-sdk';
 import { withRetry, RetryOptions, DEFAULT_RETRY_OPTIONS } from './retry';
+import { checkRpcHealth, RpcHealthCheckOptions } from './transaction';
 
 /**
  * Retry options specifically for RPC calls.
@@ -15,12 +16,18 @@ export interface RpcRetryOptions extends RetryOptions {
   retryReads?: boolean;
   /** Whether to retry write operations (sendTransaction). Defaults to true. */
   retryWrites?: boolean;
+  /** Opt in to checking endpoint health before each transaction submission. */
+  rpcHealthCheck?: RpcHealthCheckOptions;
 }
 
-const DEFAULT_RPC_RETRY_OPTIONS: Required<RpcRetryOptions> = {
+type ResolvedRpcRetryOptions = Required<Omit<RpcRetryOptions, 'rpcHealthCheck'>> &
+  Pick<RpcRetryOptions, 'rpcHealthCheck'>;
+
+const DEFAULT_RPC_RETRY_OPTIONS: ResolvedRpcRetryOptions = {
   ...DEFAULT_RETRY_OPTIONS,
   retryReads: true,
   retryWrites: true,
+  rpcHealthCheck: undefined,
 };
 
 /**
@@ -28,7 +35,7 @@ const DEFAULT_RPC_RETRY_OPTIONS: Required<RpcRetryOptions> = {
  */
 export class RetryRpcServer {
   private server: SorobanRpc.Server;
-  private options: Required<RpcRetryOptions>;
+  private options: ResolvedRpcRetryOptions;
 
   constructor(server: SorobanRpc.Server, options: RpcRetryOptions = {}) {
     this.server = server;
@@ -71,8 +78,12 @@ export class RetryRpcServer {
    * Send transaction with retry for transient errors.
    */
   async sendTransaction(
-    transaction: SorobanRpc.Api.SendTransactionRequest
-  ): Promise<SorobanRpc.Api.SendTransactionResponse> {
+    transaction: Parameters<SorobanRpc.Server['sendTransaction']>[0]
+  ): ReturnType<SorobanRpc.Server['sendTransaction']> {
+    if (this.options.rpcHealthCheck) {
+      await checkRpcHealth(this.server, this.options.rpcHealthCheck);
+    }
+
     if (!this.options.retryWrites) {
       return this.server.sendTransaction(transaction);
     }

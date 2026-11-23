@@ -135,6 +135,37 @@ describe('RetryRpcServer', () => {
 
       expect(mockServer.sendTransaction).toHaveBeenCalledTimes(1);
     });
+
+    it('checks endpoint health before submitting when configured', async () => {
+      const server = new RetryRpcServer(mockServer, {
+        rpcHealthCheck: { timeoutMs: 100 },
+      });
+      const order: string[] = [];
+      mockServer.getHealth.mockImplementation(async () => {
+        order.push('health');
+        return { status: 'healthy' };
+      });
+      mockServer.sendTransaction.mockImplementation(async () => {
+        order.push('send');
+        return { hash: 'test-hash', status: 'SUCCESS' };
+      });
+
+      await server.sendTransaction({} as any);
+
+      expect(order).toEqual(['health', 'send']);
+    });
+
+    it('does not submit when the configured health check fails', async () => {
+      const server = new RetryRpcServer(mockServer, {
+        rpcHealthCheck: { timeoutMs: 100 },
+      });
+      mockServer.getHealth.mockRejectedValue(new Error('connection refused'));
+
+      await expect(server.sendTransaction({} as any)).rejects.toThrow(
+        'RPC health check failed',
+      );
+      expect(mockServer.sendTransaction).not.toHaveBeenCalled();
+    });
   });
 
   describe('getTransaction', () => {

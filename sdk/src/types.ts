@@ -1,4 +1,5 @@
 import { Address, Transaction } from "stellar-sdk";
+import type { RpcHealthCheckOptions } from './utils/transaction';
 
 // Vault Types
 export interface VaultInfo {
@@ -264,6 +265,12 @@ export interface TransactionOptions {
   gasPrice?: number;
   timeout?: number;
   skipConfirmation?: boolean;
+  /**
+   * Opt in to checking the Soroban RPC endpoint before submitting. If the
+   * endpoint is unhealthy or does not respond before the timeout, submission
+   * is aborted. Omitting this option preserves the existing behavior.
+   */
+  rpcHealthCheck?: RpcHealthCheckOptions;
 }
 
 // Vault Client Options
