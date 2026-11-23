@@ -4,6 +4,12 @@
  * After repeated consecutive failures a keeper skips its ticks until `nextAttemptAt`, so a
  * flapping keeper stops hammering the RPC during an outage. The state is persisted through a
  * store, so a restart during the outage does not reset the delay.
+ *
+ * Staged rollout support: a keeper running a new strategy version can be placed in a rollout
+ * stage (e.g. canary -> partial -> full) that gates which keepers are allowed to execute the
+ * new version, and can be promoted or rolled back deterministically. Keepers outside the
+ * current stage keep running the previous version. Stage membership is derived from a stable
+ * hash of the keeper id, so the same keeper always lands in the same bucket for a given rollout.
  */
 
 export interface BackoffPolicy {
@@ -65,6 +71,176 @@ export type TickResult<T> =
   | { ran: true; ok: true; value: T }
   | { ran: true; ok: false; error: unknown; delayMs: number }
   | { ran: false; waitMs: number };
+
+/* ------------------------------------------------------------------------------------------ */
+/* Staged rollout                                                                              */
+/* ------------------------------------------------------------------------------------------ */
+
+/** Named rollout stages, in increasing exposure order. */
+export type RolloutStage = 'disabled' | 'canary' | 'partial' | 'full';
+
+/** Percentage of keepers (0-100) that run the new version in each stage. */
+export const ROLLOUT_STAGE_PERCENT: Record<RolloutStage, number> = {
+  disabled: 0,
+  canary: 5,
+  partial: 50,
+  full: 100,
+};
+
+const STAGE_ORDER: readonly RolloutStage[] = ['disabled', 'canary', 'partial', 'full'];
+
+export interface RolloutPlan {
+  /** Identifier of the strategy version being rolled out, e.g. "v2". */
+  version: string;
+  /** Current stage. */
+  stage: RolloutStage;
+  /** Epoch ms of the last stage change (0 = never changed). */
+  updatedAt: number;
+}
+
+export interface RolloutStateStore {
+  load(): Promise<RolloutPlan | null>;
+  save(plan: RolloutPlan): Promise<void>;
+}
+
+export class InMemoryRolloutStore implements RolloutStateStore {
+  private plan: RolloutPlan | null = null;
+  async load() {
+    return this.plan ? { ...this.plan } : null;
+  }
+  async save(plan: RolloutPlan) {
+    this.plan = { ...plan };
+  }
+}
+
+/**
+ * Stable bucket in [0, 100) for a keeper id, using FNV-1a. Deterministic across processes so a
+ * keeper's rollout membership does not change on restart.
+ */
+export function rolloutBucket(keeperId: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < keeperId.length; i++) {
+    hash ^= keeperId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash % 100;
+}
+
+/** Returns true if the given keeper should run the rollout version at the given stage. */
+export function isInRolloutStage(keeperId: string, stage: RolloutStage): boolean {
+  if (!keeperId) throw new Error('keeperId is required for rollout selection');
+  return rolloutBucket(keeperId) < ROLLOUT_STAGE_PERCENT[stage];
+}
+
+/** Validates a version string and stage value. */
+export function validateRolloutPlan(plan: RolloutPlan): RolloutPlan {
+  if (typeof plan.version !== 'string' || plan.version.trim() === '') {
+    throw new Error('Invalid rollout plan: version must be a non-empty string');
+  }
+  if (!STAGE_ORDER.includes(plan.stage)) {
+    throw new Error(`Invalid rollout plan: unknown stage "${String(plan.stage)}"`);
+  }
+  return plan;
+}
+
+export interface RolloutOptions {
+  store?: RolloutStateStore;
+  /** Injectable clock (epoch ms) for tests. */
+  now?: () => number;
+  onStageChange?: (info: { version: string; from: RolloutStage; to: RolloutStage }) => void;
+}
+
+/**
+ * Drives a staged rollout of a new strategy version. Promotion moves one stage forward at a time;
+ * rollback returns straight to `disabled`, so the previous version is always the safe default.
+ */
+export class StagedRollout {
+  private readonly store: RolloutStateStore;
+  private readonly now: () => number;
+  private readonly opts: RolloutOptions;
+  private plan: RolloutPlan;
+  private loaded = false;
+
+  constructor(version: string, opts: RolloutOptions = {}) {
+    this.opts = opts;
+    this.store = opts.store ?? new InMemoryRolloutStore();
+    this.now = opts.now ?? Date.now;
+    this.plan = validateRolloutPlan({ version, stage: 'disabled', updatedAt: 0 });
+  }
+
+  /**
+   * Restores persisted plan. An unreadable store, or a stored plan for a different version,
+   * falls back to the default `disabled` plan so the keeper stays on the previous version.
+   */
+  async init(): Promise<void> {
+    if (this.loaded) return;
+    this.loaded = true;
+    let stored: RolloutPlan | null = null;
+    try {
+      stored = await this.store.load();
+    } catch {
+      stored = null;
+    }
+    if (!stored) return;
+    try {
+      const valid = validateRolloutPlan(stored);
+      if (valid.version !== this.plan.version) return;
+      this.plan = {
+        version: valid.version,
+        stage: valid.stage,
+        updatedAt: Number.isFinite(valid.updatedAt) ? valid.updatedAt : 0,
+      };
+    } catch {
+      // corrupt persisted plan: keep the safe default
+    }
+  }
+
+  getPlan(): RolloutPlan {
+    return { ...this.plan };
+  }
+
+  /** Whether the given keeper should run the new version right now. */
+  shouldUseNewVersion(keeperId: string): boolean {
+    return isInRolloutStage(keeperId, this.plan.stage);
+  }
+
+  /** Advances exactly one stage. Throws if already at `full`. */
+  async promote(): Promise<RolloutPlan> {
+    await this.init();
+    const idx = STAGE_ORDER.indexOf(this.plan.stage);
+    if (idx === STAGE_ORDER.length - 1) {
+      throw new Error('Cannot promote: rollout is already at the full stage');
+    }
+    return this.setStage(STAGE_ORDER[idx + 1]);
+  }
+
+  /** Immediately returns all keepers to the previous version. */
+  async rollback(): Promise<RolloutPlan> {
+    await this.init();
+    if (this.plan.stage === 'disabled') return this.getPlan();
+    return this.setStage('disabled');
+  }
+
+  private async setStage(to: RolloutStage): Promise<RolloutPlan> {
+    const from = this.plan.stage;
+    this.plan = { version: this.plan.version, stage: to, updatedAt: this.now() };
+    await this.persist();
+    this.opts.onStageChange?.({ version: this.plan.version, from, to });
+    return this.getPlan();
+  }
+
+  private async persist(): Promise<void> {
+    try {
+      await this.store.save(this.plan);
+    } catch {
+      // Losing durability must not crash the keeper; in-memory plan still applies.
+    }
+  }
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Backoff                                                                                     */
+/* ------------------------------------------------------------------------------------------ */
 
 const EMPTY: BackoffState = { consecutiveFailures: 0, nextAttemptAt: 0, updatedAt: 0 };
 
@@ -151,46 +327,22 @@ export class KeeperBackoff {
   }
 
   async recordFailure(error: unknown): Promise<number> {
-    const now = this.now();
     const failures = this.state.consecutiveFailures + 1;
+    const message = error instanceof Error ? error.message : String(error);
     const delayMs = backoffDelayMs(failures, this.policy, this.random);
-    const message = (error instanceof Error ? error.message : String(error)).slice(0, 300);
-    this.state = {
-      consecutiveFailures: failures,
-      nextAttemptAt: delayMs > 0 ? now + delayMs : 0,
-      lastError: message,
-      updatedAt: now,
-    };
+    const now = this.now();
+    const nextAttemptAt = delayMs > 0 ? now + delayMs : 0;
+    this.state = { consecutiveFailures: failures, nextAttemptAt, lastError: message, updatedAt: now };
     await this.persist();
-    if (delayMs > 0) {
-      this.opts.onBackoff?.({ failures, delayMs, nextAttemptAt: this.state.nextAttemptAt, error: message });
-    }
+    if (delayMs > 0) this.opts.onBackoff?.({ failures, delayMs, nextAttemptAt, error: message });
     return delayMs;
-  }
-
-  /**
-   * One keeper tick. Skips the task entirely while backing off (no RPC call, no extra failure
-   * counted); otherwise runs it and records the outcome. Never throws for task errors.
-   */
-  async tick<T>(task: () => Promise<T>): Promise<TickResult<T>> {
-    await this.init();
-    const waitMs = this.remainingMs();
-    if (waitMs > 0) return { ran: false, waitMs };
-    try {
-      const value = await task();
-      await this.recordSuccess();
-      return { ran: true, ok: true, value };
-    } catch (error) {
-      const delayMs = await this.recordFailure(error);
-      return { ran: true, ok: false, error, delayMs };
-    }
   }
 
   private async persist(): Promise<void> {
     try {
       await this.store.save(this.state);
     } catch {
-      // Losing durability must not crash the keeper; the in-memory state still applies.
+      // Losing durability must not crash the keeper; in-memory state still applies.
     }
   }
 }
