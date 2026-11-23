@@ -11,6 +11,14 @@
  * Reads are per-role. A role with no contract ID configured (see
  * `src/config/network.ts`) is skipped and reported rather than throwing, so a
  * partially deployed governance system still renders whatever it can.
+ *
+ * Proposal lifecycle audit: `proposalEvents` exposes a chronological audit
+ * view of each proposal's lifecycle (created, voting started, voted, ended,
+ * executed, cancelled) derived from the proposal records the contract returns.
+ * It is computed client-side from the same reads as `proposals`, so it adds no
+ * extra contract calls. Events whose timestamps are unavailable are omitted
+ * rather than guessed, and proposals with an inconsistent state are reported
+ * through `auditErrors` instead of being silently dropped.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -38,6 +46,64 @@ import {
 /** Number of proposal IDs the UI probes when listing proposals. */
 const MAX_PROPOSAL_IDS = 100;
 
+export type ProposalLifecycleEventType =
+  | 'created'
+  | 'voting_started'
+  | 'voting_ended'
+  | 'executed'
+  | 'cancelled';
+
+/** One entry in the proposal lifecycle audit trail. */
+export interface ProposalLifecycleEvent {
+  proposalId: number;
+  type: ProposalLifecycleEventType;
+  /** Unix timestamp in seconds, as recorded by the contract. */
+  timestamp: number;
+}
+
+export interface ProposalAuditError {
+  proposalId: number;
+  message: string;
+}
+
+/**
+ * Derive the lifecycle events for one proposal. Timestamps that are missing,
+ * non-finite or non-positive are treated as unknown and that event is omitted.
+ * Events are returned in chronological order; ties keep lifecycle order.
+ */
+export const buildProposalLifecycleEvents = (
+  proposal: GovernanceProposal
+): ProposalLifecycleEvent[] => {
+  const candidates: Array<[ProposalLifecycleEventType, unknown]> = [
+    ['created', (proposal as { createdAt?: unknown }).createdAt],
+    ['voting_started', (proposal as { votingStartsAt?: unknown }).votingStartsAt],
+    ['voting_ended', (proposal as { votingEndsAt?: unknown }).votingEndsAt],
+    ['executed', (proposal as { executedAt?: unknown }).executedAt],
+    ['cancelled', (proposal as { cancelledAt?: unknown }).cancelledAt],
+  ];
+
+  const events: ProposalLifecycleEvent[] = [];
+  candidates.forEach(([type, raw], order) => {
+    const timestamp = typeof raw === 'bigint' ? Number(raw) : raw;
+    if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) {
+      return;
+    }
+    events.push({ proposalId: proposal.id, type, timestamp });
+    // Preserve lifecycle order for stable sorting of equal timestamps.
+    (events[events.length - 1] as ProposalLifecycleEvent & { _order?: number })._order = order;
+  });
+
+  return events
+    .sort((a, b) => {
+      if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+      return (
+        (a as ProposalLifecycleEvent & { _order?: number })._order! -
+        (b as ProposalLifecycleEvent & { _order?: number })._order!
+      );
+    })
+    .map(({ proposalId, type, timestamp }) => ({ proposalId, type, timestamp }));
+};
+
 export interface UseGovernanceOptions {
   /** Overrides the network from the environment. */
   network?: UiNetwork;
@@ -55,6 +121,10 @@ export interface UseGovernanceOptions {
 export interface UseGovernanceReturn {
   sdk: GovernanceSDK | null;
   proposals: GovernanceProposal[];
+  /** Chronological lifecycle audit trail across all loaded proposals. */
+  proposalEvents: ProposalLifecycleEvent[];
+  /** Proposals whose lifecycle could not be audited, with the reason. */
+  auditErrors: ProposalAuditError[];
   totalSupply: bigint;
   tokenBalance: bigint;
   userVotingPower: bigint;
@@ -125,6 +195,29 @@ export const useGovernance = ({
 
   // The address whose balances we display: explicit prop wins, then wallet.
   const activeAddress = address ?? walletAddress;
+
+  // Lifecycle audit is derived from the loaded proposals. Each proposal is
+  // audited independently so one malformed record cannot hide the others.
+  const { proposalEvents, auditErrors } = useMemo(() => {
+    const events: ProposalLifecycleEvent[] = [];
+    const problems: ProposalAuditError[] = [];
+    for (const proposal of proposals) {
+      try {
+        events.push(...buildProposalLifecycleEvents(proposal));
+      } catch (err) {
+        problems.push({
+          proposalId: proposal.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    events.sort((a, b) =>
+      a.timestamp !== b.timestamp
+        ? a.timestamp - b.timestamp
+        : a.proposalId - b.proposalId
+    );
+    return { proposalEvents: events, auditErrors: problems };
+  }, [proposals]);
 
   const refresh = useCallback(async () => {
     const resolved = sdk.getContracts();
@@ -278,6 +371,8 @@ export const useGovernance = ({
   return {
     sdk,
     proposals,
+    proposalEvents,
+    auditErrors,
     totalSupply,
     tokenBalance,
     userVotingPower,

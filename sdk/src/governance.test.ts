@@ -7,6 +7,7 @@ const proposalActions = [
 ] as const;
 
 describe('GovernanceSDK proposal actions', () => {
+  // Lifecycle audit coverage: each proposal action must reject before building a transaction when no keypair is supplied, so no partial or unsigned audit events can be emitted.
   afterEach(() => {
     jest.restoreAllMocks();
   });
