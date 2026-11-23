@@ -65,8 +65,16 @@ export type {
 // Operators running multiple contracts can restrict a single listener to only
 // the contract addresses they care about, eliminating noise from unrelated
 // on-chain activity.
-export { ContractEventListener, DEFAULT_PAGE_SIZE } from './eventListener';
+export {
+  ContractEventListener,
+  DEFAULT_PAGE_SIZE,
+  CursorExpiredError,
+  isCursorExpiredError,
+  classifyCursorExpiration,
+} from './eventListener';
 export type {
+  PollResult,
+  CursorExpirationReason,
   ListenerConfig,
   EventSource,
   GetEventsFilter,
