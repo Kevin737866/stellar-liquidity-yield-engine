@@ -514,6 +514,13 @@ before running step 4 above).
 For reproducible randomized swap path and quote tests, including seed replay
 and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
 
+For model-based `YieldVault` share accounting sequence tests (comparing
+`deposit`, `withdraw`, and `harvest` sequences against a reference state
+machine), run:
+```bash
+cargo test --test vault_share_model_tests
+```
+
 ### Unit Tests
 ```bash
 # Run contract tests (run from the repository root)
