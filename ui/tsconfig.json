@@ -27,6 +27,7 @@
     "src/components/Dashboard.tsx",
     "src/components/TransactionHistory.tsx",
     "src/components/ui/**/*.tsx",
+    "src/lib/sampleTransactions.ts",
     "src/lib/transactionFilters.ts",
     ".next/types/**/*.ts"
   ],
