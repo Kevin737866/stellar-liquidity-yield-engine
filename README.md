@@ -361,6 +361,9 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 - **In-place Upgrades**: Every contract exposes admin-only `upgrade(admin, new_wasm_hash)`,
   `migrate(admin)` and `get_storage_version()` so deployed state can be fixed
   without changing the contract address — see [docs/UPGRADING.md](docs/UPGRADING.md)
+- **Release Provenance**: Admin-only `record_release(...)` stores the published
+  artifact's SHA-256 checksum, release version and source commit on-chain; anyone
+  can read it back with `get_release_record()`
 - **Emergency Pause**: Admin can pause all operations
 - **Access Control**: Role-based permissions
 - **Input Validation**: Comprehensive parameter checks

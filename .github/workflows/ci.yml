@@ -55,7 +55,7 @@ jobs:
       # other files in tests/ target contracts that are not part of the crate
       # (SwapRouter, RiskEngine, ProtocolGovernor, ...), so `--all-targets`
       # cannot be used until they are repaired - see the note in `test` below.
-      - run: cargo clippy --lib --test upgrade_tests --test swap_router_fuzz --all-features -- -D warnings
+      - run: cargo clippy --lib --test upgrade_tests --test swap_router_fuzz --test release_provenance_tests --test max_limits_integration_tests --all-features -- -D warnings
 
   # Builds every Soroban contract to wasm. Each contract is a separate matrix
   # leg so a broken contract fails its own check with a readable name, and
@@ -134,4 +134,4 @@ jobs:
       # contracts that are not part of the crate (SwapRouter, RiskEngine,
       # ProtocolGovernor, ...), so they are excluded until they are repaired.
       - name: Run contract test suite
-        run: cargo test --all-features --lib --test upgrade_tests --test swap_router_fuzz
+        run: cargo test --all-features --lib --test upgrade_tests --test swap_router_fuzz --test release_provenance_tests --test max_limits_integration_tests

@@ -4,7 +4,7 @@ use soroban_sdk::{
 };
 
 /// Maximum number of concurrent reward streams supported
-const MAX_REWARD_STREAMS: u32 = 10;
+pub const MAX_REWARD_STREAMS: u32 = 10;
 
 /// Basis points divisor (10000 = 100%)
 const BPS_DIVISOR: i128 = 10000;
@@ -234,6 +234,32 @@ impl MultiRewardDistributor {
     pub fn migrate(env: Env, admin: Address) -> u32 {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::mark_migrated(&env, &admin)
+    }
+
+    /// Record the checksum and provenance of the release artifact this
+    /// contract runs (admin only). See [crate::upgrade::ReleaseRecord].
+    pub fn record_release(
+        env: Env,
+        admin: Address,
+        wasm_hash: soroban_sdk::BytesN<32>,
+        artifact_checksum: soroban_sdk::BytesN<32>,
+        release_version: soroban_sdk::String,
+        source_commit: soroban_sdk::String,
+    ) -> crate::upgrade::ReleaseRecord {
+        Self::require_admin(&env, admin.clone());
+        crate::upgrade::record_release(
+            &env,
+            &admin,
+            wasm_hash,
+            artifact_checksum,
+            release_version,
+            source_commit,
+        )
+    }
+
+    /// The release record written by `record_release`, if one exists.
+    pub fn get_release_record(env: Env) -> Option<crate::upgrade::ReleaseRecord> {
+        crate::upgrade::release_record(&env)
     }
 
     // ==================== Admin Functions ====================

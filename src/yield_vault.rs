@@ -290,6 +290,32 @@ impl YieldVault {
         crate::upgrade::mark_migrated(&env, &admin)
     }
 
+    /// Record the checksum and provenance of the release artifact this
+    /// contract runs (admin only). See [crate::upgrade::ReleaseRecord].
+    pub fn record_release(
+        env: Env,
+        admin: Address,
+        wasm_hash: soroban_sdk::BytesN<32>,
+        artifact_checksum: soroban_sdk::BytesN<32>,
+        release_version: soroban_sdk::String,
+        source_commit: soroban_sdk::String,
+    ) -> crate::upgrade::ReleaseRecord {
+        Self::require_admin(&env, admin.clone());
+        crate::upgrade::record_release(
+            &env,
+            &admin,
+            wasm_hash,
+            artifact_checksum,
+            release_version,
+            source_commit,
+        )
+    }
+
+    /// The release record written by `record_release`, if one exists.
+    pub fn get_release_record(env: Env) -> Option<crate::upgrade::ReleaseRecord> {
+        crate::upgrade::release_record(&env)
+    }
+
     /// Deposit tokens into the vault in exchange for vault shares.
     ///
     /// # Share Calculation & Rounding Semantics

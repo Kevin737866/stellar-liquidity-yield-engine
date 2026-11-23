@@ -1,4 +1,4 @@
-//! In-place contract upgrades.
+//! In-place contract upgrades and release provenance.
 //!
 //! Soroban has no proxy contract: `Env::deployer().update_current_contract_wasm`
 //! replaces the *executing* contract's code while keeping its address, its
@@ -18,15 +18,66 @@
 //!    failed transaction cannot double-apply anything (as long as the migration
 //!    work itself is written idempotently).
 //!
+//! Alongside the code hash, an operator can record the checksum and provenance
+//! of the published release artifact with `record_release` (Issue #513). That
+//! record is readable by anyone through `get_release_record`, so an auditor can
+//! confirm which build is live without trusting an off-chain manifest.
+//!
 //! See `docs/UPGRADING.md` for the operational flow.
 
-use soroban_sdk::{Address, BytesN, Env, Symbol};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, String, Symbol};
 
 /// Storage schema version this build expects.
 ///
 /// Bump this in the same change that alters a stored type, and add the matching
 /// work to that contract's `migrate`.
 pub const STORAGE_VERSION: u32 = 1;
+
+/// Typed failures when recording a release artifact.
+///
+/// A record is provenance for deployed code, so a partial or obviously invalid
+/// record is rejected rather than stored.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReleaseError {
+    /// `release_version` was empty.
+    EmptyReleaseVersion = 1,
+    /// `source_commit` was empty.
+    EmptySourceCommit = 2,
+    /// `artifact_checksum` was all zero bytes.
+    ZeroArtifactChecksum = 3,
+    /// `wasm_hash` was all zero bytes.
+    ZeroWasmHash = 4,
+}
+
+/// The checksum and provenance of the release artifact a contract runs.
+///
+/// `wasm_hash` is the hash the host installed the code under (the value
+/// `upload_contract_wasm` returned and `upgrade` was called with).
+/// `artifact_checksum` is the SHA-256 checksum of the published artifact file,
+/// which an operator computes with `sha256sum` before deploying. For an
+/// unmodified artifact the two are the same digest; recording both lets a
+/// verifier check that the file they published is the code that is live.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseRecord {
+    /// Hash the host identifies the installed wasm artifact by.
+    pub wasm_hash: BytesN<32>,
+    /// SHA-256 checksum of the published release artifact.
+    pub artifact_checksum: BytesN<32>,
+    /// Human-readable release version, for example `v0.1.0`.
+    pub release_version: String,
+    /// Git commit the artifact was built from.
+    pub source_commit: String,
+    /// [`STORAGE_VERSION`] of the build that recorded the release.
+    pub storage_version: u32,
+    /// Ledger sequence the record was written at.
+    pub ledger: u32,
+    /// Ledger timestamp the record was written at.
+    pub recorded_at: u64,
+    /// Admin that recorded the release.
+    pub recorded_by: Address,
+}
 
 /// The recorded storage schema version of a contract's data.
 ///
@@ -66,6 +117,71 @@ pub fn mark_migrated(env: &Env, admin: &Address) -> u32 {
     );
 
     previous
+}
+
+/// Record the checksum and provenance of the release artifact this contract
+/// runs, replacing any previous record.
+///
+/// Replacing rather than appending keeps the read path a single storage entry;
+/// the `release_recorded` event retains the history of earlier releases. The
+/// caller is responsible for passing the artifact's real SHA-256 checksum:
+/// there is no way for the contract to hash a file it never receives.
+///
+/// Panics with a [`ReleaseError`] when the version or commit is empty, or when
+/// either hash is all zeroes.
+pub fn record_release(
+    env: &Env,
+    admin: &Address,
+    wasm_hash: BytesN<32>,
+    artifact_checksum: BytesN<32>,
+    release_version: String,
+    source_commit: String,
+) -> ReleaseRecord {
+    if release_version.len() == 0 {
+        env.panic_with_error(ReleaseError::EmptyReleaseVersion);
+    }
+    if source_commit.len() == 0 {
+        env.panic_with_error(ReleaseError::EmptySourceCommit);
+    }
+    if artifact_checksum == zero_hash(env) {
+        env.panic_with_error(ReleaseError::ZeroArtifactChecksum);
+    }
+    if wasm_hash == zero_hash(env) {
+        env.panic_with_error(ReleaseError::ZeroWasmHash);
+    }
+
+    let record = ReleaseRecord {
+        wasm_hash: wasm_hash.clone(),
+        artifact_checksum: artifact_checksum.clone(),
+        release_version: release_version.clone(),
+        source_commit: source_commit.clone(),
+        storage_version: storage_version(env),
+        ledger: env.ledger().sequence(),
+        recorded_at: env.ledger().timestamp(),
+        recorded_by: admin.clone(),
+    };
+
+    env.storage().instance().set(&release_key(env), &record);
+
+    env.events().publish(
+        (Symbol::new(env, "release_recorded"),),
+        (admin.clone(), wasm_hash, artifact_checksum, release_version),
+    );
+
+    record
+}
+
+/// The release record written by [`record_release`], if one has been recorded.
+pub fn release_record(env: &Env) -> Option<ReleaseRecord> {
+    env.storage().instance().get(&release_key(env))
+}
+
+fn zero_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[0u8; 32])
+}
+
+fn release_key(env: &Env) -> Symbol {
+    Symbol::new(env, "release_record")
 }
 
 fn version_key(env: &Env) -> Symbol {
