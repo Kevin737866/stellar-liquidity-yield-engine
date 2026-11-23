@@ -358,5 +358,20 @@ Run tests with:
 ```bash
 npm test -- pauseEvents.test.ts
 npm test -- emergencyAuditHistory.test.ts
+```
 
+## Contract Pause & Unpause Verification
+
+See `tests/pause_unpause_tests.rs` for Rust integration tests verifying pause and unpause behavior across every mutating contract entrypoint:
+
+- **`StellarLiquidityYieldEngine`**: `update_strategy_registry` and `update_reward_distributor` are blocked when paused or when the circuit breaker is tripped, and restored on `unpause` / `reset_circuit_breaker`.
+- **`YieldVault`**: `deposit`, `withdraw`, and `harvest` are blocked on `pause` or multisig `emergency_pause`, and restored on `unpause` or `emergency_unpause` (including cross-recovery).
+- **`RebalanceEngine`**: `create_strategy`, `update_strategy`, `analyze_rebalance_opportunities`, `execute_rebalance`, `update_pool_apy`, `record_feed_validation_failure`, `record_feed_validation_success`, `scan_opportunities`, and `execute_flash_rebalance` are blocked while paused and restored on `unpause`.
+- **`StrategyRegistry`**: `register_strategy`, `update_strategy`, and `record_performance` are blocked while paused and restored on `unpause`; admin governance actions (`approve_strategy`, `deactivate_strategy`) remain available.
+- **`MultiRewardDistributor`**: `add_reward_stream` and `claim_rewards` are blocked while paused and restored on `unpause`; `emergency_withdraw` remains available.
+- **`SwapRouter`**: `update_pool_reserves` is blocked on `pause_oracle` and restored on `unpause_oracle`.
+
+Run the contract pause/unpause tests with:
+```bash
+cargo test --test pause_unpause_tests
 ```
