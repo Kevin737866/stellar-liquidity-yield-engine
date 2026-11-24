@@ -441,7 +441,9 @@ CHECK_INTERVAL=300000
 `.env.example` also lists governance-related addresses
 (`GOVERNANCE_CONTRACT`, `VOTING_ESCROW_CONTRACT`, etc.) read by
 `sdk/src/governance.ts`. There is no working contract to deploy for those
-yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
+yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). The SDK history reader
+does support bounded pages via `getProposalPage()` / `paginateProposals()` for
+keepers and UI callers.
 
 ### Contract Deployment
 
