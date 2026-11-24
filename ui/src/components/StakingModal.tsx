@@ -5,6 +5,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
+import { useWalletPrompt } from '../hooks/useWalletPrompt';
 import type { LockInfo } from '../../sdk/src/governance';
 import {
   formatVotingPower,
@@ -49,6 +50,7 @@ const StakingModal: React.FC<StakingModalProps> = ({
   const [amount, setAmount] = useState<string>('');
   const [duration, setDuration] = useState<number>(4 * 365 * 24 * 60 * 60); // Default 4 years
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const { isWalletPromptActive } = useWalletPrompt();
 
   // Calculate boost multiplier based on duration
   const boostMultiplier = useMemo(() => {
@@ -502,7 +504,7 @@ const StakingModal: React.FC<StakingModalProps> = ({
           {/* Submit Button */}
           <button
             onClick={handleSubmit}
-            disabled={!isFormValid || isSubmitting || loading}
+            disabled={!isFormValid || isSubmitting || loading || isWalletPromptActive}
             className={`w-full py-3 rounded-lg font-semibold transition-colors ${
               activeTab === 'withdraw' && timeUntilExpiry
                 ? 'bg-gray-300 text-gray-500 cursor-not-allowed'

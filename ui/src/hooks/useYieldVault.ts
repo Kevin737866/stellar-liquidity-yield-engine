@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback, useMemo } from 'react';
+﻿import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { VaultClient, VaultInfo, VaultMetrics, UserPosition } from 'stellar-liquidity-yield-engine-sdk';
 import {
   createFreighterSigner,
@@ -7,6 +7,7 @@ import {
   isFreighterConnected,
 } from '../lib/freighter';
 import { getNetworkConfig, type UiNetwork } from '../config/network';
+import { TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE } from '../lib/walletPromptLock';
 
 interface UseYieldVaultOptions {
   vaultAddress: string;
@@ -38,6 +39,7 @@ interface UseYieldVaultReturn {
   walletAddress: string | null;
   walletConnected: boolean;
   connecting: boolean;
+  isTxInFlight: boolean;
   connect: () => Promise<string | null>;
   disconnect: () => void;
 }
@@ -66,6 +68,9 @@ export const useYieldVault = ({
   const [positionError, setPositionError] = useState<string | null>(null);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [isTxInFlight, setIsTxInFlight] = useState(false);
+  const connectingRef = useRef(false);
+  const writeInFlightRef = useRef(false);
 
   // `undefined` means "use the network from the environment".
   const networkConfig = useMemo(() => getNetworkConfig(network), [network]);
@@ -80,9 +85,9 @@ export const useYieldVault = ({
   const activeSigner = useMemo(() => {
     if (signer) return signer;
     if (keypair) return keypair;
-    if (walletAddress) return createFreighterSigner(network);
+    if (walletAddress) return createFreighterSigner(activeNetwork);
     return null;
-  }, [signer, keypair, walletAddress, network]);
+  }, [signer, keypair, walletAddress, activeNetwork]);
 
   // Derive resolved address: walletAddress, or keypair publicKey, or passed userAddress
   const resolvedAddress = useMemo(() => {
@@ -158,13 +163,14 @@ export const useYieldVault = ({
   }, [vaultClient, resolvedAddress]);
 
   const connect = useCallback(async (): Promise<string | null> => {
-    if (connecting) return walletAddress;
+    if (connectingRef.current) return walletAddress;
 
     if (!isFreighterAvailable()) {
       setError('Freighter wallet not found. Install the Freighter extension and try again.');
       return null;
     }
 
+    connectingRef.current = true;
     setConnecting(true);
     setError(null);
     try {
@@ -176,12 +182,27 @@ export const useYieldVault = ({
       setError(err.message || 'Failed to connect to Freighter');
       return null;
     } finally {
+      connectingRef.current = false;
       setConnecting(false);
     }
-  }, [connecting, walletAddress, refresh]);
+  }, [walletAddress, refresh]);
 
   const disconnect = useCallback(() => {
     setWalletAddress(null);
+  }, []);
+
+  const runWrite = useCallback(async <T,>(action: () => Promise<T>): Promise<T> => {
+    if (writeInFlightRef.current) {
+      throw new Error(TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE);
+    }
+    writeInFlightRef.current = true;
+    setIsTxInFlight(true);
+    try {
+      return await action();
+    } finally {
+      writeInFlightRef.current = false;
+      setIsTxInFlight(false);
+    }
   }, []);
 
   // Reflect Freighter's persisted connection state on mount.
@@ -207,79 +228,85 @@ export const useYieldVault = ({
     amountB: bigint,
     minShares: bigint
   ) => {
-    try {
-      setError(null);
+    return runWrite(async () => {
+      try {
+        setError(null);
 
-      if (!activeSigner) {
-        throw new Error('Connect a Freighter wallet or provide a keypair before depositing.');
+        if (!activeSigner) {
+          throw new Error('Connect a Freighter wallet or provide a keypair before depositing.');
+        }
+
+        // Sign and submit a real deposit transaction through the active wallet/keypair signer.
+        const result = await vaultClient.deposit(activeSigner, {
+          amountA,
+          amountB,
+          minShares
+        });
+
+        // Refresh data after successful deposit
+        await refresh();
+
+        return result;
+      } catch (err: any) {
+        setError(err.message);
+        throw err;
       }
-
-      // Sign and submit a real deposit transaction through the active wallet/keypair signer.
-      const result = await vaultClient.deposit(activeSigner, {
-        amountA,
-        amountB,
-        minShares
-      });
-
-      // Refresh data after successful deposit
-      await refresh();
-
-      return result;
-    } catch (err: any) {
-      setError(err.message);
-      throw err;
-    }
-  }, [vaultClient, refresh, activeSigner]);
+    });
+  }, [vaultClient, refresh, activeSigner, runWrite]);
 
   const withdraw = useCallback(async (
     shares: bigint,
     minAmountA: bigint,
     minAmountB: bigint
   ) => {
-    try {
-      setError(null);
+    return runWrite(async () => {
+      try {
+        setError(null);
 
-      if (!activeSigner) {
-        throw new Error('Connect a Freighter wallet or provide a keypair before withdrawing.');
+        if (!activeSigner) {
+          throw new Error('Connect a Freighter wallet or provide a keypair before withdrawing.');
+        }
+
+        // Sign and submit a real withdrawal transaction through the active wallet/keypair signer.
+        const result = await vaultClient.withdraw(activeSigner, {
+          shares,
+          minAmountA,
+          minAmountB
+        });
+
+        // Refresh data after successful withdrawal
+        await refresh();
+
+        return result;
+      } catch (err: any) {
+        setError(err.message);
+        throw err;
       }
-
-      // Sign and submit a real withdrawal transaction through the active wallet/keypair signer.
-      const result = await vaultClient.withdraw(activeSigner, {
-        shares,
-        minAmountA,
-        minAmountB
-      });
-
-      // Refresh data after successful withdrawal
-      await refresh();
-
-      return result;
-    } catch (err: any) {
-      setError(err.message);
-      throw err;
-    }
-  }, [vaultClient, refresh, activeSigner]);
+    });
+  }, [vaultClient, refresh, activeSigner, runWrite]);
 
   const harvest = useCallback(async () => {
-    try {
-      setError(null);
+    return runWrite(async () => {
+      try {
+        setError(null);
 
-      if (!activeSigner) {
-        throw new Error('Connect a Freighter wallet or provide a keypair before harvesting.');
+        if (!activeSigner) {
+          throw new Error('Connect a Freighter wallet or provide a keypair before harvesting.');
+        }
+
+        // Sign and submit a real harvest transaction through the active wallet/keypair signer.
+        const result = await vaultClient.harvest(activeSigner);
+
+        // Refresh data after successful harvest
+        await refresh();
+
+        return result;
+      } catch (err: any) {
+        setError(err.message);
+        throw err;
       }
-
-      // Sign and submit a real harvest transaction through the active wallet/keypair signer.
-      const result = await vaultClient.harvest(activeSigner);
-
-      // Refresh data after successful harvest
-      await refresh();
-
-      return result;
-    } catch (err: any) {
-      setError(err.message);
-      throw err;
-    }
-  }, [vaultClient, refresh, activeSigner]);
+    });
+  }, [vaultClient, refresh, activeSigner, runWrite]);
 
   const getAPY = useCallback(async () => {
     try {
@@ -337,6 +364,7 @@ export const useYieldVault = ({
     walletAddress: resolvedAddress,
     walletConnected: !!activeSigner || !!walletAddress,
     connecting,
+    isTxInFlight,
     connect,
     disconnect
   };

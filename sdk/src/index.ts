@@ -52,6 +52,16 @@ export {
 } from './rpcSync';
 export type { RpcLagReport, RpcLagOptions, RpcLagThresholds, LagSeverity, LedgerHeadSource, RpcLagMonitorOptions } from './rpcSync';
 
+export { ExecutionBudgetManager, STATE_KEY_EXECUTION_BUDGETS } from './keeperBudgets';
+export type {
+  ExecutionBudgetDecision,
+  ExecutionBudgetSkipReason,
+  ExecutionBudgetState,
+  ExecutionBudgetUsage,
+  StrategyBudget,
+  StrategyExecutionBudgets,
+} from './keeperBudgets';
+
 // Keeper health metrics for ops monitoring.
 export { KeeperMetrics, KEEPER_METRICS_PREFIX, } from './keeperMetrics';
 export type {

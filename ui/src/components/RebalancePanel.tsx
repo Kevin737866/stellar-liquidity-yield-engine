@@ -16,12 +16,14 @@ import {
 } from 'lucide-react';
 import { RebalancerClient, RebalanceStrategy, RebalanceHistory, PoolAllocation, RebalanceProposal } from 'stellar-liquidity-yield-engine-sdk';
 import { useTxStatus } from '../hooks/useTxStatus';
+import { useWalletPrompt } from '../hooks/useWalletPrompt';
 import { getNetworkConfig, type UiNetwork } from '../config/network';
 import {
   createFreighterSigner,
   isFreighterAvailable,
   isFreighterConnected,
 } from '../lib/freighter';
+import { TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE } from '../lib/walletPromptLock';
 
 interface RebalancePanelProps {
   network?: UiNetwork;
@@ -38,7 +40,8 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
+  const { txStatus, isTxInFlight, txHash, txError, runTx, resetTx } = useTxStatus();
+  const { isWalletPromptActive } = useWalletPrompt();
 
   // Endpoints and contract IDs come from the environment (issue #101);
   // `undefined` means "use the configured network".
@@ -94,7 +97,6 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
   };
 
   const handleExecuteRebalance = async (proposal: RebalanceProposal) => {
-    resetTx();
     setError(null);
 
     if (!isFreighterAvailable()) {
@@ -112,7 +114,7 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
       return;
     }
 
-    await runTx(async () => {
+    const accepted = await runTx(async () => {
       // Sign through the wallet: Freighter provides the public key and signs
       // the built transaction, so `execute_rebalance` runs against the user's
       // real account instead of a mock placeholder.
@@ -125,6 +127,7 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
         error: result.error
       };
     });
+    if (!accepted) setError(TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE);
   };
 
   const getRiskLevelColor = (riskLevel: number) => {
@@ -145,7 +148,7 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
     }
   };
 
-  const isTxInFlight = txStatus === 'submitting' || txStatus === 'pending';
+  const isBusy = isTxInFlight || isWalletPromptActive;
 
   if (loading) {
     return (
@@ -222,7 +225,7 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
                 <div className="flex gap-3">
                   <Button 
                     onClick={handleAnalyzeOpportunities}
-                    disabled={analyzing || isTxInFlight}
+                    disabled={analyzing || isBusy}
                     className="flex-1"
                   >
                     {analyzing ? (
@@ -237,7 +240,7 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
                       </>
                     )}
                   </Button>
-                  <Button onClick={loadData} variant="outline" disabled={isTxInFlight}>
+                  <Button onClick={loadData} variant="outline" disabled={isBusy}>
                     Refresh
                   </Button>
                 </div>
@@ -269,9 +272,9 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
                             <Button
                               size="sm"
                               onClick={() => handleExecuteRebalance(proposal)}
-                              disabled={isTxInFlight}
+                              disabled={isBusy}
                             >
-                              {isTxInFlight ? (
+                              {isBusy ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
                               ) : (
                                 'Execute'

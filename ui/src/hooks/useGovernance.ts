@@ -13,7 +13,7 @@
  * partially deployed governance system still renders whatever it can.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Keypair, Transaction } from 'stellar-sdk';
 import {
   createGovernanceClient,
@@ -34,6 +34,7 @@ import {
   isFreighterAvailable,
   isFreighterConnected,
 } from '../lib/freighter';
+import { TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE } from '../lib/walletPromptLock';
 
 /** Number of proposal IDs the UI probes when listing proposals. */
 const MAX_PROPOSAL_IDS = 100;
@@ -64,6 +65,10 @@ export interface UseGovernanceReturn {
   loading: boolean;
   /** Per-role read failures, e.g. "governance: not configured". */
   errors: string[];
+  /** True while a governance write is signing or submitting. */
+  isActionInFlight: boolean;
+  /** True while the Freighter connect prompt is open. */
+  connecting: boolean;
   /** Roles with no contract ID configured. */
   unconfiguredRoles: Array<keyof GovernanceContracts>;
   refresh: () => Promise<void>;
@@ -100,6 +105,10 @@ export const useGovernance = ({
   const [loading, setLoading] = useState(true);
   const [errors, setErrors] = useState<string[]>([]);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [isActionInFlight, setIsActionInFlight] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const actionInFlightRef = useRef(false);
+  const connectingRef = useRef(false);
 
   // Contract IDs are injected rather than read from `process.env`, because a
   // browser bundle never has those server-side variables available (#101).
@@ -186,6 +195,16 @@ export const useGovernance = ({
    */
   const submit = useCallback(
     async (build: () => Promise<Transaction>): Promise<SubmittedTransaction> => {
+      if (actionInFlightRef.current) {
+        return {
+          hash: '',
+          success: false,
+          error: TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE,
+        };
+      }
+
+      actionInFlightRef.current = true;
+      setIsActionInFlight(true);
       try {
         if (!sdk.getKeypair()) {
           return { hash: '', success: false, error: 'Keypair required to submit this call' };
@@ -197,6 +216,9 @@ export const useGovernance = ({
           success: false,
           error: err instanceof Error ? err.message : String(err),
         };
+      } finally {
+        actionInFlightRef.current = false;
+        setIsActionInFlight(false);
       }
     },
     [sdk]
@@ -257,10 +279,14 @@ export const useGovernance = ({
   }, []);
 
   const connect = useCallback(async (): Promise<string | null> => {
+    if (connectingRef.current) return walletAddress;
+
     if (!isFreighterAvailable()) {
       setErrors((prev) => [...prev, 'wallet: Freighter extension not installed']);
       return null;
     }
+    connectingRef.current = true;
+    setConnecting(true);
     try {
       const publicKey = await getFreighterPublicKey();
       setWalletAddress(publicKey);
@@ -270,8 +296,11 @@ export const useGovernance = ({
         `wallet: ${err instanceof Error ? err.message : String(err)}`,
       ]);
       return null;
+    } finally {
+      connectingRef.current = false;
+      setConnecting(false);
     }
-  }, []);
+  }, [walletAddress]);
 
   const disconnect = useCallback(() => setWalletAddress(null), []);
 
@@ -286,6 +315,8 @@ export const useGovernance = ({
     pendingRewards,
     loading,
     errors,
+    isActionInFlight,
+    connecting,
     unconfiguredRoles,
     refresh,
     castVote,

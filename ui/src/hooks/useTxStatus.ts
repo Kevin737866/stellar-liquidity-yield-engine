@@ -15,13 +15,15 @@
  * - failed:     The transaction was rejected or an error occurred.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 export type TxStatus = 'idle' | 'submitting' | 'pending' | 'confirmed' | 'failed';
 
 export interface UseTxStatusReturn {
   /** Current transaction lifecycle state */
   txStatus: TxStatus;
+  /** True while a transaction is submitting or awaiting confirmation. */
+  isTxInFlight: boolean;
   /** Transaction hash once available (pending / confirmed / failed) */
   txHash: string | null;
   /** Error message when txStatus === 'failed' */
@@ -34,11 +36,14 @@ export interface UseTxStatusReturn {
   setTxError: (error: string | null) => void;
   /**
    * Convenience wrapper: run `action`, automatically advancing status through
-   * submitting → pending (with hash) → confirmed | failed.
+   * submitting → pending (with hash) → confirmed | failed. Returns `false`
+   * when a duplicate call was rejected; `true` when this call was accepted.
    *
    * `action` should return an object with at least `{ hash: string, success: boolean }`.
    */
-  runTx: (action: () => Promise<{ hash: string; success: boolean; error?: string }>) => Promise<void>;
+  runTx: (
+    action: () => Promise<{ hash: string; success: boolean; error?: string }>
+  ) => Promise<boolean>;
   /** Reset all state back to idle */
   resetTx: () => void;
 }
@@ -47,6 +52,7 @@ export function useTxStatus(): UseTxStatusReturn {
   const [txStatus, setTxStatus] = useState<TxStatus>('idle');
   const [txHash, setTxHash] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
 
   const resetTx = useCallback(() => {
     setTxStatus('idle');
@@ -54,21 +60,15 @@ export function useTxStatus(): UseTxStatusReturn {
     setTxError(null);
   }, []);
 
-  /**
-   * Run a transaction action, managing all status transitions automatically.
-   *
-   * Status flow:
-   *   1. Immediately set to `submitting` (button shows spinner).
-   *   2. Await `action()` — the SDK call (sign + submit + wait).
-   *   3. Once the SDK returns a hash, advance to `pending`.
-   *   4. If `result.success === true`  → `confirmed`.
-   *      If `result.success === false` → `failed` (with optional error message).
-   *   5. On thrown exception           → `failed` (with error message).
-   */
   const runTx = useCallback(
     async (
       action: () => Promise<{ hash: string; success: boolean; error?: string }>
-    ): Promise<void> => {
+    ): Promise<boolean> => {
+      if (inFlightRef.current) {
+        return false;
+      }
+
+      inFlightRef.current = true;
       setTxStatus('submitting');
       setTxHash(null);
       setTxError(null);
@@ -76,7 +76,6 @@ export function useTxStatus(): UseTxStatusReturn {
       try {
         const result = await action();
 
-        // We have a hash — the transaction was at least submitted.
         if (result.hash) {
           setTxHash(result.hash);
           setTxStatus('pending');
@@ -88,9 +87,13 @@ export function useTxStatus(): UseTxStatusReturn {
           setTxError(result.error ?? 'Transaction failed');
           setTxStatus('failed');
         }
+        return true;
       } catch (err: any) {
         setTxError(err?.message ?? 'Unknown error');
         setTxStatus('failed');
+        return true;
+      } finally {
+        inFlightRef.current = false;
       }
     },
     []
@@ -98,6 +101,7 @@ export function useTxStatus(): UseTxStatusReturn {
 
   return {
     txStatus,
+    isTxInFlight: txStatus === 'submitting' || txStatus === 'pending',
     txHash,
     txError,
     setTxStatus,

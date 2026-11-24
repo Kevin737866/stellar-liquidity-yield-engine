@@ -1,5 +1,6 @@
 import { Transaction, TransactionBuilder, Networks } from 'stellar-sdk';
 import type { TransactionSigner } from 'stellar-liquidity-yield-engine-sdk';
+import { runWithWalletPrompt } from './walletPromptLock';
 
 /**
  * Minimal typings for the Freighter browser extension's injected API
@@ -38,7 +39,7 @@ export const getFreighterPublicKey = async (): Promise<string> => {
   if (!isFreighterAvailable()) {
     throw new Error('Freighter is not installed. Add the Freighter extension to your browser.');
   }
-  return window.freighterApi!.getPublicKey();
+  return runWithWalletPrompt('connect', () => window.freighterApi!.getPublicKey());
 };
 
 export const getNetworkPassphrase = (network: FreighterNetwork): string =>
@@ -58,10 +59,12 @@ export const createFreighterSigner = (network: FreighterNetwork): TransactionSig
     if (!isFreighterAvailable()) {
       throw new Error('Freighter is not installed. Add the Freighter extension to your browser.');
     }
-    const signedXdr = await window.freighterApi!.signTransaction(tx.toXDR(), {
-      networkPassphrase
+    return runWithWalletPrompt('sign', async () => {
+      const signedXdr = await window.freighterApi!.signTransaction(tx.toXDR(), {
+        networkPassphrase
+      });
+      return TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
     });
-    return TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
   }
 });
 

@@ -13,6 +13,12 @@ import {
 } from '../persistence';
 import { SorobanRpc } from 'stellar-sdk';
 import axios from 'axios';
+import {
+  ExecutionBudgetManager,
+  STATE_KEY_EXECUTION_BUDGETS,
+  type ExecutionBudgetDecision,
+  type StrategyExecutionBudgets,
+} from '../keeperBudgets';
 
 /** Metadata key holding the wall-clock time of the last successful rebalance. */
 export const STATE_KEY_LAST_EXECUTION_TIME = 'lastExecutionTimeMs';
@@ -52,6 +58,12 @@ export interface RebalancerConfig {
    * With it the keeper resumes exactly where it left off.
    */
   stateStore?: CheckpointStore;
+  /** Stable identifier used to select a per-strategy execution budget. */
+  strategyId?: string | number;
+  /** Maximum executions per strategy within a rolling fixed window. */
+  strategyExecutionBudgets?: StrategyExecutionBudgets;
+  /** Clock used by the execution budget windows. Defaults to `Date.now`. */
+  clock?: () => number;
 }
 
 /** The keeper state that has to survive a restart. */
@@ -70,6 +82,10 @@ export interface RebalanceResult {
   message: string;
   /** RPC lag observed for this run, when a head source is configured. */
   lag?: RpcLagReport;
+  /** Strategy whose budget was checked for this run. */
+  strategyId?: string;
+  /** Execution budget decision for this run, when budgets are configured. */
+  budget?: ExecutionBudgetDecision;
 }
 
 export interface AutoRebalancerOptions {
@@ -98,6 +114,7 @@ export interface SkippedActionLog {
     | 'simulation_negative'
     | 'simulation_no_cost_estimate'
     | 'execution_failed'
+    | 'strategy_budget_exceeded'
     | 'error';
   /** Human-readable detail for the skip. */
   message: string;
@@ -119,6 +136,8 @@ export interface SkippedActionLog {
   ilRisk?: number;
   /** RPC lag report at the time of the skip, when available. */
   lag?: RpcLagReport;
+  /** Strategy whose execution budget blocked the action, when applicable. */
+  strategyId?: string;
   /** Wall-clock timestamp of the skip decision. */
   timestamp: number;
 }
@@ -133,16 +152,33 @@ export class AutoRebalancer {
   private lagMonitor?: RpcLagMonitor;
   private lastLag?: RpcLagReport;
   private skippedActions: SkippedActionLog[] = [];
+  private stateRestored = false;
+  private readonly budgets: ExecutionBudgetManager;
 
   constructor(config: RebalancerConfig, options: AutoRebalancerOptions = {}) {
     this.config = config;
-    this.scanner = new ArbitrageScanner('https://horizon.stellar.org', {
-      roundTripCostEstimator: config.roundTripCostEstimator,
+    this.scanner =
+      options.scanner ??
+      new ArbitrageScanner('https://horizon.stellar.org', {
+        roundTripCostEstimator: config.roundTripCostEstimator,
+      });
+    this.executor = options.executor ?? new ArbitrageExecutor();
+    this.budgets = new ExecutionBudgetManager(config.strategyExecutionBudgets ?? {}, {
+      now: config.clock ?? Date.now,
     });
-    this.executor = new ArbitrageExecutor();
     if (config.rpcHeadSource) {
       this.lagMonitor = new RpcLagMonitor(config.rpcHeadSource, config.lagOptions);
     }
+  }
+
+  /** Strategy identifier used for per-strategy execution budgets. */
+  getStrategyId(): string {
+    return String(this.config.strategyId ?? this.config.currentPoolId);
+  }
+
+  /** Current execution budget status for this keeper's strategy. */
+  getExecutionBudgetStatus(): ExecutionBudgetDecision {
+    return this.budgets.getSnapshot(this.getStrategyId());
   }
 
   /** Write-pacing counters for the executor this keeper writes through. */
@@ -180,8 +216,10 @@ export class AutoRebalancer {
     // Load first: if this throws, the keeper stays un-restored so the next
     // run retries (and fails closed again) instead of proceeding on defaults.
     const checkpoint = await store.load();
-    this.stateRestored = true;
-    if (!checkpoint) return false;
+    if (!checkpoint) {
+      this.stateRestored = true;
+      return false;
+    }
 
     const metadata = checkpoint.metadata ?? {};
     const lastExecutionTime = metadata[STATE_KEY_LAST_EXECUTION_TIME];
@@ -194,6 +232,8 @@ export class AutoRebalancer {
       this.lastConsumedMinute = lastConsumedMinute;
     }
 
+    this.budgets.restoreFromMetadata(metadata);
+    this.stateRestored = true;
     return true;
   }
 
@@ -210,6 +250,7 @@ export class AutoRebalancer {
     const checkpoint = createStateCheckpoint(Date.now(), {
       [STATE_KEY_LAST_EXECUTION_TIME]: this.lastExecutionTime,
       [STATE_KEY_LAST_CONSUMED_MINUTE]: this.lastConsumedMinute,
+      ...this.budgets.toMetadata(),
     });
     await store.save(checkpoint);
     return checkpoint;
@@ -257,6 +298,7 @@ export class AutoRebalancer {
       currentPoolId: this.config.currentPoolId,
       amount: this.config.maxPositionSize.toString(),
       investmentAsset: this.config.investmentAsset,
+      strategyId: reason === 'strategy_budget_exceeded' ? this.getStrategyId() : undefined,
       timestamp: Date.now(),
       ...extra,
     };
@@ -284,7 +326,7 @@ export class AutoRebalancer {
       // Warn before acting if the RPC node's head has fallen noticeably behind
       // the last ledger this keeper processed.
       const lag = await this.checkRpcLag();
-      if (lag && lag.severity !== 'pk') {
+      if (lag && lag.severity !== 'ok') {
         this.logSkipped('rpc_lag', `RPC lag detected: ${lag.message}`, { lag });
         results.push({
           timestamp: Date.now(),
@@ -428,6 +470,34 @@ export class AutoRebalancer {
         return results;
       }
 
+      const strategyId = this.getStrategyId();
+      const budget = this.budgets.tryAcquire(strategyId);
+      if (!budget.allowed) {
+        const message =
+          `Execution budget exhausted for strategy ${strategyId}: ` +
+          `${budget.used}/${budget.limit} executions in the current window`;
+        this.logSkipped('strategy_budget_exceeded', message, {
+          lag,
+          strategyId,
+          targetPoolId: bestOpportunity.pool_id,
+          netProfit: profitability.netProfit.toString(),
+          apyDelta: bestOpportunity.apy_delta,
+          ilRisk: bestOpportunity.il_risk,
+        });
+        results.push({
+          timestamp: Date.now(),
+          success: false,
+          opportunity: bestOpportunity,
+          message,
+          lag,
+          strategyId,
+          budget,
+        });
+        return results;
+      }
+
+      await this.persistState();
+
       // Execute
       const executionResult = await this.executor.executeArbitrage(
         bestOpportunity,
@@ -445,6 +515,8 @@ export class AutoRebalancer {
           profit: profitability.netProfit,
           message: `Rebalance executed successfully. TX: ${executionResult.transactionHash}`,
           lag,
+          strategyId,
+          budget,
         };
         results.push(result);
         this.executionHistory.push(result);
@@ -470,6 +542,8 @@ export class AutoRebalancer {
           opportunity: bestOpportunity,
           message,
           lag,
+          strategyId,
+          budget,
         });
         this.executionHistory.push(results[results.length - 1]);
       }
