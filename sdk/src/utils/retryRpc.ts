@@ -6,6 +6,7 @@
 
 import { SorobanRpc } from 'stellar-sdk';
 import { withRetry, RetryOptions, DEFAULT_RETRY_OPTIONS } from './retry';
+import { normalizeSorobanRpcError } from '../errors';
 
 /**
  * Retry options specifically for RPC calls.
@@ -15,12 +16,19 @@ export interface RpcRetryOptions extends RetryOptions {
   retryReads?: boolean;
   /** Whether to retry write operations (sendTransaction). Defaults to true. */
   retryWrites?: boolean;
+  /**
+   * When true, normalize thrown Soroban RPC / transport errors into
+   * {@link SdkBoundaryError} at the SDK boundary. Defaults to false for
+   * backward compatibility with callers expecting raw errors.
+   */
+  normalizeErrors?: boolean;
 }
 
 const DEFAULT_RPC_RETRY_OPTIONS: Required<RpcRetryOptions> = {
   ...DEFAULT_RETRY_OPTIONS,
   retryReads: true,
   retryWrites: true,
+  normalizeErrors: false,
 };
 
 /**
@@ -35,19 +43,32 @@ export class RetryRpcServer {
     this.options = { ...DEFAULT_RPC_RETRY_OPTIONS, ...options };
   }
 
+  private async execute<T>(
+    operation: string,
+    shouldRetry: boolean,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    try {
+      if (!shouldRetry) {
+        return await fn();
+      }
+      const { result } = await withRetry(fn, this.options);
+      return result;
+    } catch (error) {
+      if (this.options.normalizeErrors) {
+        throw normalizeSorobanRpcError(error, operation);
+      }
+      throw error;
+    }
+  }
+
   /**
    * Get account with retry for transient errors.
    */
   async getAccount(address: string): Promise<SorobanRpc.Api.AccountResponse> {
-    if (!this.options.retryReads) {
-      return this.server.getAccount(address);
-    }
-
-    const { result } = await withRetry(
-      () => this.server.getAccount(address),
-      this.options
+    return this.execute('getAccount', this.options.retryReads, () =>
+      this.server.getAccount(address)
     );
-    return result;
   }
 
   /**
@@ -56,15 +77,9 @@ export class RetryRpcServer {
   async simulateTransaction(
     transaction: SorobanRpc.Api.SimulateTransactionRequest
   ): Promise<SorobanRpc.Api.SimulateTransactionResponse> {
-    if (!this.options.retryReads) {
-      return this.server.simulateTransaction(transaction);
-    }
-
-    const { result } = await withRetry(
-      () => this.server.simulateTransaction(transaction),
-      this.options
+    return this.execute('simulateTransaction', this.options.retryReads, () =>
+      this.server.simulateTransaction(transaction)
     );
-    return result;
   }
 
   /**
@@ -73,15 +88,9 @@ export class RetryRpcServer {
   async sendTransaction(
     transaction: SorobanRpc.Api.SendTransactionRequest
   ): Promise<SorobanRpc.Api.SendTransactionResponse> {
-    if (!this.options.retryWrites) {
-      return this.server.sendTransaction(transaction);
-    }
-
-    const { result } = await withRetry(
-      () => this.server.sendTransaction(transaction),
-      this.options
+    return this.execute('sendTransaction', this.options.retryWrites, () =>
+      this.server.sendTransaction(transaction)
     );
-    return result;
   }
 
   /**
@@ -90,30 +99,18 @@ export class RetryRpcServer {
   async getTransaction(
     hash: string
   ): Promise<SorobanRpc.GetTransactionResponse> {
-    if (!this.options.retryReads) {
-      return this.server.getTransaction(hash);
-    }
-
-    const { result } = await withRetry(
-      () => this.server.getTransaction(hash),
-      this.options
+    return this.execute('getTransaction', this.options.retryReads, () =>
+      this.server.getTransaction(hash)
     );
-    return result;
   }
 
   /**
    * Get latest ledger with retry for transient errors.
    */
   async getLatestLedger(): Promise<SorobanRpc.Api.LedgerSequenceResponse> {
-    if (!this.options.retryReads) {
-      return this.server.getLatestLedger();
-    }
-
-    const { result } = await withRetry(
-      () => this.server.getLatestLedger(),
-      this.options
+    return this.execute('getLatestLedger', this.options.retryReads, () =>
+      this.server.getLatestLedger()
     );
-    return result;
   }
 
   /**
@@ -122,30 +119,18 @@ export class RetryRpcServer {
   async getEvents(
     request: SorobanRpc.Api.GetEventsRequest
   ): Promise<SorobanRpc.Api.GetEventsResponse> {
-    if (!this.options.retryReads) {
-      return this.server.getEvents(request);
-    }
-
-    const { result } = await withRetry(
-      () => this.server.getEvents(request),
-      this.options
+    return this.execute('getEvents', this.options.retryReads, () =>
+      this.server.getEvents(request)
     );
-    return result;
   }
 
   /**
    * Get health with retry for transient errors.
    */
   async getHealth(): Promise<SorobanRpc.Api.GetHealthResponse> {
-    if (!this.options.retryReads) {
-      return this.server.getHealth();
-    }
-
-    const { result } = await withRetry(
-      () => this.server.getHealth(),
-      this.options
+    return this.execute('getHealth', this.options.retryReads, () =>
+      this.server.getHealth()
     );
-    return result;
   }
 
   /**
