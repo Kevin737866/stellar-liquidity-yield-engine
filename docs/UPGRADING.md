@@ -139,6 +139,30 @@ admin key) or when a change cannot be expressed as a migration.
 Budget for step 3 before choosing Flow B — for the vault it means replaying every
 holder's `UserPosition`.
 
+## Verifying what is deployed
+
+`upgrade` keeps the address, so the address alone does not say which build is
+live. Before announcing an upgrade (or a rollback), compare the deployed wasm
+hash with the hash recorded for the release artifact:
+
+```bash
+npx ts-node examples/verify-deployment.ts \
+  --manifest ./release-manifest.json \
+  --network testnet \
+  --contract yield-vault=$CONTRACT_ID
+```
+
+The manifest lists each artifact's SHA-256; the verifier reads the wasm behind
+the contract from Soroban RPC, hashes it, and fails on any difference. Because
+hashes are byte-exact, the manifest must describe the exact file that was
+installed (after any `soroban contract optimize` run), not a rebuild from the
+same commit. See [DEPLOYMENT_VERIFICATION.md](DEPLOYMENT_VERIFICATION.md) for
+the manifest schema and the programmatic API.
+
+`get_storage_version()` and the deployed wasm hash answer different questions:
+the version describes the storage layout, the hash identifies the build.
+Record both with the release.
+
 ## Version policy
 
 `STORAGE_VERSION` in `src/upgrade.rs` describes the **stored layout**, not the

@@ -92,6 +92,38 @@ export type {
   ListenerErrorEvent,
 } from './eventListener';
 
+// Release verification: prove that the wasm deployed behind a contract address
+// is the exact artifact the release manifest promised. See
+// docs/DEPLOYMENT_VERIFICATION.md for the operator flow.
+export {
+  CONTRACT_ID_PATTERN,
+  WASM_HASH_PATTERN,
+  DeploymentVerificationError,
+  compareWasmHashes,
+  fetchDeployedWasmHash,
+  isWasmModule,
+  isValidContractId,
+  normalizeWasmHash,
+  parseReleaseManifest,
+  readWasmArtifact,
+  sha256Hex,
+  verifyDeployment,
+  verifyReleaseManifest,
+} from './deploymentVerification';
+export type {
+  DeploymentVerificationErrorCode,
+  DeploymentVerificationResult,
+  DeployedWasmSource,
+  HashedWasmArtifact,
+  ReleaseArtifact,
+  ReleaseManifest,
+  ReleaseVerificationReport,
+  VerifiedArtifact,
+  VerifyDeploymentOptions,
+  VerifyReleaseOptions,
+  WasmHashComparison,
+} from './deploymentVerification';
+
 // Durable keeper state: checkpoints let a keeper resume exactly where it left
 // off after a crash, a deploy, or an extended outage.
 export {

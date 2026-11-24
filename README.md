@@ -511,6 +511,23 @@ Save the resulting `CONTRACT_ID` into your `.env` file as
 need, such as `STRATEGY_REGISTRY_ADDRESS` and `REWARD_DISTRIBUTOR_ADDRESS`,
 before running step 4 above).
 
+### Verify a deployment against its release
+
+A contract address does not tell you which build is live. Record the SHA-256 of
+every wasm you ship in a release manifest, then compare it with the wasm
+installed on-chain — before announcing a deploy, upgrade, or rollback:
+
+```bash
+npx ts-node examples/verify-deployment.ts \
+  --manifest ./release-manifest.json \
+  --network testnet \
+  --contract yield-vault=CDLZ...
+```
+
+The command exits non-zero on a mismatch and prints both hashes. See
+[docs/DEPLOYMENT_VERIFICATION.md](docs/DEPLOYMENT_VERIFICATION.md) for the
+manifest format, supported flags, and failure behavior.
+
 ## 🧪 Testing
 
 For reproducible randomized swap path and quote tests, including seed replay
