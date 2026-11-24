@@ -71,6 +71,9 @@ export {
   CursorExpiredError,
   isCursorExpiredError,
   classifyCursorExpiration,
+  validateTopicPrefixes,
+  matchesTopicPrefix,
+  matchesAnyTopicPrefix,
 } from './eventListener';
 export type {
   PollResult,

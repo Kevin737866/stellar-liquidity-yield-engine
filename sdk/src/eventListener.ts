@@ -220,6 +220,22 @@ export interface ListenerConfig {
   pageSize?: number;
 
   /**
+   * Restrict event delivery to events whose `topic` array starts with at least
+   * one of these prefixes. Each prefix is a non-empty array of exact,
+   * case-sensitive topic segment strings (e.g. `[['vault', 'deposit'], ['harvest']]`).
+   *
+   * When omitted or empty (`[]`), events with any topic are forwarded.
+   * Passing an empty prefix (`[[]]`) or a blank/non-string segment throws an
+   * `Error` when constructing the listener.
+   *
+   * When set and `rpcFilter.topics` is not explicitly provided, each prefix is
+   * also pushed down to the RPC `getEvents` filter with a trailing `'**'`
+   * wildcard (`[...prefix, '**']`), and re-checked at the SDK level before
+   * dispatching to `onRaw` or typed handlers.
+   */
+  topicPrefixes?: string[][];
+
+  /**
    * Additional RPC-level event filter (e.g. event type or topic). The
    * `contractIds` inside this filter is merged with (or overridden by)
    * `contractAddresses` — do **not** set both; use `contractAddresses`.
@@ -393,6 +409,79 @@ export type PollResult =
     };
 
 // ---------------------------------------------------------------------------
+// Topic prefix matching & validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate and defensively copy a list of topic prefixes.
+ *
+ * Each prefix must be a non-empty array of non-empty (non-whitespace) strings.
+ * An empty outer array `[]` is valid and represents pass-all mode.
+ *
+ * @throws {Error} when any prefix is empty or contains a blank/non-string segment.
+ */
+export function validateTopicPrefixes(
+  prefixes: readonly (readonly string[])[],
+): string[][] {
+  if (!Array.isArray(prefixes)) {
+    throw new Error('topicPrefixes must be an array of string arrays');
+  }
+
+  return prefixes.map((prefix, prefixIndex) => {
+    if (!Array.isArray(prefix) || prefix.length === 0) {
+      throw new Error(
+        `Invalid topic prefix at index ${prefixIndex}: prefix must be a non-empty array of strings`,
+      );
+    }
+
+    return prefix.map((segment, segIndex) => {
+      if (typeof segment !== 'string' || segment.trim().length === 0) {
+        throw new Error(
+          `Invalid topic prefix segment at [${prefixIndex}][${segIndex}]: segment must be a non-empty string`,
+        );
+      }
+      return segment;
+    });
+  });
+}
+
+/**
+ * Return `true` when `topic` starts with every segment of `prefix` (exact,
+ * case-sensitive string comparison).
+ *
+ * Returns `false` when `prefix` is empty, `topic` is missing/shorter than
+ * `prefix`, or any leading topic element is not a matching string.
+ */
+export function matchesTopicPrefix(
+  topic: readonly unknown[] | undefined,
+  prefix: readonly string[],
+): boolean {
+  if (!Array.isArray(topic) || prefix.length === 0 || topic.length < prefix.length) {
+    return false;
+  }
+
+  for (let i = 0; i < prefix.length; i += 1) {
+    if (typeof topic[i] !== 'string' || topic[i] !== prefix[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Return `true` when `prefixes` is empty (pass-all) or `topic` matches at
+ * least one prefix in `prefixes`.
+ */
+export function matchesAnyTopicPrefix(
+  topic: readonly unknown[] | undefined,
+  prefixes: readonly (readonly string[])[],
+): boolean {
+  if (prefixes.length === 0) return true;
+  return prefixes.some((prefix) => matchesTopicPrefix(topic, prefix));
+}
+
+// ---------------------------------------------------------------------------
 // ContractEventListener
 // ---------------------------------------------------------------------------
 
@@ -439,6 +528,9 @@ export class ContractEventListener {
 
   /** Lower-cased canonical address allow-list (empty ⟹ pass-all). */
   private readonly allowedAddresses: Set<string>;
+
+  /** Validated topic prefixes (empty ⟹ pass-all). */
+  private readonly topicPrefixes: string[][];
 
   /** Latest ledger the listener has consumed (exclusive lower bound). */
   private cursor: number;
@@ -530,6 +622,9 @@ export class ContractEventListener {
     this.allowedAddresses = new Set(
       (config.contractAddresses ?? []).map((a) => a.toLowerCase()),
     );
+
+    // Validate and defensively copy topic prefixes up front.
+    this.topicPrefixes = validateTopicPrefixes(config.topicPrefixes ?? []);
   }
 
   // -------------------------------------------------------------------------
@@ -848,6 +943,12 @@ export class ContractEventListener {
       filter.contractIds = [...this.allowedAddresses];
     }
 
+    // Push topic prefix filtering down to the RPC layer when configured and
+    // no explicit rpcFilter.topics override was provided.
+    if (this.topicPrefixes.length > 0 && !filter.topics?.length) {
+      filter.topics = this.topicPrefixes.map((prefix) => [...prefix, '**']);
+    }
+
     const position = this.pagingCursor !== null
       ? { cursor: this.pagingCursor }
       : { startLedger: this.cursor };
@@ -869,6 +970,12 @@ export class ContractEventListener {
       // SDK-level guard: drop events not in the allow-list.
       if (!this.isAllowed(raw.contractId)) {
         this.logSkipped('address_filtered', raw, null);
+        continue;
+      }
+
+      // SDK-level guard: drop events that do not match any configured topic prefix.
+      if (!this.matchesTopicFilter(raw.topic)) {
+        this.logSkipped('topic_filtered', raw, null);
         continue;
       }
 
@@ -954,6 +1061,15 @@ export class ContractEventListener {
   private isAllowed(contractId: string): boolean {
     if (this.allowedAddresses.size === 0) return true;
     return this.allowedAddresses.has(contractId.toLowerCase());
+  }
+
+  /**
+   * Returns true when:
+   * - no topic prefixes are configured (pass-all mode), or
+   * - the event's topic array starts with at least one configured prefix.
+   */
+  private matchesTopicFilter(topic: unknown[] | undefined): boolean {
+    return matchesAnyTopicPrefix(topic, this.topicPrefixes);
   }
 
   /**
