@@ -21,13 +21,14 @@ import {
   scValToNative,
 } from 'stellar-sdk';
 import { NetworkConfig, YieldStrategy, StrategyError } from './types';
+import { createContractRpcServer } from './utils/rpcTimeout';
 
 export class StrategyRegistryClient {
   private server: SorobanRpc.Server;
   private networkConfig: NetworkConfig;
 
   constructor(networkConfig: NetworkConfig) {
-    this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
+    this.server = createContractRpcServer(networkConfig, 'strategyRegistry');
     this.networkConfig = networkConfig;
   }
 

@@ -25,6 +25,7 @@ import {
   NetworkConfig,
 } from "./types";
 import { waitForTransaction } from "./utils/transaction";
+import { createContractRpcServer } from "./utils/rpcTimeout";
 
 export class RebalancerClient extends EventEmitter {
   private contract: Contract;
@@ -34,7 +35,7 @@ export class RebalancerClient extends EventEmitter {
   constructor(networkConfig: NetworkConfig) {
     super();
     this.contract = new Contract(networkConfig.contracts.rebalanceEngine);
-    this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
+    this.server = createContractRpcServer(networkConfig, "rebalanceEngine");
     this.networkConfig = networkConfig;
   }
 

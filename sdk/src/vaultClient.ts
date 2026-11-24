@@ -21,27 +21,28 @@ import {
   TransactionOptions,
   TransactionResult,
   VaultError,
-  NetworkConfig,
   VaultClientOptions,
+  VaultClientConfig,
   PauseReason,
   VaultEvent
 } from './types';
 import { waitForTransaction } from './utils/transaction';
+import { createContractRpcServer } from './utils/rpcTimeout';
 
 export class VaultClient extends EventEmitter {
   private contract: Contract;
   private server: SorobanRpc.Server;
-  private networkConfig: NetworkConfig;
+  private networkConfig: VaultClientConfig;
   private simulationSource?: string;
 
   constructor(
     vaultAddress: Address,
-    networkConfig: NetworkConfig,
+    networkConfig: VaultClientConfig,
     options: VaultClientOptions = {}
   ) {
     super();
     this.contract = new Contract(vaultAddress.toString());
-    this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
+    this.server = createContractRpcServer(networkConfig, 'yieldEngine');
     this.networkConfig = networkConfig;
     this.simulationSource = options.simulationSource;
   }
