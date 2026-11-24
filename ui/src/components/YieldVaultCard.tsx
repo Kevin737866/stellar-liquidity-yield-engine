@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 import { useYieldVault } from '../hooks/useYieldVault';
 import { useTxStatus } from '../hooks/useTxStatus';
+import { DepositReview, NO_SLIPPAGE_PROTECTION } from './DepositReview';
+import { validateDepositAmounts } from '../lib/depositReview';
 import { shortenAddress } from '../lib/freighter';
 
 interface YieldVaultCardProps {
@@ -87,6 +89,8 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   const [depositAmountA, setDepositAmountA] = useState('');
   const [depositAmountB, setDepositAmountB] = useState('');
   const [withdrawShares, setWithdrawShares] = useState('');
+  // Issue #454: a deposit is reviewed before it is signed and submitted.
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
@@ -127,15 +131,40 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
     }
   }, [hookError]);
 
+  const handleReviewDeposit = () => {
+    const validation = validateDepositAmounts(depositAmountA, depositAmountB);
+    if (!validation.ok) {
+      setError(validation.errors.join(' '));
+      return;
+    }
+    resetTx();
+    setError(null);
+    setReviewOpen(true);
+  };
+
   const handleDeposit = async () => {
-    if (!depositAmountA || !depositAmountB) return;
+    const validation = validateDepositAmounts(depositAmountA, depositAmountB);
+    if (!validation.ok) {
+      setError(validation.errors.join(' '));
+      setReviewOpen(false);
+      return;
+    }
+
     resetTx();
     setError(null);
 
     await runTx(async () => {
-      const result = await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
-      setDepositAmountA('');
-      setDepositAmountB('');
+      const result = await deposit(
+        validation.amountA,
+        validation.amountB,
+        NO_SLIPPAGE_PROTECTION
+      );
+      // Keep the review open on failure so the user can retry or go back.
+      if (result?.success) {
+        setDepositAmountA('');
+        setDepositAmountB('');
+        setReviewOpen(false);
+      }
       return result;
     });
   };
@@ -406,46 +435,65 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
         {/* Deposit Section */}
         <div className="border-t pt-4">
           <h3 className="text-lg font-semibold mb-3">Deposit</h3>
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-sm text-gray-500">Token A Amount</label>
-                <Input
-                  type="number"
-                  placeholder="0"
-                  value={depositAmountA}
-                  onChange={(e) => setDepositAmountA(e.target.value)}
-                  disabled={isPaused || isTxInFlight}
-                />
+          {reviewOpen ? (
+            <DepositReview
+              vaultName={vaultInfo?.name || 'Yield Vault'}
+              vaultAddress={vaultAddress}
+              network={network}
+              walletAddress={walletAddress || userAddress}
+              tokenA={vaultInfo?.tokenA?.toString()}
+              tokenB={vaultInfo?.tokenB?.toString()}
+              amountA={depositAmountA}
+              amountB={depositAmountB}
+              minShares={NO_SLIPPAGE_PROTECTION}
+              feeRateBps={vaultInfo?.feeRate ?? 0}
+              paused={isPaused}
+              submitting={isTxInFlight}
+              onConfirm={handleDeposit}
+              onBack={() => setReviewOpen(false)}
+            />
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm text-gray-500">Token A Amount</label>
+                  <Input
+                    type="number"
+                    placeholder="0"
+                    value={depositAmountA}
+                    onChange={(e) => setDepositAmountA(e.target.value)}
+                    disabled={isPaused || isTxInFlight}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm text-gray-500">Token B Amount</label>
+                  <Input
+                    type="number"
+                    placeholder="0"
+                    value={depositAmountB}
+                    onChange={(e) => setDepositAmountB(e.target.value)}
+                    disabled={isPaused || isTxInFlight}
+                  />
+                </div>
               </div>
-              <div>
-                <label className="text-sm text-gray-500">Token B Amount</label>
-                <Input
-                  type="number"
-                  placeholder="0"
-                  value={depositAmountB}
-                  onChange={(e) => setDepositAmountB(e.target.value)}
-                  disabled={isPaused || isTxInFlight}
-                />
-              </div>
-            </div>
-            <Button
-              onClick={handleDeposit}
-              disabled={!depositAmountA || !depositAmountB || isPaused || (!walletConnected && !hasKeypair) || isTxInFlight}
-              className="w-full"
-            >
-              {isTxInFlight ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
-              ) : (
-                'Deposit'
+              <Button
+                onClick={handleReviewDeposit}
+                disabled={!depositAmountA || !depositAmountB || isPaused || (!walletConnected && !hasKeypair) || isTxInFlight}
+                className="w-full"
+              >
+                {isTxInFlight ? (
+                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
+                ) : (
+                  'Review deposit'
+                )}
+              </Button>
+              {!walletConnected && !hasKeypair && (
+                <p className="text-xs text-gray-500 text-center">
+                  Connect Freighter wallet or configure a keypair to deposit funds.
+                </p>
               )}
-            </Button>
-            {!walletConnected && !hasKeypair && (
-              <p className="text-xs text-gray-500 text-center">
-                Connect Freighter wallet or configure a keypair to deposit funds.
-              </p>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {/* Withdraw Section */}

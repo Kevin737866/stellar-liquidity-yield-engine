@@ -52,6 +52,14 @@ export interface RebalancerConfig {
    * With it the keeper resumes exactly where it left off.
    */
   stateStore?: CheckpointStore;
+  /**
+   * Default dry-run mode for this keeper. When true, every run scans, gates
+   * and simulates exactly like a live run, but never signs or submits a
+   * transaction (and never consumes the cooldown slot).
+   *
+   * A single run can override this with `run({ dryRun: true | false })`.
+   */
+  dryRun?: boolean;
 }
 
 /** The keeper state that has to survive a restart. */
@@ -64,12 +72,33 @@ export interface RebalancerState {
 
 export interface RebalanceResult {
   timestamp: number;
+  /**
+   * Whether the run performed its action on chain. Always `false` for a dry
+   * run — use {@link RebalanceResult.wouldExecute} to see what it would have
+   * done.
+   */
   success: boolean;
   opportunity?: Opportunity;
   profit?: bigint;
   message: string;
   /** RPC lag observed for this run, when a head source is configured. */
   lag?: RpcLagReport;
+  /** True when this record came from a dry run — nothing was submitted. */
+  dryRun?: boolean;
+  /**
+   * Dry runs only: true when a live run would have signed and submitted the
+   * rebalance at this point.
+   */
+  wouldExecute?: boolean;
+}
+
+/** Per-run overrides for {@link AutoRebalancer.run}. */
+export interface AutoRebalancerRunOptions {
+  /**
+   * Preview the run without submitting a transaction. Defaults to the
+   * keeper's `dryRun` config.
+   */
+  dryRun?: boolean;
 }
 
 export interface AutoRebalancerOptions {
@@ -136,10 +165,12 @@ export class AutoRebalancer {
 
   constructor(config: RebalancerConfig, options: AutoRebalancerOptions = {}) {
     this.config = config;
-    this.scanner = new ArbitrageScanner('https://horizon.stellar.org', {
-      roundTripCostEstimator: config.roundTripCostEstimator,
-    });
-    this.executor = new ArbitrageExecutor();
+    this.scanner =
+      options.scanner ??
+      new ArbitrageScanner('https://horizon.stellar.org', {
+        roundTripCostEstimator: config.roundTripCostEstimator,
+      });
+    this.executor = options.executor ?? new ArbitrageExecutor();
     if (config.rpcHeadSource) {
       this.lagMonitor = new RpcLagMonitor(config.rpcHeadSource, config.lagOptions);
     }
@@ -267,9 +298,24 @@ export class AutoRebalancer {
 
   /**
    * Run the auto-rebalancer (15-minute interval compatible)
-   * Call this every 15 minutes via cron job or timer
+   * Call this every 15 minutes via cron job or timer.
+   *
+   * Pass `{ dryRun: true }` (or set `config.dryRun`) to evaluate the keeper's
+   * decision end-to-end — cooldown, RPC lag, scanning, profitability checks and
+   * simulation — without signing or submitting anything. A dry run leaves the
+   * keeper's cooldown state untouched, so it can be repeated as often as
+   * needed and is followed by a live run in the same slot.
    */
-  async run(): Promise<RebalanceResult[]> {
+  async run(options: AutoRebalancerRunOptions = {}): Promise<RebalanceResult[]> {
+    const dryRun = options.dryRun ?? this.config.dryRun ?? false;
+    const results = await this.runOnce(dryRun);
+
+    // Tag every record so log pipelines and dashboards cannot mistake a dry
+    // run for a live one.
+    return dryRun ? results.map((result) => ({ ...result, dryRun: true })) : results;
+  }
+
+  private async runOnce(dryRun: boolean): Promise<RebalanceResult[]> {
     const results: RebalanceResult[] = [];
 
     try {
@@ -312,8 +358,11 @@ export class AutoRebalancer {
 
       // The scheduled slot has been consumed — record it before doing any
       // work, so a restart in the middle of this run does not open the same
-      // slot a second time.
-      await this.persistState();
+      // slot a second time. A dry run must not consume the slot: it is a
+      // preview, and the live run still has to be able to happen.
+      if (!dryRun) {
+        await this.persistState();
+      }
 
       // Scan for opportunities
       const opportunities = await this.scanner.findOpportunities(
@@ -423,6 +472,21 @@ export class AutoRebalancer {
           success: false,
           opportunity: bestOpportunity,
           message,
+          lag,
+        });
+        return results;
+      }
+
+      // Dry run: everything above already proved that a live run would
+      // submit. Report the decision and stop before any signing or sending.
+      if (dryRun) {
+        results.push({
+          timestamp: Date.now(),
+          success: false,
+          wouldExecute: true,
+          opportunity: bestOpportunity,
+          profit: profitability.netProfit,
+          message: `Dry run: would execute rebalance into ${bestOpportunity.pool_id}. No transaction submitted.`,
           lag,
         });
         return results;
