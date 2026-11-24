@@ -155,6 +155,39 @@ Because the RPC cannot expose a stable machine-readable code for this
 condition, detection is message-based and requires both a cursor mention and
 an expiration-like word.
 
+## Explicit error and recovery state transitions
+
+`ContractEventListener` tracks an explicit operational state machine so
+operators, health checks, and alerting hooks can distinguish healthy polling,
+active failures, recovery attempts, and intentional shutdown:
+
+- `idle` — constructed and not yet started (manual `poll()` calls may still run).
+- `running` — actively polling and healthy.
+- `error` — the most recent poll, checkpoint restore, or checkpoint persist failed.
+- `recovering` — attempting a subsequent poll after entering `error`.
+- `stopped` — explicitly stopped via `stop()`.
+
+Subscribe to transitions with `onStateChange` (and unsubscribe with
+`offStateChange`), or inspect `listener.state`, `listener.consecutiveErrors`,
+`listener.lastError`, and `listener.lastTransition`:
+
+```ts
+listener.onStateChange((transition) => {
+  console.log(
+    `[listener] ${transition.from} -> ${transition.to} (${transition.reason})` +
+      ` at ledger ${transition.ledger} (consecutiveErrors=${transition.consecutiveErrors})`,
+  );
+});
+```
+
+Typical failure and recovery sequence:
+
+1. `idle -> running` (`started`) when `start()` is called.
+2. `running -> error` (`poll_error`, `cursor_expired`, `restore_error`, or `persist_error`) on failure.
+3. `error -> recovering` (`recovery_attempt`) when the next poll begins.
+4. `recovering -> running` (`recovered`) once a poll completes and persists cleanly (resetting `consecutiveErrors` to `0` and `lastError` to `null`), or `recovering -> error` if the recovery attempt also fails.
+5. `running | error | recovering -> stopped` (`stopped`) when `stop()` is called; in-flight polls that finish after `stop()` do not overwrite the `stopped` state.
+
 ## The RPC lag monitor
 
 A restarted `RpcLagMonitor` used to start its `processedLedger` marker at zero,
