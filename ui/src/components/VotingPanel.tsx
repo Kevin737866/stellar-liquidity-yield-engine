@@ -5,6 +5,7 @@
  */
 
 import React, { useState, useMemo } from 'react';
+import { useWalletPrompt } from '../hooks/useWalletPrompt';
 import type { GovernanceProposal } from '../../sdk/src/governance';
 import {
   ProposalState,
@@ -49,6 +50,7 @@ const VotingPanel: React.FC<VotingPanelProps> = ({
     votedFor === true ? 'for' : votedFor === false ? 'against' : null
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const { isWalletPromptActive } = useWalletPrompt();
 
   // Calculate time remaining
   const timeRemaining = useMemo(() => {
@@ -386,7 +388,7 @@ const VotingPanel: React.FC<VotingPanelProps> = ({
                 {/* Submit Button */}
                 <button
                   onClick={handleSubmit}
-                  disabled={!selectedVote || voteAmount <= BigInt(0) || isSubmitting}
+                  disabled={!selectedVote || voteAmount <= BigInt(0) || isSubmitting || loading || isWalletPromptActive}
                   className={`w-full py-3 rounded-lg font-semibold transition-colors ${
                     selectedVote === 'for'
                       ? 'bg-green-600 hover:bg-green-700 text-white'

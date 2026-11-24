@@ -197,6 +197,49 @@ await keeper.run(); // restores state on the first run, persists on execution
 The keeper fails **closed**: if the stored state cannot be read, the run ends
 with an error instead of executing a possibly-duplicate rebalance.
 
+## Per-strategy execution budgets
+
+A single auto-rebalancer process can be limited to a fixed number of execution
+attempts per strategy in a time window. Configure a stable `strategyId` and a
+budget entry for that id:
+
+```ts
+const keeper = new AutoRebalancer({
+  /* ... */
+  strategyId: 'momentum-1',
+  strategyExecutionBudgets: {
+    'momentum-1': { maxExecutions: 3, windowMs: 60 * 60 * 1000 },
+  },
+  stateStore: new FileCheckpointStore('./state/rebalancer.json'),
+});
+```
+
+When `strategyId` is omitted, the keeper's `currentPoolId` is used. Strategies
+without a budget entry remain unlimited, so existing keeper configurations keep
+their current behavior.
+
+Budgets use fixed windows anchored to the Unix epoch. At most `maxExecutions`
+execution attempts are admitted per window; the next admission is blocked until
+the window rolls over. A blocked attempt emits
+`keeper.action.skipped` with reason `strategy_budget_exceeded`, and the run
+result includes the strategy id and budget status. Budget usage is written to
+the checkpoint under the `executionBudgets` metadata key, so a restart does not
+grant a fresh allowance.
+
+An attempt is charged immediately before the RPC write, after simulation. A
+failed RPC write therefore consumes budget: it still cost an execution attempt.
+Invalid budget configuration (`maxExecutions`/`windowMs` must be positive
+integers) is rejected when the keeper is constructed. Corrupt budget metadata in
+a checkpoint makes the run fail closed with an error rather than resetting the
+counter.
+
+Budgets are per keeper process. Deployments running multiple keepers against the
+same strategy need one writer per checkpoint file and an external/shared
+scheduler for a cluster-wide cap.
+
+`ExecutionBudgetManager` and its types are exported from the SDK for operators
+that want to inspect status through `getExecutionBudgetStatus()`.
+
 ## Restart-during-outage scenario
 
 The scenario is covered end-to-end in `sdk/src/recovery.test.ts`:

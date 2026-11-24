@@ -16,6 +16,7 @@ import React, { useState } from 'react';
 import type { GovernanceProposal } from '../../sdk/src/governance';
 import { DEFAULT_TOKEN_DECIMALS } from '../../sdk/src/governance';
 import { useGovernance } from '../hooks/useGovernance';
+import { useWalletPrompt } from '../hooks/useWalletPrompt';
 import { describeNetworkConfig } from '../config/network';
 import ProposalList from './ProposalList';
 import VotingPanel from './VotingPanel';
@@ -46,6 +47,7 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
   tokenDecimals = DEFAULT_TOKEN_DECIMALS,
 }) => {
   const governance = useGovernance({ network });
+  const { isWalletPromptActive } = useWalletPrompt();
   const {
     proposals,
     totalSupply,
@@ -54,6 +56,8 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
     lockInfo,
     loading,
     errors,
+    isActionInFlight,
+    connecting,
     unconfiguredRoles,
     walletAddress,
     walletConnected,
@@ -70,6 +74,7 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
   const [isStakingOpen, setIsStakingOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const isBusy = isWalletPromptActive || connecting || isActionInFlight;
   const currentUser = walletAddress ?? '';
 
   // The active proposal may have been refreshed since it was selected.
@@ -114,9 +119,10 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
           ) : (
             <button
               onClick={() => connect()}
-              className="px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700"
+              disabled={isBusy}
+              className="px-3 py-1 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Connect Freighter
+              {isWalletPromptActive || connecting ? 'Connecting…' : 'Connect Freighter'}
             </button>
           )}
         </div>
@@ -157,14 +163,15 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
             runAction(() => castVote(activeProposal.id, support, amount, reason))
           }
           onClose={() => setSelectedProposal(null)}
-          loading={loading}
+          loading={loading || isBusy}
         />
       )}
 
       {/* Locking / staking */}
       <button
         onClick={() => setIsStakingOpen(true)}
-        className="px-4 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700"
+        disabled={isBusy}
+        className="px-4 py-2 rounded-lg bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Stake SYGT
       </button>
@@ -179,7 +186,7 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
         onIncreaseLock={(amount) => runAction(() => increaseLock(amount))}
         onExtendLock={(newDuration) => runAction(() => extendLock(newDuration))}
         onWithdraw={() => runAction(() => withdrawFromEscrow())}
-        loading={loading}
+        loading={loading || isBusy}
       />
     </div>
   );

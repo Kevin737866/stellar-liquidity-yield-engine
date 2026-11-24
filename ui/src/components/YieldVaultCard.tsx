@@ -19,7 +19,9 @@ import {
 } from 'lucide-react';
 import { useYieldVault } from '../hooks/useYieldVault';
 import { useTxStatus } from '../hooks/useTxStatus';
+import { useWalletPrompt } from '../hooks/useWalletPrompt';
 import { shortenAddress } from '../lib/freighter';
+import { TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE } from '../lib/walletPromptLock';
 
 interface YieldVaultCardProps {
   vaultAddress: string;
@@ -89,7 +91,8 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   const [withdrawShares, setWithdrawShares] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
+  const { txStatus, isTxInFlight, txHash, txError, runTx, resetTx } = useTxStatus();
+  const { isWalletPromptActive } = useWalletPrompt();
 
   const {
     vaultInfo,
@@ -109,6 +112,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
     walletAddress,
     walletConnected,
     connecting,
+    isTxInFlight: isVaultWriteInFlight,
     connect,
     disconnect,
   } = useYieldVault({
@@ -121,6 +125,8 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
     signer,
   });
 
+  const isBusy = isTxInFlight || isVaultWriteInFlight || connecting || isWalletPromptActive;
+
   React.useEffect(() => {
     if (hookError) {
       setError(hookError);
@@ -129,37 +135,37 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
 
   const handleDeposit = async () => {
     if (!depositAmountA || !depositAmountB) return;
-    resetTx();
     setError(null);
 
-    await runTx(async () => {
+    const accepted = await runTx(async () => {
       const result = await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
       setDepositAmountA('');
       setDepositAmountB('');
       return result;
     });
+    if (!accepted) setError(TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE);
   };
 
   const handleWithdraw = async () => {
     if (!withdrawShares) return;
-    resetTx();
     setError(null);
 
-    await runTx(async () => {
+    const accepted = await runTx(async () => {
       const result = await withdraw(BigInt(withdrawShares), 0n, 0n);
       setWithdrawShares('');
       return result;
     });
+    if (!accepted) setError(TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE);
   };
 
   const handleHarvest = async () => {
-    resetTx();
     setError(null);
 
-    await runTx(async () => {
+    const accepted = await runTx(async () => {
       const result = await harvest();
       return result;
     });
+    if (!accepted) setError(TRANSACTION_ALREADY_IN_FLIGHT_MESSAGE);
   };
 
   if (loading && !vaultInfo && !vaultMetrics) {
@@ -208,7 +214,6 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
       ? (Number(userShares) / Number(vaultMetrics.totalShares)) * Number(vaultMetrics.tvl)
       : 0;
 
-  const isTxInFlight = txStatus === 'submitting' || txStatus === 'pending';
   const hasKeypair = Boolean(keypair);
 
   return (
@@ -254,7 +259,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
           ) : (
             <Button
               onClick={connect}
-              disabled={connecting}
+              disabled={isBusy}
               variant="outline"
               size="sm"
               className="gap-1"
@@ -415,7 +420,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                   placeholder="0"
                   value={depositAmountA}
                   onChange={(e) => setDepositAmountA(e.target.value)}
-                  disabled={isPaused || isTxInFlight}
+                  disabled={isPaused || isBusy}
                 />
               </div>
               <div>
@@ -425,16 +430,16 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                   placeholder="0"
                   value={depositAmountB}
                   onChange={(e) => setDepositAmountB(e.target.value)}
-                  disabled={isPaused || isTxInFlight}
+                  disabled={isPaused || isBusy}
                 />
               </div>
             </div>
             <Button
               onClick={handleDeposit}
-              disabled={!depositAmountA || !depositAmountB || isPaused || (!walletConnected && !hasKeypair) || isTxInFlight}
+              disabled={!depositAmountA || !depositAmountB || isPaused || (!walletConnected && !hasKeypair) || isBusy}
               className="w-full"
             >
-              {isTxInFlight ? (
+              {isBusy ? (
                 <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
               ) : (
                 'Deposit'
@@ -459,16 +464,16 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 placeholder="0"
                 value={withdrawShares}
                 onChange={(e) => setWithdrawShares(e.target.value)}
-                disabled={isPaused || userShares === 0n || isTxInFlight}
+                disabled={isPaused || userShares === 0n || isBusy}
               />
             </div>
             <Button
               onClick={handleWithdraw}
-              disabled={!withdrawShares || isPaused || userShares === 0n || (!walletConnected && !hasKeypair) || isTxInFlight}
+              disabled={!withdrawShares || isPaused || userShares === 0n || (!walletConnected && !hasKeypair) || isBusy}
               variant="outline"
               className="w-full"
             >
-              {isTxInFlight ? (
+              {isBusy ? (
                 <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
               ) : (
                 'Withdraw'
@@ -481,11 +486,11 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
         <div className="flex gap-3">
           <Button
             onClick={handleHarvest}
-            disabled={isPaused || (!walletConnected && !hasKeypair) || isTxInFlight}
+            disabled={isPaused || (!walletConnected && !hasKeypair) || isBusy}
             variant="secondary"
             className="flex-1"
           >
-            {isTxInFlight ? (
+            {isBusy ? (
               <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing…</>
             ) : (
               'Harvest Rewards'
@@ -495,7 +500,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
             onClick={() => refresh()}
             variant="outline"
             className="flex-1 gap-1"
-            disabled={isTxInFlight}
+            disabled={isBusy}
           >
             <RefreshCw className="h-4 w-4" />
             Refresh

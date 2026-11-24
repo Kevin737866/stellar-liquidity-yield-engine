@@ -292,6 +292,8 @@ await bot.forceHarvest('VAULT_ADDRESS');
 - **Reward Thresholds**: Minimum rewards for harvesting
 - **Gas Price Limits**: Maximum acceptable gas costs
 - **Cooldown Periods**: Minimum time between harvests
+- **Execution Budgets**: Optional per-strategy cap on keeper execution attempts
+  per time window; see [docs/KEEPER_RECOVERY.md](docs/KEEPER_RECOVERY.md)
 - **Performance Tracking**: Detailed harvest statistics
 
 ### Surviving Restarts and Outages
@@ -341,6 +343,18 @@ import { RebalancePanel } from '@/components/RebalancePanel';
 
 <RebalancePanel network="testnet" />
 ```
+
+### Wallet prompt duplicate-click protection
+
+Dashboard transaction surfaces share a single wallet-prompt lock. Only one
+Freighter connect or sign request can be open at a time across all mounted
+components. A second click does not open another wallet prompt; it is rejected
+with the message "A wallet prompt is already open. Approve or reject it before
+starting another transaction." Transaction buttons and inputs also disable
+while a prompt or transaction is in flight, then re-enable when it settles.
+
+Rejected wallet prompts release the lock immediately, so the user can retry.
+No configuration is required.
 
 ### ImpermanentLossChart
 Interactive IL analysis and visualization:

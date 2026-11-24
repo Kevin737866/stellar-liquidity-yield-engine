@@ -5,6 +5,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
+import { useWalletPrompt } from '../hooks/useWalletPrompt';
 
 interface WeekData {
   week: number;
@@ -40,6 +41,7 @@ const FeeShareClaim: React.FC<FeeShareClaimProps> = ({
 }) => {
   const [selectedWeeks, setSelectedWeeks] = useState<Set<number>>(new Set());
   const [isClaiming, setIsClaiming] = useState(false);
+  const { isWalletPromptActive } = useWalletPrompt();
 
   // Calculate user's share percentage
   const sharePercentage = useMemo(() => {
@@ -297,7 +299,7 @@ const FeeShareClaim: React.FC<FeeShareClaimProps> = ({
                       {!week.claimed && week.userShare > BigInt(0) && (
                         <button
                           onClick={() => handleClaimWeek(week.week)}
-                          disabled={isClaiming}
+                          disabled={isClaiming || isWalletPromptActive}
                           className="text-sm text-blue-600 hover:text-blue-700 font-medium disabled:opacity-50"
                         >
                           Claim
@@ -330,7 +332,7 @@ const FeeShareClaim: React.FC<FeeShareClaimProps> = ({
             </div>
             <button
               onClick={handleClaimAll}
-              disabled={isClaiming || loading}
+              disabled={isClaiming || loading || isWalletPromptActive}
               className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isClaiming ? (

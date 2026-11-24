@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useWalletPrompt } from '../hooks/useWalletPrompt';
 import {
     PieChart,
     Pie,
@@ -120,6 +121,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
 }) => {
     // State
     const [isLoading, setIsLoading] = useState<boolean>(false);
+    const { isWalletPromptActive } = useWalletPrompt();
     const [showConvertModal, setShowConvertModal] = useState<boolean>(false);
     const [showAutoCompoundPanel, setShowAutoCompoundPanel] = useState<boolean>(false);
     const [showHistoryPanel, setShowHistoryPanel] = useState<boolean>(false);
@@ -379,7 +381,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                     <button
                         className="btn btn-danger"
                         onClick={handleEmergencyWithdraw}
-                        disabled={isLoading}
+                        disabled={isLoading || isWalletPromptActive}
                     >
                         <FaExclamationTriangle />
                         Emergency Withdraw
@@ -582,14 +584,14 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                     <button
                                         className="btn btn-primary"
                                         onClick={handleClaim}
-                                        disabled={isLoading}
+                                        disabled={isLoading || isWalletPromptActive}
                                     >
                                         {isLoading ? 'Claiming...' : 'Claim Selected'}
                                     </button>
                                     <button
                                         className="btn btn-secondary"
                                         onClick={() => setShowConvertModal(true)}
-                                        disabled={isLoading}
+                                        disabled={isLoading || isWalletPromptActive}
                                     >
                                         <FaExchangeAlt />
                                         Claim & Convert
@@ -768,7 +770,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                 <button
                                     className="btn btn-primary"
                                     onClick={handleClaimAndConvert}
-                                    disabled={isLoading}
+                                    disabled={isLoading || isWalletPromptActive}
                                 >
                                     {isLoading ? 'Processing...' : 'Confirm & Convert'}
                                 </button>
