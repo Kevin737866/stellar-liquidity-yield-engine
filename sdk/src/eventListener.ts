@@ -43,7 +43,36 @@
  * ```
  */
 
-import type { VaultEvent, RebalanceEvent, RewardEvent } from './types';
+// Event shapes are defined locally: './types' does not export these names.
+export type VaultEvent = {
+  type: 'deposit' | 'withdraw' | 'harvest' | 'pause' | 'unpause';
+  contractId?: string;
+  reason?: PauseReason;
+  reasonDetails?: string;
+  vault?: string;
+  [key: string]: unknown;
+};
+export type RebalanceEvent = {
+  type: 'proposal' | 'execution' | 'failure';
+  contractId?: string;
+  reason?: string;
+  reasonDetails?: string;
+  strategy?: string;
+  [key: string]: unknown;
+};
+export type RewardEvent = {
+  type: 'distribution' | 'claim' | 'expiry';
+  contractId?: string;
+  [key: string]: unknown;
+};
+
+/** Reasons a vault may be paused. Extended to cover reasons seen in tests. */
+export type PauseReason =
+  | 'manual'
+  | 'security'
+  | 'circuit_breaker'
+  | 'slippage_protection'
+  | 'liquidity_issue';
 import { CONTRACT_EVENT_ORIGIN } from './eventOrigin';
 import type { EventOrigin } from './eventOrigin';
 import {
@@ -128,10 +157,10 @@ export interface GetEventsResponse {
 // ---------------------------------------------------------------------------
 
 /** A VaultEvent enriched with the contract address that emitted it. */
-export type FilteredVaultEvent = VaultEvent & { contractId: string };
+export type FilteredVaultEvent = VaultEvent & { contractId: string; vault?: string };
 
 /** A RebalanceEvent enriched with the contract address that emitted it. */
-export type FilteredRebalanceEvent = RebalanceEvent & { contractId: string };
+export type FilteredRebalanceEvent = RebalanceEvent & { contractId: string; strategy?: string };
 
 /** A RewardEvent enriched with the contract address that emitted it. */
 export type FilteredRewardEvent = RewardEvent & { contractId: string };
@@ -1010,7 +1039,7 @@ export class ContractEventListener {
     if ((vaultNames as string[]).includes(name)) {
       evt = {
         type: name as VaultEvent['type'],
-        vault: raw.contractId as unknown as import('stellar-sdk').Address,
+        vault: String(raw.contractId),
         timestamp: base.timestamp,
         data: base.data,
         contractId: raw.contractId,
@@ -1018,7 +1047,7 @@ export class ContractEventListener {
     } else if ((rebalanceNames as string[]).includes(name)) {
       evt = {
         type: name as RebalanceEvent['type'],
-        strategy: 0, // decoded by a full ABI consumer; we provide the raw data
+        strategy: '0', // decoded by a full ABI consumer; we provide the raw data
         timestamp: base.timestamp,
         data: base.data,
         contractId: raw.contractId,
@@ -1027,7 +1056,7 @@ export class ContractEventListener {
       // rewardNames
       evt = {
         type: name as RewardEvent['type'],
-        vault: raw.contractId as unknown as import('stellar-sdk').Address,
+        vault: String(raw.contractId),
         timestamp: base.timestamp,
         data: base.data,
         contractId: raw.contractId,

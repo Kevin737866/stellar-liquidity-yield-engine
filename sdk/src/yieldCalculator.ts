@@ -8,9 +8,16 @@ import {
   PriceData,
   TimeInterval,
   PerformanceSnapshot,
-  HarvestEvent,
-  HarvestEfficiencyMetrics
+  RawHarvestEvent
 } from './types';
+
+/**
+ * Harvest record shape consumed by `calculateHarvestEfficiency`.
+ */
+type HarvestEvent = RawHarvestEvent & {
+  rewardsHarvested: bigint;
+  gasUsed: number;
+};
 
 export class YieldCalculator {
   /**
@@ -19,7 +26,7 @@ export class YieldCalculator {
   static calculateImpermanentLoss(
     initialPriceRatio: number,
     currentPriceRatio: number,
-    timeElapsed: number
+    timeElapsed: number = 0
   ): ImpermanentLossData {
     // A non-positive baseline is undefined for the IL formula; return a
     // zero-damage result instead of NaN/Infinity so callers can render.
@@ -219,8 +226,8 @@ export class YieldCalculator {
   static calculateCompoundInterest(
     principal: bigint,
     apy: number, // Basis points
-    compoundingFrequency: number, // Times per year
-    timeYears: number
+    compoundingFrequency: number = 1, // Times per year
+    timeYears: number = 1
   ): { finalAmount: bigint; totalInterest: bigint; effectiveApy: number } {
     // APY arrives in basis points (10000 = 100%); convert to a decimal
     // fraction for the compounding formula.
@@ -475,7 +482,12 @@ export class YieldCalculator {
    *
    * Issue #128.
    */
-  static calculateHarvestEfficiency(harvests: HarvestEvent[]): HarvestEfficiencyMetrics {
+  static calculateHarvestEfficiency(harvests: HarvestEvent[]): {
+    totalRewards: bigint;
+    totalGas: number;
+    efficiencyRatio: number;
+    avgGasPerHarvest: number;
+  } {
     if (harvests.length === 0) {
       return {
         totalRewards: 0n,
