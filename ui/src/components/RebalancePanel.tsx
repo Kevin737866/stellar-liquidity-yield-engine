@@ -16,7 +16,9 @@ import {
 } from 'lucide-react';
 import { RebalancerClient, RebalanceStrategy, RebalanceHistory, PoolAllocation, RebalanceProposal } from 'stellar-liquidity-yield-engine-sdk';
 import { useTxStatus } from '../hooks/useTxStatus';
+import { useMainnetActionGuard, type NetworkChangeHandler } from '../hooks/useMainnetActionGuard';
 import { getNetworkConfig, type UiNetwork } from '../config/network';
+import { NetworkSwitchPrompt } from './NetworkSwitchPrompt';
 import {
   createFreighterSigner,
   isFreighterAvailable,
@@ -24,11 +26,15 @@ import {
 } from '../lib/freighter';
 
 interface RebalancePanelProps {
+  /** Falls back to NEXT_PUBLIC_STELLAR_NETWORK (testnet when unset). */
   network?: UiNetwork;
+  /** Applies the network switch after the user confirms a Mainnet action. */
+  onNetworkChange?: NetworkChangeHandler;
 }
 
 export const RebalancePanel: React.FC<RebalancePanelProps> = ({
-  network
+  network,
+  onNetworkChange,
 }) => {
   const [strategies, setStrategies] = useState<RebalanceStrategy[]>([]);
   const [history, setHistory] = useState<RebalanceHistory[]>([]);
@@ -44,6 +50,15 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
   // `undefined` means "use the configured network".
   const networkConfig = useMemo(() => getNetworkConfig(network), [network]);
   const activeNetwork = networkConfig.network;
+  const {
+    pendingAction,
+    isPromptOpen,
+    isSwitching,
+    switchError,
+    requestAction,
+    cancel: cancelNetworkSwitch,
+    confirm: confirmNetworkSwitch,
+  } = useMainnetActionGuard({ network: activeNetwork, onNetworkChange });
 
   const rebalancerClient = useMemo(
     () => new RebalancerClient(networkConfig),
@@ -93,37 +108,39 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
     }
   };
 
-  const handleExecuteRebalance = async (proposal: RebalanceProposal) => {
-    resetTx();
-    setError(null);
+  const handleExecuteRebalance = (proposal: RebalanceProposal) => {
+    requestAction('execute a rebalance', async () => {
+      resetTx();
+      setError(null);
 
-    if (!isFreighterAvailable()) {
-      setError('Freighter is not installed. Install the Freighter extension to execute rebalances.');
-      return;
-    }
-
-    try {
-      if (!(await isFreighterConnected())) {
-        setError('Freighter is not connected. Open the extension, connect your wallet and try again.');
+      if (!isFreighterAvailable()) {
+        setError('Freighter is not installed. Install the Freighter extension to execute rebalances.');
         return;
       }
-    } catch {
-      setError('Could not reach the Freighter wallet. Unlock the extension and try again.');
-      return;
-    }
 
-    await runTx(async () => {
-      // Sign through the wallet: Freighter provides the public key and signs
-      // the built transaction, so `execute_rebalance` runs against the user's
-      // real account instead of a mock placeholder.
-      const signer = createFreighterSigner(activeNetwork);
-      const result = await rebalancerClient.executeRebalance(signer, proposal);
-      await loadData();
-      return {
-        hash: result.hash,
-        success: result.success,
-        error: result.error
-      };
+      try {
+        if (!(await isFreighterConnected())) {
+          setError('Freighter is not connected. Open the extension, connect your wallet and try again.');
+          return;
+        }
+      } catch {
+        setError('Could not reach the Freighter wallet. Unlock the extension and try again.');
+        return;
+      }
+
+      await runTx(async () => {
+        // Sign through the wallet: Freighter provides the public key and signs
+        // the built transaction, so `execute_rebalance` runs against the user's
+        // real account instead of a mock placeholder.
+        const signer = createFreighterSigner(activeNetwork);
+        const result = await rebalancerClient.executeRebalance(signer, proposal);
+        await loadData();
+        return {
+          hash: result.hash,
+          success: result.success,
+          error: result.error
+        };
+      });
     });
   };
 
@@ -165,6 +182,9 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
         <CardTitle className="flex items-center gap-2">
           <ArrowRightLeft className="h-6 w-6" />
           Rebalance Engine
+          <Badge variant={activeNetwork === 'mainnet' ? 'danger' : 'outline'}>
+            {activeNetwork === 'mainnet' ? 'Mainnet' : 'Testnet'}
+          </Badge>
         </CardTitle>
       </CardHeader>
       
@@ -442,6 +462,15 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
           </div>
         )}
       </CardContent>
+
+      <NetworkSwitchPrompt
+        open={isPromptOpen}
+        actionLabel={pendingAction?.label ?? ''}
+        onCancel={cancelNetworkSwitch}
+        onConfirm={() => confirmNetworkSwitch()}
+        switching={isSwitching}
+        error={switchError}
+      />
     </Card>
   );
 };
