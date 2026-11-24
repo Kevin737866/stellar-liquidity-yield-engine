@@ -18,6 +18,7 @@ import { DEFAULT_TOKEN_DECIMALS } from '../../sdk/src/governance';
 import { useGovernance } from '../hooks/useGovernance';
 import { describeNetworkConfig } from '../config/network';
 import ProposalList from './ProposalList';
+import ParticipationSummary from './ParticipationSummary';
 import VotingPanel from './VotingPanel';
 import StakingModal from './StakingModal';
 
@@ -132,6 +133,13 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
         )}
         {actionError && <p className="text-red-700">{actionError}</p>}
       </div>
+
+      {/* Per-account analytics (issue #481) */}
+      <ParticipationSummary
+        account={currentUser || undefined}
+        proposals={proposals}
+        tokenDecimals={tokenDecimals}
+      />
 
       {/* Proposals */}
       <ProposalList

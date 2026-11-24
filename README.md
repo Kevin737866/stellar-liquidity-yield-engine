@@ -443,7 +443,9 @@ CHECK_INTERVAL=300000
 `sdk/src/governance.ts`. There is no working contract to deploy for those
 yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). The SDK history reader
 does support bounded pages via `getProposalPage()` / `paginateProposals()` for
-keepers and UI callers.
+keepers and UI callers, plus a per-account reporting surface through
+`getParticipationSummary()` / `summarizeGovernanceParticipation()` (proposals
+voted, for/against split, voting power used and participation rate).
 
 ### Contract Deployment
 
