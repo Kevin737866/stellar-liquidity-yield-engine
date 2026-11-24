@@ -20,12 +20,20 @@ All seven contracts (`StellarLiquidityYieldEngine`, `YieldVault`,
 | --- | --- | --- |
 | `upgrade(admin, new_wasm_hash)` | stored admin | Replace the contract's code. Takes effect on the **next** invocation. |
 | `migrate(admin)` | stored admin | Adopt this build's storage schema version. Returns the version it replaced. Idempotent. |
+| `is_initialized()` | none | Safely return whether initialization has recorded an admin. Returns `false` before initialization. |
 | `get_storage_version()` | none | The schema version recorded in the contract's storage. |
 
 `upgrade` publishes a `contract_upgraded` event carrying `(admin, wasm_hash)`;
 `migrate` publishes `contract_migrated` with `(admin, from, to)`. An off-chain
 monitor should watch `contract_upgraded` — it is the only signal that the code
 behind an address changed without the address changing.
+
+`is_initialized()` does not require authorization and does not panic when the
+contract has not been initialized. It checks for the admin key written by each
+initializer, so existing initialized deployments remain detectable even if
+they predate storage-version tracking. Calls against an invalid or unavailable
+contract address still fail at the RPC/host layer; the query only makes the
+uninitialized state explicit for a deployed contract.
 
 `initialize` records `upgrade::STORAGE_VERSION` (`src/upgrade.rs`), so a freshly
 deployed contract starts at the version of the code that deployed it. A
@@ -118,8 +126,9 @@ migrate the stored `streams` vector rather than decode it as-is.
 
 ## Testing an upgrade
 
-- `tests/upgrade_tests.rs` covers all seven contracts: version recorded at
-  `initialize`, `migrate` reporting and idempotency, non-admin rejection of both
+- `tests/upgrade_tests.rs` covers all seven contracts: initialization status
+  before and after `initialize`, version recorded at `initialize`, `migrate`
+  reporting and idempotency, non-admin rejection of both
   admin entrypoints, rejection of an unknown wasm hash, and a real code swap
   through the host deployer (the contract's entrypoints stop existing, while the
   address and storage survive).

@@ -169,9 +169,14 @@ impl StellarLiquidityYieldEngine {
 
     /// Replace this contract's code in place, keeping its address and storage
     /// (admin only). See [crate::upgrade] and `docs/UPGRADING.md`.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdkz:BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
+    }
+
+    /// Return whether this contract has been initialized.
+    pub fn is_initialized(env: Env) -> bool {
+        crate::upgrade::is_initialized(&env)
     }
 
     /// Storage schema version of this contract's stored data.
