@@ -9,6 +9,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
+import { EmptyState } from '@/components/EmptyState';
 
 const yieldTrend = [
   { day: 'Mon', apy: 6.8 },
@@ -20,7 +21,26 @@ const yieldTrend = [
   { day: 'Sun', apy: 8.4 },
 ];
 
-const positions = [
+export interface Position {
+  pool: string;
+  allocation: number;
+  apy: number;
+  status: 'healthy' | 'watch';
+  value: string;
+}
+
+export interface DashboardProps {
+  /** Positions to list. Sample data is shown when omitted; an empty array shows the empty state. */
+  positions?: Position[];
+  /** When set, the positions panel shows a failure state (role="alert") instead of the table. */
+  positionsError?: string | null;
+  /** While true, no empty state is shown (data may still arrive); a loading note is shown instead. */
+  positionsLoading?: boolean;
+  /** Optional. When provided, the failure state shows a retry button that calls it. */
+  onRetryPositions?: () => void;
+}
+
+const samplePositions: Position[] = [
   {
     pool: 'XLM / USDC',
     allocation: 45,
@@ -56,7 +76,12 @@ const riskMetrics = [
   { label: 'Liquidity depth', value: 78, detail: 'Strong' },
 ];
 
-export function Dashboard() {
+export function Dashboard({
+  positions = samplePositions,
+  positionsError,
+  positionsLoading = false,
+  onRetryPositions,
+}: DashboardProps = {}) {
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white" role="banner">
@@ -174,7 +199,26 @@ export function Dashboard() {
               Positions
             </h2>
             <Card className="mt-3">
-              <CardContent className="p-0">
+              <CardContent className={positionsError || positionsLoading || positions.length === 0 ? 'p-4' : 'p-0'}>
+                {positionsError ? (
+                  <EmptyState
+                    variant="error"
+                    title="Failed to load positions"
+                    description={positionsError}
+                    actionLabel="Retry loading positions"
+                    onAction={onRetryPositions}
+                  />
+                ) : positionsLoading && positions.length === 0 ? (
+                  <p role="status" aria-busy="true" className="text-sm text-slate-600">
+                    Loading positions...
+                  </p>
+                ) : positions.length === 0 ? (
+                  <EmptyState
+                    icon={<Wallet className="h-8 w-8" />}
+                    title="No active positions"
+                    description="Deposit into a vault to see your liquidity positions here."
+                  />
+                ) : (
                 <table className="w-full text-left text-sm">
                   <caption className="sr-only">
                     Active liquidity positions with allocation, APY, status, and value.
@@ -216,6 +260,7 @@ export function Dashboard() {
                     ))}
                   </tbody>
                 </table>
+                )}
               </CardContent>
             </Card>
           </section>

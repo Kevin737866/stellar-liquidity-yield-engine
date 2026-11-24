@@ -24,6 +24,7 @@ import {
     FaChevronUp,
     FaInfoCircle
 } from 'react-icons/fa';
+import { EmptyState } from './EmptyState';
 
 // Types
 interface RewardStream {
@@ -105,11 +106,16 @@ const CHART_CONFIG = {
     cornerRadius: 4
 };
 
+const NO_REWARDS: PendingReward[] = [];
+
 export const RewardDashboard: React.FC<RewardDashboardProps> = ({
     user,
     vault,
     rewardStreams,
-    pendingRewards,
+    pendingRewards = NO_REWARDS,
+    rewardsError,
+    rewardsLoading = false,
+    onRetryRewards,
     onClaim,
     onSetAutoCompound,
     onClaimAndConvert,
@@ -458,8 +464,8 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                 </ResponsiveContainer>
                             ) : (
                                 <div className="no-rewards">
-                                    <FaCoins />
-                                    <p>No pending rewards</p>
+                                    <FaCoins aria-hidden="true" />
+                                    <p>{rewardsLoading ? 'Loading rewards...' : 'No pending rewards'}</p>
                                 </div>
                             )}
                         </div>
@@ -492,12 +498,35 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                 <button
                                     className="btn btn-small"
                                     onClick={handleSelectAll}
+                                    disabled={pendingRewards.length === 0}
                                 >
                                     {selectedStreams.size === pendingRewards.length ? 'Deselect All' : 'Select All'}
                                 </button>
                             </div>
                         </div>
 
+                        {rewardsError ? (
+                            <EmptyState
+                                variant="error"
+                                className="reward-empty-state"
+                                icon={<FaExclamationTriangle />}
+                                title="Failed to load rewards"
+                                description={rewardsError}
+                                actionLabel="Retry loading rewards"
+                                onAction={onRetryRewards}
+                            />
+                        ) : rewardsLoading && pendingRewards.length === 0 ? (
+                            <p role="status" aria-busy="true" className="reward-empty-state">
+                                Loading rewards...
+                            </p>
+                        ) : pendingRewards.length === 0 ? (
+                            <EmptyState
+                                className="reward-empty-state"
+                                icon={<FaCoins />}
+                                title="No pending rewards"
+                                description="Rewards from your vault positions will appear here once they accrue."
+                            />
+                        ) : (
                         <div className="rewards-table-container">
                             <table className="rewards-table">
                                 <thead>
@@ -571,6 +600,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                 </tbody>
                             </table>
                         </div>
+                        )}
 
                         {/* Claim Actions */}
                         {selectedStreams.size > 0 && (
@@ -1022,6 +1052,18 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
           justify-content: center;
         }
 
+        .reward-empty-state {
+          background: rgba(255, 255, 255, 0.05);
+          border-color: #333;
+          color: #9ca3af;
+        }
+
+        .reward-empty-state[role="alert"] {
+          background: rgba(220, 38, 38, 0.2);
+          border-color: #dc2626;
+          color: #fca5a5;
+        }
+
         .no-rewards {
           text-align: center;
           color: #888;
@@ -1447,7 +1489,14 @@ export interface RewardDashboardProps {
     user: string;
     vault: string;
     rewardStreams: RewardStream[];
-    pendingRewards: PendingReward[];
+    /** Treated as empty when omitted. */
+    pendingRewards?: PendingReward[];
+    /** When set, the rewards list shows a failure state (role="alert") instead of the table. */
+    rewardsError?: string | null;
+    /** While true, no empty state is shown (data may still arrive); a loading note is shown instead. */
+    rewardsLoading?: boolean;
+    /** Optional. When provided, the failure state shows a retry button that calls it. */
+    onRetryRewards?: () => void;
     onClaim: (streamIndices: number[]) => Promise<ClaimResult>;
     onSetAutoCompound: (token: string, percentage: number, enabled: boolean) => Promise<void>;
     onClaimAndConvert: (streamIndices: number[], targetToken: string) => Promise<ClaimResult>;

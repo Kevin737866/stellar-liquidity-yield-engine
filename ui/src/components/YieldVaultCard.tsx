@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { EmptyState } from '@/components/EmptyState';
 import {
   TrendingUp,
   TrendingDown,
@@ -162,6 +163,23 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
     });
   };
 
+  if (!vaultAddress?.trim()) {
+    return (
+      <Card className="w-full max-w-2xl mx-auto">
+        <CardHeader>
+          <CardTitle className="text-xl font-bold text-gray-800">Yield Vault</CardTitle>
+        </CardHeader>
+        <CardContent className="p-6">
+          <EmptyState
+            icon={<Wallet className="h-8 w-8" />}
+            title="No vault selected"
+            description="Choose a vault to see its metrics and your position."
+          />
+        </CardContent>
+      </Card>
+    );
+  }
+
   if (loading && !vaultInfo && !vaultMetrics) {
     return <YieldVaultSkeleton />;
   }
@@ -173,28 +191,14 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
           <CardTitle className="text-xl font-bold text-gray-800">Yield Vault</CardTitle>
         </CardHeader>
         <CardContent className="p-6">
-          <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-red-800" role="alert">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="h-5 w-5 text-red-600 flex-shrink-0 mt-0.5" />
-              <div className="flex-1">
-                <h4 className="font-semibold text-red-900">Failed to load vault information</h4>
-                <p className="text-sm text-red-700 mt-1">
-                  {error || hookError || 'Unable to connect to the Soroban RPC network to retrieve vault state.'}
-                </p>
-                <div className="mt-4">
-                  <Button
-                    onClick={() => refresh()}
-                    size="sm"
-                    variant="outline"
-                    className="border-red-300 text-red-800 hover:bg-red-100 gap-1.5"
-                  >
-                    <RefreshCw className="h-4 w-4" />
-                    Retry
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </div>
+          <EmptyState
+            variant="error"
+            icon={<AlertTriangle className="h-8 w-8" />}
+            title="Failed to load vault information"
+            description={error || hookError || 'Unable to connect to the Soroban RPC network to retrieve vault state.'}
+            actionLabel="Retry"
+            onAction={() => refresh()}
+          />
         </CardContent>
       </Card>
     );
