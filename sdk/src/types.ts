@@ -285,10 +285,22 @@ export interface TransactionResult {
 }
 
 // Configuration Types
+export type NetworkContractName =
+  | "yieldEngine"
+  | "rewardDistributor"
+  | "rebalanceEngine"
+  | "strategyRegistry";
+
+export type RpcTimeoutOverrides = Partial<
+  Record<NetworkContractName, number>
+>;
+
 export interface NetworkConfig {
   network: "testnet" | "mainnet" | "futurenet";
   horizonUrl: string;
   sorobanRpcUrl: string;
+  /** Per-contract Soroban RPC request timeouts, in milliseconds. */
+  rpcTimeoutMs?: RpcTimeoutOverrides;
   /**
    * Deployed contract IDs (C-strings) for the engine contracts.
    *
@@ -326,7 +338,7 @@ export interface TransactionSigner {
 
 export type VaultClientConfig = Pick<
   NetworkConfig,
-  "network" | "sorobanRpcUrl"
+  "network" | "sorobanRpcUrl" | "rpcTimeoutMs"
 >;
 
 export interface VaultConfig {

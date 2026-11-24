@@ -445,6 +445,33 @@ yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). The SDK history reader
 does support bounded pages via `getProposalPage()` / `paginateProposals()` for
 keepers and UI callers.
 
+### Per-contract RPC timeouts
+
+SDK clients accept optional `rpcTimeoutMs` overrides on `NetworkConfig`. Each
+value is an integer from 1 through 2,147,483,647 milliseconds and applies to
+each RPC request made by that contract's client. Omitting an override
+preserves the existing Stellar SDK behavior.
+
+```typescript
+const config = {
+  ...TESTNET_CONFIG,
+  rpcTimeoutMs: {
+    yieldEngine: 15_000,
+    rebalanceEngine: 45_000,
+    strategyRegistry: 10_000,
+  },
+};
+
+const vaultClient = new VaultClient(vaultAddress, config);
+const rebalancerClient = new RebalancerClient(config);
+```
+
+Supported keys are `yieldEngine`, `rewardDistributor`, `rebalanceEngine`, and
+`strategyRegistry`. `VaultClient`, `RebalancerClient`, and
+`StrategyRegistryClient` use their corresponding override. A timeout rejects
+the RPC call and is surfaced through the client’s normal error behavior; it
+does not cancel a request already sent to the RPC server.
+
 ### Contract Deployment
 
 There is no `scripts/` directory in this repo — deploy with the `soroban`
