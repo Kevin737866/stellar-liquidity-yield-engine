@@ -2329,10 +2329,9 @@ mod tests {
             apy: 2_500,
         };
 
-        env.storage().instance().set(
-            &Symbol::new(&env, "harvest_snapshot"),
-            &snapshot,
-        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "harvest_snapshot"), &snapshot);
         env.storage().instance().set(
             &Symbol::new(&env, "metrics"),
             &VaultMetrics {

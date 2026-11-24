@@ -1,4 +1,4 @@
-#`!no_std]
+#![no_std]
 // Contract entrypoints are part of the on-chain ABI: their argument lists are
 // fixed by the deployed interface (the SDK, UI and tests call them
 // positionally), so bundling parameters into structs just to satisfy the lint
@@ -72,14 +72,12 @@ mod oracle_registry;
 mod rebalance_engine;
 #[cfg(feature = "reward-distributor")]
 mod reward_distributor;
+#[cfg(feature = "risk-engine")]
+mod risk_engine;
 #[cfg(feature = "strategy-registry")]
 mod strategy_registry;
 #[cfg(any(feature = "yield-vault", feature = "rebalance-engine"))]
 mod yield_vault;
-#[cfg(feature = "oracle-registry")]
-mod oracle_registry;
-#[cfg(feature = "risk-engine")]
-mod risk_engine;
 
 #[cfg(feature = "actuary")]
 pub use actuary::*;
@@ -91,14 +89,12 @@ pub use oracle_registry::*;
 pub use rebalance_engine::*;
 #[cfg(feature = "reward-distributor")]
 pub use reward_distributor::*;
+#[cfg(feature = "risk-engine")]
+pub use risk_engine::*;
 #[cfg(feature = "strategy-registry")]
 pub use strategy_registry::*;
 #[cfg(feature = "yield-vault")]
 pub use yield_vault::*;
-#[cfg(feature = "oracle-registry")]
-pub use oracle_registry::*;
-#[cfg(feature = "risk-engine")]
-pub use risk_engine::*;
 
 #[cfg(feature = "engine")]
 #[contract]
@@ -110,9 +106,14 @@ pub struct StellarLiquidityYieldEngine;
 /// monotonically increasing list and neither the entries nor their order can be
 /// rewritten. The length is a separate counter that only ever grows.
 #[cfg(feature = "engine")]
-const EMERGENCY_HISTORY_LEN: Symbol = Symbol::new(&Env::empty(), "emergency_history_len");
+fn emergency_history_len_key(env: &Env) -> Symbol {
+    Symbol::new(env, "emergency_history_len")
+}
+
 #[cfg(feature = "engine")]
-const EMERGENCY_HISTORY_ITEM: Symbol = Symbol::new(&Env::empty(), "emergency_history_item");
+fn emergency_history_item_key(env: &Env) -> Symbol {
+    Symbol::new(env, "emergency_history_item")
+}
 
 /// A single append-only emergency audit record.
 ///
@@ -121,8 +122,7 @@ const EMERGENCY_HISTORY_ITEM: Symbol = Symbol::new(&Env::empty(), "emergency_his
 /// order can be verified independently of storage iteration ordering.
 #[cfg(feature = "engine")]
 #[contracttype]
-#[derive(Clone, Debug, Eq)
-#[derive(PartialEq, PartialOrder)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EmergencyRecord {
     /// Zero-based position in the append-only history.
     pub index: u32,
@@ -135,7 +135,7 @@ pub struct EmergencyRecord {
 }
 
 #[cfg(feature = "engine")]
-#[contractimpls]
+#[contractimpl]
 impl StellarLiquidityYieldEngine {
     /// Initialize the yield engine with admin and registry
     pub fn initialize(
@@ -169,7 +169,7 @@ impl StellarLiquidityYieldEngine {
 
     /// Replace this contract's code in place, keeping its address and storage
     /// (admin only). See [crate::upgrade] and `docs/UPGRADING.md`.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdkz:BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
     }
@@ -327,25 +327,25 @@ impl StellarLiquidityYieldEngine {
     pub fn get_emergency_history_len(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&EMERGENCY_HISTORY_LEN)
+            .get(&emergency_history_len_key(&env))
             .unwrap_or(0)
     }
 
-    /// Return the emergency audit record at `zindex` in append order.
+    /// Return the emergency audit record at `index` in append order.
     ///
     /// Panics if the index is out of bounds.
     pub fn get_emergency_record(env: Env, index: u32) -> EmergencyRecord {
         let len: u32 = env
             .storage()
             .instance()
-            .get(&EMERGENCY_HISTORY_LEN)
+            .get(&emergency_history_len_key(&env))
             .unwrap_or(0);
         if index >= len {
-            panic("emergency history index out of bounds")
+            panic!("emergency history index out of bounds")
         }
         env.storage()
             .persistent()
-            .get(&(EMERGENCY_HISTORY_ITEM, index))
+            .get(&(emergency_history_item_key(&env), index))
             .unwrap()
     }
 
@@ -357,7 +357,7 @@ impl StellarLiquidityYieldEngine {
         let index: u32 = env
             .storage()
             .instance()
-            .get(&EMERGENCY_HISTORY_LEN)
+            .get(&emergency_history_len_key(env))
             .unwrap_or(0);
 
         let record = EmergencyRecord {
@@ -370,17 +370,15 @@ impl StellarLiquidityYieldEngine {
         // Write the immutable entry at the next free slot.
         env.storage()
             .persistent()
-            .set(&(EMERGENCY_HISTORY_ITEM, index), &record);
+            .set(&(emergency_history_item_key(env), index), &record);
 
         // Advance the append-only counter only after the entry is stored.
         env.storage()
             .instance()
-            .set(&EMERGENCY_HISTORY_LEN, &(index + 1));
+            .set(&emergency_history_len_key(env), &(index + 1));
 
-        env.events().publish(
-            ("emergency_record_appended",),
-            (index, action, admin),
-        );
+        env.events()
+            .publish(("emergency_record_appended",), (index, action, admin));
     }
 
     /// Panic unless the contract is unpaused.

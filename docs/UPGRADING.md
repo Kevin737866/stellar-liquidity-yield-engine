@@ -43,18 +43,21 @@ cargo build --target wasm32-unknown-unknown --release \
   --no-default-features --features yield-vault
 NEW_WASM=target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
 
-# 1. Optional but recommended: keep the wasm you are replacing, so you can roll
-#    back. `soroban` is now spelled `stellar` in newer CLIs.
-soroban contract install --wasm "$NEW_WASM" --source deployer --network testnet
-# -> prints the NEW_WASM_HASH
+# 1. Install the wasm you are replacing and record its hash for rollback, then
+#    install the new wasm. `soroban` is now spelled `stellar` in newer CLIs.
+OLD_WASM=path/to/previous/yield_vault.wasm
+OLD_WASM_HASH=$(soroban contract install --wasm "$OLD_WASM" --source deployer --network testnet)
+NEW_WASM_HASH=$(soroban contract install --wasm "$NEW_WASM" --source deployer --network testnet)
 
-# 2. Swap the code (admin only).
+# 2. Run the rollback readiness check below BEFORE swapping the code.
+
+# 3. Swap the code (admin only).
 soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- \
   upgrade \
   --admin "$(soroban keys address deployer)" \
   --new_wasm_hash "$NEW_WASM_HASH"
 
-# 3. Confirm the new code is live and, if it bumped the schema version, migrate.
+# 4. Confirm the new code is live and, if it bumped the schema version, migrate.
 soroban contract invoke --id "$CONTRACT_ID" --network testnet -- get_storage_version
 soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- \
   migrate --admin "$(soroban keys address deployer)"
@@ -62,14 +65,55 @@ soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet 
 
 The upgrade is atomic: if the hash was never uploaded, or the admin check
 fails, the call reverts and the old code stays live (covered by
-`tests/upgrade_tests.rs::test_upgrade_of_unknown_wasm_hash_fails_without_touching_the_contract`).
+`tests/upgrade_tests.rs::test_rollback_readiness_requires_an_installed_previous_wasm_hash`).
+
+### Rollback readiness check
+
+Run this gate **before step 3**. If any check fails, stop and use Flow B; do not
+swap code you cannot reverse.
+
+| Check | Why it matters |
+| --- | --- |
+| `OLD_WASM_HASH` is set and is a 64-character hex hash | The previous wasm must already be installed; an uninstalled hash makes a rollback impossible. |
+| `OLD_WASM_HASH != NEW_WASM_HASH` | Otherwise the "rollback" would just re-apply the code you are installing. |
+| Current `get_storage_version()` is recorded | Rollback must restore a build that understands that layout. |
+| `MIGRATION_REVERSIBLE=true` when this release changes stored shapes | `migrate` only moves forward; old code cannot decode newer data on its own. |
+| The deployer key matches the contract's stored admin | Both the upgrade and the rollback are admin-only calls. |
+
+```bash
+CURRENT_VERSION=$(soroban contract invoke --id "$CONTRACT_ID" \
+  --network testnet -- get_storage_version)
+ADMIN_ADDRESS=$(soroban keys address deployer)
+MIGRATION_REVERSIBLE=true   # set to false if migrate changed stored shapes
+
+check_rollback_ready() {
+  local failed=0
+  [[ "$OLD_WASM_HASH" =~ ^[0-9a-fA-F]{64}$ ]] || {
+    echo "OLD_WASM_HASH is missing or malformed"; failed=1; }
+  [[ "$OLD_WASM_HASH" != "$NEW_WASM_HASH" ]] || {
+    echo "rollback hash equals the new hash"; failed=1; }
+  [[ "$CURRENT_VERSION" =~ ^[0-9]+$ ]] || {
+    echo "current storage version could not be read"; failed=1; }
+  [[ "$MIGRATION_REVERSIBLE" == "true" ]] || {
+    echo "migration is not reversible; use Flow B"; failed=1; }
+  [[ -n "$ADMIN_ADDRESS" ]] || {
+    echo "admin key is not available"; failed=1; }
+  return "$failed"
+}
+
+check_rollback_ready || { echo "Rollback readiness check failed; do not upgrade"; exit 1; }
+```
+
+After a rollback, verify the `contract_upgraded` event carries `OLD_WASM_HASH`
+and that `get_storage_version()` still matches the value recorded above.
 
 ### Rolling back
 
-Upload the previous build and point `upgrade` at it. A rollback is only safe if
-the migration was reversible: `migrate` moves stored data forward, and the older
-code may not understand what the newer `migrate` wrote. Prefer forward fixes,
-and record what each `migrate` changed.
+Point `upgrade` at `OLD_WASM_HASH` from the readiness check. The rollback is
+admin-only and takes effect on the next invocation, exactly like the upgrade.
+It is only safe if the migration was reversible: `migrate` moves stored data
+forward, and the older code may not understand what the newer `migrate` wrote.
+Prefer forward fixes, and record what each `migrate` changed.
 
 ## Flow B — re-deploy plus migrate (incompatible or urgent)
 
@@ -123,6 +167,10 @@ migrate the stored `streams` vector rather than decode it as-is.
   admin entrypoints, rejection of an unknown wasm hash, and a real code swap
   through the host deployer (the contract's entrypoints stop existing, while the
   address and storage survive).
+- The same file also covers rollback readiness (an uninstalled rollback hash is
+  rejected) and persistent-storage expiration boundaries: an entry is readable
+  on its last live ledger, archived on the next one, and `extend_ttl` moves that
+  boundary without losing the value.
 - Run `cargo test --test upgrade_tests`.
 - The test builds the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
