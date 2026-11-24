@@ -98,6 +98,44 @@ const checkpoint = await listener.persist();
 `persistOnPoll: false` disables the automatic write when the caller manages
 persistence itself.
 
+### Observing and inspecting ledger checkpoints
+
+The listener exposes its ledger checkpoints directly, even when no
+`CheckpointStore` is configured:
+
+```ts
+// Subscribe to checkpoints emitted after every successful poll
+const onCheckpoint = (cp: KeeperCheckpoint) => {
+  console.log(`checkpoint advanced to ledger ${cp.nextLedger}`);
+};
+listener.onCheckpoint(onCheckpoint);
+
+// Inspect the most recently produced checkpoint (or null before the first poll/restore/persist)
+const last = listener.lastCheckpoint;
+
+// Build a fresh checkpoint snapshot of the listener's current position on demand
+const snapshot = listener.getCheckpoint();
+
+// Or read the checkpoint directly from pollWithResult()
+const result = await listener.pollWithResult();
+if (result.status === 'ok') {
+  console.log(result.checkpoint.nextLedger, result.checkpoint.lastProcessedLedger);
+}
+
+listener.offCheckpoint(onCheckpoint);
+```
+
+- `onCheckpoint` handlers are called after every successful poll and are not
+  invoked when a poll fails (`error` or `cursor_expired`).
+- If a checkpoint handler throws, the error is forwarded to `onError` (or
+  logged to `console.error`) without interrupting other handlers or the poll
+  loop.
+- Returned and emitted checkpoints are defensive copies, so mutating them
+  cannot corrupt internal listener state.
+- When a poll returns a full page (`events.length === pageSize`) with event
+  IDs, the checkpoint's `metadata.eventCursor` carries the mid-ledger paging
+  token until the backlog is drained.
+
 ## No gaps while catching up
 
 After a long outage the RPC can have far more events than one page
