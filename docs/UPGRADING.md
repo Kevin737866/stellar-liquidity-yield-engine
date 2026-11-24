@@ -2,6 +2,10 @@
 
 Issue: [#120](https://github.com/Kevin737866/stellar-liquidity-yield-engine/issues/120).
 
+An upgrade also has TTL obligations: see
+[Soroban TTL renewal operations](SOROBAN_TTL_RENEWAL.md) for the required
+instance, Wasm and persistent-entry renewal steps.
+
 Soroban has **no proxy pattern**. There is no separate "implementation"
 contract to point at, and a contract's address is fixed for life. What the host
 does provide is
@@ -47,6 +51,12 @@ NEW_WASM=target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wa
 #    back. `soroban` is now spelled `stellar` in newer CLIs.
 soroban contract install --wasm "$NEW_WASM" --source deployer --network testnet
 # -> prints the NEW_WASM_HASH
+
+# 1a. Renew the instance and the code hash being installed before the swap.
+stellar contract extend --source deployer --network testnet \
+  --id "$CONTRACT_ID" --ledgers-to-extend 535679
+stellar contract extend --source deployer --network testnet \
+  --wasm-hash "$NEW_WASM_HASH" --ledgers-to-extend 535679
 
 # 2. Swap the code (admin only).
 soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- \
@@ -116,13 +126,25 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## TTL renewal
+
+`upgrade` does not renew ledger entries. Before swapping code, renew the
+contract instance and the new Wasm hash; after `migrate`, renew them again and
+any persistent keys the migration touched. A new deployment needs the same
+check for every persistent entry written into the new address. The commands,
+threshold semantics and archival failure modes are in
+[Soroban TTL renewal operations](SOROBAN_TTL_RENEWAL.md).
+
 ## Testing an upgrade
 
+- `tests/ttl_renewal_tests.rs` covers TTL creation, the strict extension
+  threshold, `extend_to` as a floor, recovery of an archived persistent entry,
+  and TTL preservation across an upgrade.
 - `tests/upgrade_tests.rs` covers all seven contracts: version recorded at
   `initialize`, `migrate` reporting and idempotency, non-admin rejection of both
   admin entrypoints, rejection of an unknown wasm hash, and a real code swap
   through the host deployer (the contract's entrypoints stop existing, while the
   address and storage survive).
-- Run `cargo test --test upgrade_tests`.
-- The test builds the "replacement" wasm bytes in-process
+- Run `cargo test --test upgrade_tests --test ttl_renewal_tests`.
+- The tests build the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.

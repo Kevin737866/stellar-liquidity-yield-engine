@@ -509,6 +509,9 @@ Save the resulting `CONTRACT_ID` into your `.env` file as
 need, such as `STRATEGY_REGISTRY_ADDRESS` and `REWARD_DISTRIBUTOR_ADDRESS`,
 before running step 4 above).
 
+Deployed instances, Wasm code and persistent entries also need periodic TTL
+renewal; see [Soroban TTL renewal operations](docs/SOROBAN_TTL_RENEWAL.md).
+
 ## 🧪 Testing
 
 For reproducible randomized swap path and quote tests, including seed replay
