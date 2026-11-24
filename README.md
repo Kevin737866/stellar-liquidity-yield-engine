@@ -318,10 +318,25 @@ model and `examples/restart-during-outage.ts` for a runnable demonstration:
 npx ts-node examples/restart-during-outage.ts
 ```
 
+### Dry-run mode
+Run the auto-rebalancer end-to-end without submitting anything:
+
+```typescript
+const keeper = new AutoRebalancer(config);
+const results = await keeper.run({ dryRun: true });
+// results[0].wouldExecute === true means a live run would have rebalanced
+```
+
+A dry run does not consume the cooldown slot or write a checkpoint, so the live
+run can still happen afterwards. Set `config.dryRun` to make it the default.
+See [docs/KEEPER_DRY_RUN.md](docs/KEEPER_DRY_RUN.md).
+
 ## 🎛️ React Components
 
 ### YieldVaultCard
-Complete vault interface with deposit/withdraw functionality:
+Complete vault interface with deposit/withdraw functionality. Deposits pass
+through a review step that shows the vault, network, signer, token amounts, fee
+and minimum shares before anything is signed.
 
 ```tsx
 import { YieldVaultCard } from '@/components/YieldVaultCard';
@@ -443,7 +458,9 @@ CHECK_INTERVAL=300000
 `sdk/src/governance.ts`. There is no working contract to deploy for those
 yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). The SDK history reader
 does support bounded pages via `getProposalPage()` / `paginateProposals()` for
-keepers and UI callers.
+keepers and UI callers, and `previewParameterChange()` previews a parameter
+proposal with the live and proposed values before it is created — see
+[docs/GOVERNANCE_ACTION_PREVIEW.md](docs/GOVERNANCE_ACTION_PREVIEW.md).
 
 ### Contract Deployment
 

@@ -348,3 +348,116 @@ describe('AutoRebalancer durable state', () => {
     expect(scanner.findOpportunities).not.toHaveBeenCalled();
   });
 });
+
+// Issue #484: dry-run mode for keeper strategy execution.
+describe('AutoRebalancer dry-run mode', () => {
+  /** An opportunity with a complete cost estimate, so it passes every gate. */
+  function profitableOpportunity(): Opportunity {
+    return opportunity({
+      round_trip_cost: BigInt(10),
+      gross_profit: BigInt(5_000),
+      investment_amount: BigInt(1_000_000_000),
+      net_profit: BigInt(4_990),
+    });
+  }
+
+  function scannerWithOpportunity(): ArbitrageScanner {
+    return {
+      findOpportunities: async () => [profitableOpportunity()],
+    } as unknown as ArbitrageScanner;
+  }
+
+  function executorStub() {
+    const executeArbitrage = jest.fn(async () => ({
+      success: true,
+      transactionHash: 'deadbeef',
+    }));
+    const simulateRebalance = jest.fn(async () => ({
+      totalCost: BigInt(10),
+      netProfit: BigInt(4_990),
+      profitable: true,
+      costEstimateAvailable: true,
+    }));
+    return {
+      executor: { executeArbitrage, simulateRebalance } as unknown as ArbitrageExecutor,
+      executeArbitrage,
+      simulateRebalance,
+    };
+  }
+
+  it('evaluates the opportunity and submits nothing', async () => {
+    const { executor, executeArbitrage, simulateRebalance } = executorStub();
+    const keeper = new AutoRebalancer(config(), {
+      scanner: scannerWithOpportunity(),
+      executor,
+    });
+
+    const results = await keeper.run({ dryRun: true });
+
+    expect(simulateRebalance).toHaveBeenCalledTimes(1);
+    expect(executeArbitrage).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      dryRun: true,
+      wouldExecute: true,
+      success: false,
+      opportunity: { pool_id: 'POOL-B' },
+    });
+    expect(results[0].message).toMatch(/dry run/i);
+    // The preview still reports the net profit the live run would have earned.
+    expect(results[0].profit).toBeGreaterThan(BigInt(0));
+  });
+
+  it('leaves the cooldown and durable state untouched so a live run still executes', async () => {
+    const store = new MemoryCheckpointStore();
+    const { executor, executeArbitrage } = executorStub();
+    const keeper = new AutoRebalancer(
+      baseConfig({ cooldownHours: 24, stateStore: store }),
+      { scanner: scannerWithOpportunity(), executor },
+    );
+
+    const dryResults = await keeper.run({ dryRun: true });
+
+    expect(dryResults[0].wouldExecute).toBe(true);
+    expect(keeper.getState().lastExecutionTime).toBe(0);
+    expect(await store.load()).toBeNull();
+
+    const liveResults = await keeper.run();
+
+    expect(executeArbitrage).toHaveBeenCalledTimes(1);
+    expect(liveResults[0].success).toBe(true);
+    expect(liveResults[0].dryRun).toBeUndefined();
+    expect(keeper.getState().lastExecutionTime).toBeGreaterThan(0);
+  });
+
+  it('honours the keeper-level dryRun default without a per-run flag', async () => {
+    const { executor, executeArbitrage } = executorStub();
+    const keeper = new AutoRebalancer(baseConfig({ dryRun: true }), {
+      scanner: scannerWithOpportunity(),
+      executor,
+    });
+
+    const results = await keeper.run();
+
+    expect(executeArbitrage).not.toHaveBeenCalled();
+    expect(results[0].dryRun).toBe(true);
+    expect(results[0].wouldExecute).toBe(true);
+  });
+
+  it('tags decision-gate results as dry runs without claiming execution', async () => {
+    const { executor, executeArbitrage } = executorStub();
+    const keeper = new AutoRebalancer(config(), {
+      scanner: { findOpportunities: async () => [] } as unknown as ArbitrageScanner,
+      executor,
+    });
+
+    const results = await keeper.run({ dryRun: true });
+
+    expect(executeArbitrage).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0].dryRun).toBe(true);
+    expect(results[0].success).toBe(false);
+    expect(results[0].wouldExecute).toBeUndefined();
+    expect(results[0].message).toMatch(/no profitable opportunities/i);
+  });
+});

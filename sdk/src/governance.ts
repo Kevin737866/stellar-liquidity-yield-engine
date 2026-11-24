@@ -216,6 +216,70 @@ export interface ProtocolParameters {
   insuranceReserveTarget: number;
 }
 
+/** Protocol parameters that governance proposals can change. */
+export type GovernableParameter =
+  | 'performance_fee'
+  | 'withdrawal_fee'
+  | 'rebalance_threshold'
+  | 'insurance_reserve_target';
+
+/** Inclusive range the governance contract accepts for a parameter. */
+export interface ParameterBounds {
+  min: number;
+  max: number;
+}
+
+/**
+ * Ranges enforced on-chain by `src/governance.rs`, in basis points. A preview
+ * rejects values outside these before a proposal is ever built.
+ */
+export const GOVERNANCE_PARAMETER_BOUNDS: Record<GovernableParameter, ParameterBounds> = {
+  performance_fee: { min: 500, max: 1500 }, // 5% – 15%
+  withdrawal_fee: { min: 10, max: 100 }, // 0.1% – 1%
+  rebalance_threshold: { min: 100, max: 500 }, // 1% – 5%
+  insurance_reserve_target: { min: 10000, max: 20000 }, // 100% – 200%
+};
+
+/** Field on {@link ProtocolParameters} that a governable parameter maps to. */
+const PARAMETER_FIELDS: Record<GovernableParameter, keyof ProtocolParameters> = {
+  performance_fee: 'performanceFee',
+  withdrawal_fee: 'withdrawalFee',
+  rebalance_threshold: 'rebalanceThreshold',
+  insurance_reserve_target: 'insuranceReserveTarget',
+};
+
+/**
+ * Read-only preview of a governance parameter change, including the value the
+ * change would replace.
+ */
+export interface GovernanceParameterPreview {
+  action: 'set_protocol_parameter';
+  parameter: GovernableParameter;
+  /** Value currently stored on chain, in basis points. */
+  currentValue: number;
+  /** Value the proposal would set, in basis points. */
+  proposedValue: number;
+  /** `proposedValue - currentValue`, in basis points. */
+  delta: number;
+  /** `delta` as a percentage of the current value (`null` when it is 0). */
+  percentChange: number | null;
+  /** False when the proposal would be a no-op. */
+  changed: boolean;
+  /** False when the proposed value is not a valid on-chain value. */
+  inBounds: boolean;
+  /** Reasons the change cannot be proposed. Empty when it is valid. */
+  errors: string[];
+  /** Non-blocking notes, e.g. a no-op change. */
+  warnings: string[];
+  /** Exact call data the proposal would execute. */
+  callData: CallData[];
+  /** Proposal description used by {@link GovernanceSDK.proposeParameterChange}. */
+  description: string;
+  currentFormatted: string;
+  proposedFormatted: string;
+  deltaFormatted: string;
+}
+
 // ===== SDK Client Class =====
 
 /**
@@ -1093,10 +1157,84 @@ export class GovernanceSDK {
   }
 
   /**
+   * Preview a protocol parameter change before it becomes a proposal.
+   *
+   * Reads the live value, validates the requested value against the range the
+   * governance contract enforces, and returns the exact `CallData` and
+   * description the proposal would carry. Invalid input is reported in
+   * `errors` rather than thrown, so a UI can show the problem next to the
+   * input; only a failed on-chain read rejects.
+   */
+  async previewParameterChange(
+    parameter: GovernableParameter,
+    newValue: number
+  ): Promise<GovernanceParameterPreview> {
+    const bounds = GOVERNANCE_PARAMETER_BOUNDS[parameter];
+    if (!bounds) {
+      throw new Error(
+        `Unknown protocol parameter '${parameter}'. Expected one of: ${Object.keys(
+          GOVERNANCE_PARAMETER_BOUNDS
+        ).join(', ')}`
+      );
+    }
+
+    const parameters = await this.getProtocolParameters();
+    const currentValue = parameters[PARAMETER_FIELDS[parameter]];
+
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const integer = Number.isInteger(newValue);
+    const inBounds = integer && newValue >= bounds.min && newValue <= bounds.max;
+
+    if (!integer) {
+      errors.push(`${parameter} must be a whole number of basis points, got ${newValue}`);
+    } else if (!inBounds) {
+      errors.push(
+        `${parameter} must be between ${formatBasisPoints(bounds.min)} and ` +
+          `${formatBasisPoints(bounds.max)} (${bounds.min}–${bounds.max} basis points), got ${newValue}`
+      );
+    }
+
+    const changed = newValue !== currentValue;
+    if (!changed) {
+      warnings.push(
+        `${parameter} is already ${formatBasisPoints(currentValue)}; this proposal would change nothing.`
+      );
+    }
+
+    const delta = newValue - currentValue;
+    const percentChange = currentValue === 0 ? null : (delta / currentValue) * 100;
+
+    return {
+      action: 'set_protocol_parameter',
+      parameter,
+      currentValue,
+      proposedValue: newValue,
+      delta,
+      percentChange,
+      changed,
+      inBounds,
+      errors,
+      warnings,
+      callData: [
+        {
+          contractAddress: this.governanceContract,
+          functionName: `set_${parameter}`,
+          args: [newValue],
+        },
+      ],
+      description: `Change ${parameter} to ${newValue}`,
+      currentFormatted: formatBasisPoints(currentValue),
+      proposedFormatted: formatBasisPoints(newValue),
+      deltaFormatted: `${delta >= 0 ? '+' : ''}${formatBasisPoints(delta)}`,
+    };
+  }
+
+  /**
    * Create proposal to change protocol parameter
    */
   async proposeParameterChange(
-    parameter: 'performance_fee' | 'withdrawal_fee' | 'rebalance_threshold' | 'insurance_reserve_target',
+    parameter: GovernableParameter,
     newValue: number
   ): Promise<Transaction> {
     const callData: CallData[] = [{
