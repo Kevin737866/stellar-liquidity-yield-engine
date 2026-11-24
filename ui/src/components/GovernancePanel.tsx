@@ -16,14 +16,18 @@ import React, { useState } from 'react';
 import type { GovernanceProposal } from '../../sdk/src/governance';
 import { DEFAULT_TOKEN_DECIMALS } from '../../sdk/src/governance';
 import { useGovernance } from '../hooks/useGovernance';
-import { describeNetworkConfig } from '../config/network';
+import { useMainnetActionGuard, type NetworkChangeHandler } from '../hooks/useMainnetActionGuard';
+import { describeNetworkConfig, getNetwork, type UiNetwork } from '../config/network';
+import { NetworkSwitchPrompt } from './NetworkSwitchPrompt';
 import ProposalList from './ProposalList';
 import VotingPanel from './VotingPanel';
 import StakingModal from './StakingModal';
 
 interface GovernancePanelProps {
   /** Overrides the network from the environment. */
-  network?: 'testnet' | 'mainnet';
+  network?: UiNetwork;
+  /** Applies the network switch after the user confirms a Mainnet action. */
+  onNetworkChange?: NetworkChangeHandler;
   /** Decimals of the governance token (7 for a Stellar Asset Contract token). */
   tokenDecimals?: number;
 }
@@ -43,9 +47,11 @@ const hasVotedIn = (voters: unknown, address: string): boolean => {
 
 export const GovernancePanel: React.FC<GovernancePanelProps> = ({
   network,
+  onNetworkChange,
   tokenDecimals = DEFAULT_TOKEN_DECIMALS,
 }) => {
-  const governance = useGovernance({ network });
+  const activeNetwork = network ?? getNetwork();
+  const governance = useGovernance({ network: activeNetwork });
   const {
     proposals,
     totalSupply,
@@ -69,6 +75,15 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
   const [selectedProposal, setSelectedProposal] = useState<GovernanceProposal | null>(null);
   const [isStakingOpen, setIsStakingOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const {
+    pendingAction,
+    isPromptOpen,
+    isSwitching,
+    switchError,
+    requestAction,
+    cancel: cancelNetworkSwitch,
+    confirm: confirmNetworkSwitch,
+  } = useMainnetActionGuard({ network: activeNetwork, onNetworkChange });
 
   const currentUser = walletAddress ?? '';
 
@@ -91,17 +106,21 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
     : null;
 
   /** Run a contract write and surface its failure next to the component. */
-  const runAction = async (action: () => Promise<{ success: boolean; error?: string }>) => {
-    setActionError(null);
-    const result = await action();
-    if (!result.success) {
-      setActionError(result.error ?? 'Transaction failed');
-      return;
-    }
-    await refresh();
-  };
+  const runAction = (
+    label: string,
+    action: () => Promise<{ success: boolean; error?: string }>
+  ): Promise<void> =>
+    requestAction(label, async () => {
+      setActionError(null);
+      const result = await action();
+      if (!result.success) {
+        setActionError(result.error ?? 'Transaction failed');
+        return;
+      }
+      await refresh();
+    });
 
-  const diagnostic = describeNetworkConfig(network);
+  const diagnostic = describeNetworkConfig(activeNetwork);
 
   return (
     <div className="space-y-6">
@@ -154,7 +173,7 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
           votedFor={votedFor}
           tokenDecimals={tokenDecimals}
           onVote={(support, amount, reason) =>
-            runAction(() => castVote(activeProposal.id, support, amount, reason))
+            runAction('vote', () => castVote(activeProposal.id, support, amount, reason))
           }
           onClose={() => setSelectedProposal(null)}
           loading={loading}
@@ -175,11 +194,20 @@ export const GovernancePanel: React.FC<GovernancePanelProps> = ({
         tokenBalance={tokenBalance}
         tokenDecimals={tokenDecimals}
         lockInfo={lockInfo ?? undefined}
-        onCreateLock={(amount, duration) => runAction(() => createLock(amount, duration))}
-        onIncreaseLock={(amount) => runAction(() => increaseLock(amount))}
-        onExtendLock={(newDuration) => runAction(() => extendLock(newDuration))}
-        onWithdraw={() => runAction(() => withdrawFromEscrow())}
+        onCreateLock={(amount, duration) => runAction('create a lock', () => createLock(amount, duration))}
+        onIncreaseLock={(amount) => runAction('increase a lock', () => increaseLock(amount))}
+        onExtendLock={(newDuration) => runAction('extend a lock', () => extendLock(newDuration))}
+        onWithdraw={() => runAction('withdraw from escrow', () => withdrawFromEscrow())}
         loading={loading}
+      />
+
+      <NetworkSwitchPrompt
+        open={isPromptOpen}
+        actionLabel={pendingAction?.label ?? ''}
+        onCancel={cancelNetworkSwitch}
+        onConfirm={() => confirmNetworkSwitch()}
+        switching={isSwitching}
+        error={switchError}
       />
     </div>
   );

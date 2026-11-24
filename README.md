@@ -342,6 +342,25 @@ import { RebalancePanel } from '@/components/RebalancePanel';
 <RebalancePanel network="testnet" />
 ```
 
+### Mainnet action prompt
+When a transaction surface targets `mainnet`, an accessible dialog asks the
+user to confirm the network switch before anything is signed. Cancelling
+submits nothing; testnet actions keep their original immediate behavior.
+Components accept an optional `onNetworkChange` callback to apply the switch
+in the host app:
+
+```tsx
+<YieldVaultCard
+  vaultAddress="VAULT_ADDRESS"
+  userAddress="USER_ADDRESS"
+  network="mainnet"
+  onNetworkChange={(network) => walletContext.switchNetwork(network)}
+/>
+```
+
+See [docs/MAINNET_ACTION_PROMPT.md](docs/MAINNET_ACTION_PROMPT.md) for the
+normal, boundary, and failure behavior plus operator setup steps.
+
 ### ImpermanentLossChart
 Interactive IL analysis and visualization:
 

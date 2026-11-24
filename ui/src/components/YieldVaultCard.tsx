@@ -19,12 +19,18 @@ import {
 } from 'lucide-react';
 import { useYieldVault } from '../hooks/useYieldVault';
 import { useTxStatus } from '../hooks/useTxStatus';
+import { useMainnetActionGuard, type NetworkChangeHandler } from '../hooks/useMainnetActionGuard';
+import { getNetwork, type UiNetwork } from '../config/network';
+import { NetworkSwitchPrompt } from './NetworkSwitchPrompt';
 import { shortenAddress } from '../lib/freighter';
 
 interface YieldVaultCardProps {
   vaultAddress: string;
   userAddress: string;
-  network?: 'testnet' | 'mainnet';
+  /** Falls back to NEXT_PUBLIC_STELLAR_NETWORK (testnet when unset). */
+  network?: UiNetwork;
+  /** Applies the network switch after the user confirms a Mainnet action. */
+  onNetworkChange?: NetworkChangeHandler;
   keypair?: any;
   signer?: any;
 }
@@ -80,7 +86,8 @@ export const YieldVaultSkeleton: React.FC = () => {
 export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   vaultAddress,
   userAddress,
-  network = 'testnet',
+  network,
+  onNetworkChange,
   keypair,
   signer,
 }) => {
@@ -90,6 +97,16 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   const [error, setError] = useState<string | null>(null);
 
   const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
+  const activeNetwork = network ?? getNetwork();
+  const {
+    pendingAction,
+    isPromptOpen,
+    isSwitching,
+    switchError,
+    requestAction,
+    cancel: cancelNetworkSwitch,
+    confirm: confirmNetworkSwitch,
+  } = useMainnetActionGuard({ network: activeNetwork, onNetworkChange });
 
   const {
     vaultInfo,
@@ -114,7 +131,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   } = useYieldVault({
     vaultAddress,
     userAddress,
-    network,
+    network: activeNetwork,
     autoRefresh: true,
     refreshInterval: 30000,
     keypair,
@@ -127,38 +144,43 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
     }
   }, [hookError]);
 
-  const handleDeposit = async () => {
+  // Mainnet writes are held until the user confirms the network switch;
+  // testnet writes keep the original immediate-submit behaviour.
+  const handleDeposit = () => {
     if (!depositAmountA || !depositAmountB) return;
-    resetTx();
-    setError(null);
-
-    await runTx(async () => {
-      const result = await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
-      setDepositAmountA('');
-      setDepositAmountB('');
-      return result;
+    requestAction('deposit', async () => {
+      resetTx();
+      setError(null);
+      await runTx(async () => {
+        const result = await deposit(BigInt(depositAmountA), BigInt(depositAmountB), 0n);
+        setDepositAmountA('');
+        setDepositAmountB('');
+        return result;
+      });
     });
   };
 
-  const handleWithdraw = async () => {
+  const handleWithdraw = () => {
     if (!withdrawShares) return;
-    resetTx();
-    setError(null);
-
-    await runTx(async () => {
-      const result = await withdraw(BigInt(withdrawShares), 0n, 0n);
-      setWithdrawShares('');
-      return result;
+    requestAction('withdraw', async () => {
+      resetTx();
+      setError(null);
+      await runTx(async () => {
+        const result = await withdraw(BigInt(withdrawShares), 0n, 0n);
+        setWithdrawShares('');
+        return result;
+      });
     });
   };
 
-  const handleHarvest = async () => {
-    resetTx();
-    setError(null);
-
-    await runTx(async () => {
-      const result = await harvest();
-      return result;
+  const handleHarvest = () => {
+    requestAction('harvest rewards', async () => {
+      resetTx();
+      setError(null);
+      await runTx(async () => {
+        const result = await harvest();
+        return result;
+      });
     });
   };
 
@@ -228,6 +250,12 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 Active
               </Badge>
             )}
+            <Badge
+              variant={activeNetwork === 'mainnet' ? 'danger' : 'outline'}
+              className="flex items-center gap-1"
+            >
+              {activeNetwork === 'mainnet' ? 'Mainnet' : 'Testnet'}
+            </Badge>
           </div>
         </div>
 
@@ -548,6 +576,15 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
           </div>
         )}
       </CardContent>
+
+      <NetworkSwitchPrompt
+        open={isPromptOpen}
+        actionLabel={pendingAction?.label ?? ''}
+        onCancel={cancelNetworkSwitch}
+        onConfirm={() => confirmNetworkSwitch()}
+        switching={isSwitching}
+        error={switchError}
+      />
     </Card>
   );
 };
