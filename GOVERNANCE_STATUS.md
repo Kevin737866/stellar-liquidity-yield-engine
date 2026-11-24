@@ -76,3 +76,14 @@ economic logic wired in:
 Until then, treat every function in `src/governance.rs` and the
 corresponding `sdk/src/governance.ts` client as **design scaffolding, not a
 working feature**.
+
+## SDK proposal history pagination
+
+The read-only SDK surface does expose a bounded view of whatever proposal
+history a configured deployment returns: `paginateProposals(proposals, page,
+pageSize)` and `GovernanceSDK.getProposalPage(page, pageSize, maxProposals?)`.
+Pages are 1-based, default to 25 proposals, cap the page size at 100, and clamp
+out-of-range pages to the last page. `getAllProposals()` and all state-filter
+helpers keep their existing signatures, so this is additive. It does not make
+the on-chain governance module deployable; it only keeps the history reader
+usable for keepers and UI callers without probing unbounded IDs per page.

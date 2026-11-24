@@ -65,8 +65,16 @@ export type {
 // Operators running multiple contracts can restrict a single listener to only
 // the contract addresses they care about, eliminating noise from unrelated
 // on-chain activity.
-export { ContractEventListener, DEFAULT_PAGE_SIZE } from './eventListener';
+export {
+  ContractEventListener,
+  DEFAULT_PAGE_SIZE,
+  CursorExpiredError,
+  isCursorExpiredError,
+  classifyCursorExpiration,
+} from './eventListener';
 export type {
+  PollResult,
+  CursorExpirationReason,
   ListenerConfig,
   EventSource,
   GetEventsFilter,
@@ -104,7 +112,11 @@ export type { CheckpointStore, KeeperCheckpoint } from './persistence';
 export {
   GovernanceSDK,
   ProposalState,
+  GOVERNANCE_PAGE_SIZE,
+  GOVERNANCE_MAX_PAGE_SIZE,
+  paginateProposals,
   type GovernanceProposal,
+  type ProposalPage,
   type CallData,
   type LockInfo,
   type FeeDistribution,
