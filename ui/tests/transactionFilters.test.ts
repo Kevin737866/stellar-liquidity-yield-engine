@@ -56,6 +56,17 @@ describe('filterTransactions', () => {
     expect(result.map((record) => record.id)).toEqual(['1', '2']);
   });
 
+  it('filters by an inclusive date range', () => {
+    const result = filterTransactions(records, {
+      status: ALL_TRANSACTIONS,
+      operation: ALL_TRANSACTIONS,
+      startDate: '2026-01-02',
+      endDate: '2026-01-03',
+    });
+
+    expect(result.map((record) => record.id)).toEqual(['2', '3']);
+  });
+
   it('combines status and operation filters', () => {
     const result = filterTransactions(records, {
       status: 'failed',
@@ -91,5 +102,12 @@ describe('filter guards and state', () => {
     expect(hasActiveFilters(DEFAULT_TRANSACTION_FILTERS)).toBe(false);
     expect(hasActiveFilters({ status: 'failed', operation: ALL_TRANSACTIONS })).toBe(true);
     expect(hasActiveFilters({ status: ALL_TRANSACTIONS, operation: 'claim' })).toBe(true);
+    expect(
+      hasActiveFilters({
+        status: ALL_TRANSACTIONS,
+        operation: ALL_TRANSACTIONS,
+        startDate: '2026-01-01',
+      }),
+    ).toBe(true);
   });
 });

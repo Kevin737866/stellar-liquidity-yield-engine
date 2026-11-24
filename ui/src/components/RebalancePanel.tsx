@@ -37,6 +37,7 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retryProposal, setRetryProposal] = useState<RebalanceProposal | null>(null);
 
   const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
 
@@ -94,6 +95,7 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
   };
 
   const handleExecuteRebalance = async (proposal: RebalanceProposal) => {
+    setRetryProposal(proposal);
     resetTx();
     setError(null);
 
@@ -146,6 +148,9 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
   };
 
   const isTxInFlight = txStatus === 'submitting' || txStatus === 'pending';
+  const retryLastRebalance = () => {
+    if (retryProposal) void handleExecuteRebalance(retryProposal);
+  };
 
   if (loading) {
     return (
@@ -417,6 +422,16 @@ export const RebalancePanel: React.FC<RebalancePanelProps> = ({
                 <span className="ml-auto font-mono text-xs truncate max-w-[160px]" title={txHash}>
                   {txHash.slice(0, 8)}â€¦{txHash.slice(-6)}
                 </span>
+              )}
+
+              {txStatus === 'failed' && !txHash && retryProposal && (
+                <button
+                  onClick={retryLastRebalance}
+                  className="ml-auto underline text-xs opacity-70 hover:opacity-100"
+                  type="button"
+                >
+                  Retry rebalance
+                </button>
               )}
 
               {(txStatus === 'confirmed' || txStatus === 'failed') && (

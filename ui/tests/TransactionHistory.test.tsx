@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TransactionHistory } from '@/components/TransactionHistory';
 import { sampleTransactions } from '@/lib/sampleTransactions';
@@ -36,6 +36,19 @@ describe('TransactionHistory filters', () => {
     expect(
       screen.getByText(/no transactions match the selected filters/i),
     ).toBeInTheDocument();
+  });
+
+  it('filters by start and end dates and clears them with the other filters', async () => {
+    const user = userEvent.setup();
+    render(<TransactionHistory transactions={sampleTransactions} />);
+
+    fireEvent.change(screen.getByLabelText('Start date'), { target: { value: '2026-11-20' } });
+    fireEvent.change(screen.getByLabelText('End date'), { target: { value: '2026-11-20' } });
+
+    expect(screen.getByText(/showing 2 of 5 transactions/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /clear filters/i }));
+    expect(screen.getByText(/showing 5 of 5 transactions/i)).toBeInTheDocument();
   });
 
   it('clears filters when the clear button is used', async () => {

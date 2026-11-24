@@ -87,6 +87,9 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   const [depositAmountA, setDepositAmountA] = useState('');
   const [depositAmountB, setDepositAmountB] = useState('');
   const [withdrawShares, setWithdrawShares] = useState('');
+  const [lastTxAction, setLastTxAction] = useState<'deposit' | 'withdraw' | 'harvest' | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
 
   const { txStatus, txHash, txError, runTx, resetTx } = useTxStatus();
@@ -129,6 +132,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
 
   const handleDeposit = async () => {
     if (!depositAmountA || !depositAmountB) return;
+    setLastTxAction('deposit');
     resetTx();
     setError(null);
 
@@ -142,6 +146,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
 
   const handleWithdraw = async () => {
     if (!withdrawShares) return;
+    setLastTxAction('withdraw');
     resetTx();
     setError(null);
 
@@ -153,6 +158,7 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
   };
 
   const handleHarvest = async () => {
+    setLastTxAction('harvest');
     resetTx();
     setError(null);
 
@@ -160,6 +166,12 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
       const result = await harvest();
       return result;
     });
+  };
+
+  const retryLastTransaction = () => {
+    if (lastTxAction === 'deposit') void handleDeposit();
+    if (lastTxAction === 'withdraw') void handleWithdraw();
+    if (lastTxAction === 'harvest') void handleHarvest();
   };
 
   if (loading && !vaultInfo && !vaultMetrics) {
@@ -533,6 +545,18 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 <span className="ml-auto font-mono text-xs truncate max-w-[160px]" title={txHash}>
                   {txHash.slice(0, 8)}…{txHash.slice(-6)}
                 </span>
+              )}
+
+              {txStatus === 'failed' && !txHash && lastTxAction && (
+                <Button
+                  onClick={retryLastTransaction}
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto h-7"
+                  type="button"
+                >
+                  Retry transaction
+                </Button>
               )}
 
               {(txStatus === 'confirmed' || txStatus === 'failed') && (
