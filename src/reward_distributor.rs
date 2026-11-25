@@ -864,7 +864,10 @@ impl MultiRewardDistributor {
     /// Aligned with swap_router::update_default_slippage for consistency
     pub fn update_default_slippage(env: Env, admin: Address, new_slippage_bps: u32) {
         Self::require_admin(&env, admin.clone());
-        require!(new_slippage_bps <= BPS_DIVISOR as u32, RewardError::InvalidPercentage);
+        require!(
+            new_slippage_bps <= BPS_DIVISOR as u32,
+            RewardError::InvalidPercentage
+        );
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "default_slippage"), &new_slippage_bps);

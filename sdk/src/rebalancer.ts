@@ -35,7 +35,14 @@ export class RebalancerClient extends EventEmitter {
 
   constructor(networkConfig: NetworkConfig, knownPoolIds: string[] = []) {
     super();
-    this.contract = new Contract(networkConfig.contracts.rebalanceEngine);
+    const rebalanceEngineId = networkConfig.contracts?.rebalanceEngine?.trim();
+    if (!rebalanceEngineId) {
+      throw new RebalanceError(
+        "Missing rebalanceEngine contract ID in network configuration",
+        "MISSING_CONTRACT_ID",
+      );
+    }
+    this.contract = new Contract(rebalanceEngineId);
     this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
     this.networkConfig = networkConfig;
     this.knownPoolIds = new Set(knownPoolIds);

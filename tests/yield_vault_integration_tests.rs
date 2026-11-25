@@ -5,6 +5,7 @@ mod testutils;
 
 fn main() {}
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutils::{fund_vault_user, setup_yield_vault};
@@ -35,7 +36,9 @@ mod tests {
         // Withdraw half of shares
         let withdraw_amount = shares / 2;
         let (withdrawn_a, withdrawn_b) =
-            fixture.vault.withdraw(&fixture.user, &withdraw_amount, &0, &0);
+            fixture
+                .vault
+                .withdraw(&fixture.user, &withdraw_amount, &0, &0);
 
         // Verify withdrawn amounts are proportional
         assert!(withdrawn_a > 0, "Should withdraw token A");
@@ -73,8 +76,7 @@ mod tests {
         let shares = fixture.vault.deposit(&fixture.user, &5000, &5000, &0);
 
         // Withdraw all shares
-        let (withdrawn_a, withdrawn_b) =
-            fixture.vault.withdraw(&fixture.user, &shares, &0, &0);
+        let (withdrawn_a, withdrawn_b) = fixture.vault.withdraw(&fixture.user, &shares, &0, &0);
 
         // With 2.5% fee (25 bps), user should receive 97.5% of proportional amount
         // Proportional: 5000 each

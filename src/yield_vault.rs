@@ -10,6 +10,23 @@ use soroban_sdk::{
 /// bytes is enough for a short incident reference.
 pub const MAX_EMERGENCY_REASON_LENGTH: u32 = 256;
 
+/// Canonical Stellar zero-key Ed25519 account address (32 zero bytes).
+/// Rejected as a placeholder `pool_id` during vault initialization.
+pub const ZERO_ACCOUNT_ADDRESS: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+/// Canonical Stellar zero-hash contract address (32 zero bytes).
+/// Rejected as a placeholder `pool_id` during vault initialization.
+pub const ZERO_CONTRACT_ADDRESS: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+
+/// Maximum allowed vault performance fee rate in basis points (20% = 2,000 bps).
+pub const MAX_FEE_RATE_BPS: u32 = 2_000;
+
+/// Maximum allowed harvest fee in basis points (10% = 1,000 bps).
+pub const MAX_HARVEST_FEE_BPS: u32 = 1_000;
+
+/// Maximum allowed withdrawal fee in basis points (5% = 500 bps).
+pub const MAX_WITHDRAWAL_FEE_BPS: u32 = 500;
+
 /// Typed failures of the yield vault.
 ///
 /// Anticipated invalid inputs - a caller who is not the admin, a deposit below
@@ -63,6 +80,16 @@ pub enum VaultError {
     EmergencyReasonRequired = 20,
     /// The emergency action reason exceeds [`MAX_EMERGENCY_REASON_LENGTH`].
     EmergencyReasonTooLong = 21,
+    /// `token_a` and `token_b` must refer to distinct token contracts.
+    IdenticalTokens = 22,
+    /// `pool_id` cannot be a zero/placeholder Stellar address.
+    InvalidPoolId = 23,
+    /// `fee_rate` exceeds [`MAX_FEE_RATE_BPS`].
+    FeeRateTooHigh = 24,
+    /// `harvest_fee` exceeds [`MAX_HARVEST_FEE_BPS`].
+    HarvestFeeTooHigh = 25,
+    /// `withdrawal_fee` exceeds [`MAX_WITHDRAWAL_FEE_BPS`].
+    WithdrawalFeeTooHigh = 26,
 }
 
 #[contracttype]
@@ -198,7 +225,14 @@ pub const DEFAULT_HARVEST_INTERVAL: u64 = 0;
 #[cfg(feature = "yield-vault")]
 #[contractimpl]
 impl YieldVault {
-    /// Initialize a new yield vault
+    /// Initialize a new yield vault.
+    ///
+    /// # Invariants
+    /// - `token_a` and `token_b` must be distinct addresses (`VaultError::IdenticalTokens`).
+    /// - `pool_id` must not be a zero/placeholder address (`VaultError::InvalidPoolId`).
+    /// - Fee parameters (in basis points) must stay within their documented ceilings:
+    ///   `fee_rate <= MAX_FEE_RATE_BPS`, `harvest_fee <= MAX_HARVEST_FEE_BPS`,
+    ///   and `withdrawal_fee <= MAX_WITHDRAWAL_FEE_BPS`.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -212,6 +246,26 @@ impl YieldVault {
         withdrawal_fee: u32,
         treasury: Address,
     ) {
+        if token_a == token_b {
+            panic_with_error!(&env, VaultError::IdenticalTokens);
+        }
+
+        let zero_account = Address::from_string(&String::from_str(&env, ZERO_ACCOUNT_ADDRESS));
+        let zero_contract = Address::from_string(&String::from_str(&env, ZERO_CONTRACT_ADDRESS));
+        if pool_id == zero_account || pool_id == zero_contract {
+            panic_with_error!(&env, VaultError::InvalidPoolId);
+        }
+
+        if fee_rate > MAX_FEE_RATE_BPS {
+            panic_with_error!(&env, VaultError::FeeRateTooHigh);
+        }
+        if harvest_fee > MAX_HARVEST_FEE_BPS {
+            panic_with_error!(&env, VaultError::HarvestFeeTooHigh);
+        }
+        if withdrawal_fee > MAX_WITHDRAWAL_FEE_BPS {
+            panic_with_error!(&env, VaultError::WithdrawalFeeTooHigh);
+        }
+
         let vault_info = VaultInfo {
             name: name.clone(),
             token_a: token_a.clone(),
@@ -2495,10 +2549,9 @@ mod tests {
             apy: 2_500,
         };
 
-        env.storage().instance().set(
-            &Symbol::new(&env, "harvest_snapshot"),
-            &snapshot,
-        );
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "harvest_snapshot"), &snapshot);
         env.storage().instance().set(
             &Symbol::new(&env, "metrics"),
             &VaultMetrics {
@@ -2722,5 +2775,148 @@ mod tests {
             <(Address, String)>::try_from_val(&env, &last_event_data(&env)).unwrap();
         assert_eq!(published_reason, reason);
         assert!(env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    // ==================== Initialization validation (#219 / #220 / #221) ====================
+
+    #[test]
+    fn test_initialize_rejects_identical_tokens() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let vault_id = env.register(YieldVault, ());
+        let vault = YieldVaultClient::new(&env, &vault_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        let pool_id = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let err = vault
+            .try_initialize(
+                &admin,
+                &Symbol::new(&env, "DupTokenVault"),
+                &token,
+                &token,
+                &pool_id,
+                &1,
+                &100,
+                &50,
+                &25,
+                &treasury,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, VaultError::IdenticalTokens.into());
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_placeholder_pool_ids() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        for zero_str in [ZERO_ACCOUNT_ADDRESS, ZERO_CONTRACT_ADDRESS] {
+            let vault_id = env.register(YieldVault, ());
+            let vault = YieldVaultClient::new(&env, &vault_id);
+            let zero_pool = Address::from_string(&String::from_str(&env, zero_str));
+
+            let err = vault
+                .try_initialize(
+                    &admin,
+                    &Symbol::new(&env, "ZeroPoolVault"),
+                    &token_a,
+                    &token_b,
+                    &zero_pool,
+                    &1,
+                    &100,
+                    &50,
+                    &25,
+                    &treasury,
+                )
+                .unwrap_err()
+                .unwrap();
+            assert_eq!(err, VaultError::InvalidPoolId.into());
+        }
+    }
+
+    #[test]
+    fn test_initialize_accepts_fees_at_documented_ceilings() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let vault_id = env.register(YieldVault, ());
+        let vault = YieldVaultClient::new(&env, &vault_id);
+
+        let admin = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+        let pool_id = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        vault.initialize(
+            &admin,
+            &Symbol::new(&env, "MaxFeeVault"),
+            &token_a,
+            &token_b,
+            &pool_id,
+            &1,
+            &MAX_FEE_RATE_BPS,
+            &MAX_HARVEST_FEE_BPS,
+            &MAX_WITHDRAWAL_FEE_BPS,
+            &treasury,
+        );
+
+        let info = vault.get_vault_info();
+        assert_eq!(info.fee_rate, MAX_FEE_RATE_BPS);
+        assert_eq!(info.harvest_fee, MAX_HARVEST_FEE_BPS);
+        assert_eq!(info.withdrawal_fee, MAX_WITHDRAWAL_FEE_BPS);
+    }
+
+    #[test]
+    fn test_initialize_rejects_fees_above_documented_ceilings() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+        let pool_id = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let cases = [
+            (MAX_FEE_RATE_BPS + 1, 0, 0, VaultError::FeeRateTooHigh),
+            (0, MAX_HARVEST_FEE_BPS + 1, 0, VaultError::HarvestFeeTooHigh),
+            (
+                0,
+                0,
+                MAX_WITHDRAWAL_FEE_BPS + 1,
+                VaultError::WithdrawalFeeTooHigh,
+            ),
+        ];
+
+        for (fee_rate, harvest_fee, withdrawal_fee, expected_err) in cases {
+            let vault_id = env.register(YieldVault, ());
+            let vault = YieldVaultClient::new(&env, &vault_id);
+
+            let err = vault
+                .try_initialize(
+                    &admin,
+                    &Symbol::new(&env, "BadFeeVault"),
+                    &token_a,
+                    &token_b,
+                    &pool_id,
+                    &1,
+                    &fee_rate,
+                    &harvest_fee,
+                    &withdrawal_fee,
+                    &treasury,
+                )
+                .unwrap_err()
+                .unwrap();
+            assert_eq!(err, expected_err.into());
+        }
     }
 }
