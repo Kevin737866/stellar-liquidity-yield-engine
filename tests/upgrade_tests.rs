@@ -437,3 +437,176 @@ fn test_rollback_readiness_requires_an_installed_previous_wasm_hash() {
     assert_eq!(published_admin, admin);
     assert_eq!(published_hash, installed_rollback_hash);
 }
+
+// ==================== Schema version reporting (Issue #499) ====================
+
+/// `get_storage_version` returns 0 for a contract whose storage_version key
+/// was explicitly removed — simulating a contract deployed before the
+/// schema-version feature was added.
+#[test]
+fn test_get_storage_version_returns_zero_when_key_absent() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, _, contract_id) = with_vault(&env);
+
+    remove_storage_version(&env, &contract_id);
+
+    assert_eq!(
+        client.get_storage_version(),
+        0,
+        "absent key must read as 0 (pre-tracking sentinel)"
+    );
+}
+
+/// After removing the version key (simulating an old deployment) and calling
+/// `migrate`, `get_storage_version` must equal the current STORAGE_VERSION.
+#[test]
+fn test_get_storage_version_reflects_migrate_result() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, contract_id) = with_engine(&env);
+
+    remove_storage_version(&env, &contract_id);
+    assert_eq!(client.get_storage_version(), 0);
+
+    client.migrate(&admin);
+    assert_eq!(client.get_storage_version(), EXPECTED_VERSION);
+}
+
+/// `get_storage_version` requires no auth — it is a read-only reporting
+/// entrypoint that any observer (operator, monitoring bot) must be able to
+/// call without a signing key.
+#[test]
+fn test_get_storage_version_requires_no_auth() {
+    let env = Env::default();
+    // Do NOT call mock_all_auths so we confirm the entrypoint needs no auth.
+    let (client, _, _) = with_registry(&env);
+
+    // This would panic if the host demanded auth for this call.
+    let version = client.get_storage_version();
+    assert_eq!(version, EXPECTED_VERSION);
+}
+
+/// Every contract reports the same STORAGE_VERSION constant value — there is
+/// no per-contract version drift at build time.
+#[test]
+fn test_all_contracts_report_same_storage_version() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let versions = [
+        with_engine(&env).0.get_storage_version(),
+        with_vault(&env).0.get_storage_version(),
+        with_distributor(&env).0.get_storage_version(),
+        with_rebalance_engine(&env).0.get_storage_version(),
+        with_registry(&env).0.get_storage_version(),
+        with_insurance(&env).0.get_storage_version(),
+        with_actuary(&env).0.get_storage_version(),
+    ];
+
+    for v in &versions {
+        assert_eq!(
+            *v, EXPECTED_VERSION,
+            "every contract must report the same STORAGE_VERSION"
+        );
+    }
+}
+
+/// A `contract_migrated` event carries `(admin, from_version, to_version)`.
+/// Operators monitoring upgrades rely on this to reconcile which version was
+/// active before the migration and which is now live.
+#[test]
+fn test_migrate_emits_contract_migrated_event_with_version_info() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
+
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, contract_id) = with_vault(&env);
+
+    remove_storage_version(&env, &contract_id);
+
+    client.migrate(&admin);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().unwrap();
+    let topic: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(topic, Symbol::new(&env, "contract_migrated"));
+
+    let (published_admin, from_version, to_version): (Address, u32, u32) =
+        <(Address, u32, u32)>::try_from_val(&env, &data).unwrap();
+    assert_eq!(published_admin, admin);
+    assert_eq!(from_version, 0, "from_version must be the pre-migration value");
+    assert_eq!(
+        to_version, EXPECTED_VERSION,
+        "to_version must equal STORAGE_VERSION"
+    );
+}
+
+/// When `migrate` is called on an already-current contract (idempotent path),
+/// the event still fires with `from == to`. Operators should treat this as a
+/// no-op confirmation, not an error.
+#[test]
+fn test_idempotent_migrate_emits_event_with_equal_from_and_to() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
+
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, _) = with_engine(&env);
+
+    // Version is already EXPECTED_VERSION after initialize.
+    client.migrate(&admin);
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().unwrap();
+    let topic: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(topic, Symbol::new(&env, "contract_migrated"));
+
+    let (_, from_version, to_version): (Address, u32, u32) =
+        <(Address, u32, u32)>::try_from_val(&env, &data).unwrap();
+    assert_eq!(
+        from_version, EXPECTED_VERSION,
+        "idempotent migrate: from must equal EXPECTED_VERSION"
+    );
+    assert_eq!(
+        to_version, EXPECTED_VERSION,
+        "idempotent migrate: to must equal EXPECTED_VERSION"
+    );
+}
+
+/// `get_storage_version` survives a code swap: the value stored before the
+/// upgrade is preserved in instance storage and readable by an independent
+/// observer after the upgrade (before `migrate` is called).
+///
+/// This is a critical property: operators who check the version after swapping
+/// code — to decide whether a migration is needed — must see the pre-upgrade
+/// version, not `0`.
+#[test]
+fn test_storage_version_persists_across_code_swap() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, _) = with_vault(&env);
+
+    // Confirm the version is recorded before the swap.
+    assert_eq!(client.get_storage_version(), EXPECTED_VERSION);
+
+    // Swap in a no-op wasm — the entrypoints of the original code vanish, but
+    // instance storage (including storage_version) stays intact.
+    let empty_hash = env
+        .deployer()
+        .upload_contract_wasm(empty_contract_wasm(&env));
+    client.upgrade(&admin, &empty_hash);
+
+    // The original entrypoints are gone, but we can read instance storage
+    // directly to confirm the version key survived.
+    let version_key = Symbol::new(&env, "storage_version");
+    let version_after: Option<u32> = env.as_contract(&client.address, || {
+        env.storage().instance().get(&version_key)
+    });
+    assert_eq!(
+        version_after,
+        Some(EXPECTED_VERSION),
+        "storage_version must survive a code swap"
+    );
+}

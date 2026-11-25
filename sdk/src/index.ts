@@ -248,3 +248,20 @@ export {
   isContractEvent,
 } from './eventOrigin';
 export type { EventOrigin, LedgerEvent } from './eventOrigin';
+
+// Contract storage schema version reporting (Issue #499).
+// Use SchemaVersionReporter to read get_storage_version() from deployed
+// contracts and compare against KNOWN_STORAGE_VERSION to detect contracts
+// that need migration after an upgrade.
+export {
+  SchemaVersionReporter,
+  SchemaVersionError,
+  KNOWN_STORAGE_VERSION,
+  CONTRACT_KINDS,
+} from './schemaVersion';
+export type {
+  ContractKind,
+  ContractAddressMap,
+  SchemaVersionReport,
+  SchemaVersionBatchReport,
+} from './schemaVersion';

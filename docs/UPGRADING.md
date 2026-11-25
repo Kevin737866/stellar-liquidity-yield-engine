@@ -160,6 +160,65 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## Querying schema versions from the SDK (Issue #499)
+
+The TypeScript SDK exposes `SchemaVersionReporter` to read `get_storage_version()`
+from deployed contracts without submitting a transaction. It supports single-contract
+lookups, partial batches, and full seven-contract deployments.
+
+```ts
+import {
+  SchemaVersionReporter,
+  KNOWN_STORAGE_VERSION,
+} from 'stellar-liquidity-yield-engine-sdk';
+
+const reporter = new SchemaVersionReporter(
+  process.env.SOROBAN_RPC_URL!,
+  'Test SDF Network ; September 2015',
+);
+
+// --- Full deployment report ---
+const report = await reporter.fetchAll({
+  yieldEngine:       process.env.YIELD_ENGINE_CONTRACT_ID!,
+  yieldVault:        process.env.YIELD_VAULT_CONTRACT_ID!,
+  rebalanceEngine:   process.env.REBALANCE_ENGINE_CONTRACT_ID!,
+  rewardDistributor: process.env.REWARD_DISTRIBUTOR_CONTRACT_ID!,
+  strategyRegistry:  process.env.STRATEGY_REGISTRY_CONTRACT_ID!,
+  ilInsurance:       process.env.IL_INSURANCE_CONTRACT_ID!,
+  actuary:           process.env.ACTUARY_CONTRACT_ID!,
+});
+
+console.log(`Expected version: ${KNOWN_STORAGE_VERSION}`);
+for (const entry of report.entries) {
+  if (entry.error) {
+    console.error(`${entry.kind}: RPC error — ${entry.error.message}`);
+  } else if (entry.mismatch) {
+    console.warn(`${entry.kind}: ${entry.mismatchReason}`);
+  } else {
+    console.log(`${entry.kind}: ok (version ${entry.version})`);
+  }
+}
+```
+
+**Interpreting the results**
+
+| `version` | Meaning | Action |
+| --- | --- | --- |
+| equals `KNOWN_STORAGE_VERSION` | On-chain schema matches this SDK build | None required |
+| `0` | Contract predates schema-version tracking | Call `migrate(admin)` after confirming state |
+| less than `KNOWN_STORAGE_VERSION` | Upgrade applied but `migrate` not called yet | Call `migrate(admin)` |
+| greater than `KNOWN_STORAGE_VERSION` | Contract is from a newer build than this SDK | Update the SDK package |
+
+`fetchAll` validates that every contract address is non-empty before making any
+RPC calls; it throws `SchemaVersionError` with the missing role name so the
+error is actionable.  Use `fetchSome` when only a subset of contracts is
+relevant, for example checking a single vault.
+
+`SchemaVersionReporter` never submits a transaction — it uses
+`simulateTransaction` for every call, so no signing key or gas budget is needed.
+
+---
+
 ## Testing an upgrade
 
 - `tests/upgrade_tests.rs` covers all seven contracts: version recorded at
@@ -171,6 +230,14 @@ migrate the stored `streams` vector rather than decode it as-is.
   rejected) and persistent-storage expiration boundaries: an entry is readable
   on its last live ledger, archived on the next one, and `extend_ttl` moves that
   boundary without losing the value.
-- Run `cargo test --test upgrade_tests`.
-- The test builds the "replacement" wasm bytes in-process
-  (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
+- Schema version reporting tests (Issue #499) in the same file verify:
+  - `get_storage_version` returns `0` when the key is absent (pre-tracking contracts).
+  - `get_storage_version` requires no auth — any observer can call it.
+  - All seven contracts report the same `STORAGE_VERSION` constant value at build time.
+  - `contract_migrated` events carry the correct `(admin, from_version, to_version)` tuple.
+  - Idempotent `migrate` calls still emit the event with `from == to`.
+  - The `storage_version` key survives a code swap; operators can read it before deciding whether to call `migrate`.
+- SDK-side reporting is tested in `sdk/src/schemaVersion.test.ts`: version-match
+  detection, pre-tracking (`0`) and ahead-of-SDK handling, RPC error capture,
+  batch ordering, `fetchAll` address validation, and `fetchSome` partial maps.
+- Run `cargo test --test upgrade_tests` for the Rust side; `jest --testPathPattern schemaVersion` for the SDK side.
