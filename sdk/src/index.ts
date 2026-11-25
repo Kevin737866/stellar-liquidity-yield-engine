@@ -1,7 +1,25 @@
 // Main exports for the Stellar Liquidity Yield Engine SDK
 
-import { Keypair, Networks } from 'stellar-sdk';
+import { Address, Keypair } from 'stellar-sdk';
 import { GovernanceSDK, type GovernanceContracts } from './governance';
+import { VaultClient } from './vaultClient';
+import { RebalancerClient } from './rebalancer';
+import {
+  DEFAULT_NETWORK,
+  DEFAULT_NETWORK_ENDPOINTS,
+  MAINNET_CONFIG,
+  NetworkConfigError,
+  TESTNET_CONFIG,
+  contractsFromEnv,
+  getNetworkPassphrase,
+  requiredEnvContract,
+  resolveNetworkConfig,
+  selectNetworkConfig,
+  type NetworkConfigErrorCode,
+  type NetworkEndpointDefaults,
+  type OptionalNetworkConfig,
+  type SupportedNetwork,
+} from './networkConfig';
 export * from './keeperBackoff';
 export * from './types';
 export { VaultClient } from './vaultClient';
@@ -9,6 +27,22 @@ export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
 export * from './insurance';
 export * from './utils';
+export {
+  DEFAULT_NETWORK,
+  DEFAULT_NETWORK_ENDPOINTS,
+  MAINNET_CONFIG,
+  NetworkConfigError,
+  TESTNET_CONFIG,
+  contractsFromEnv,
+  getNetworkPassphrase,
+  requiredEnvContract,
+  resolveNetworkConfig,
+  selectNetworkConfig,
+  type NetworkConfigErrorCode,
+  type NetworkEndpointDefaults,
+  type OptionalNetworkConfig,
+  type SupportedNetwork,
+};
 
 // Re-export commonly used types and classes for convenience
 export {
@@ -112,7 +146,11 @@ export type { CheckpointStore, KeeperCheckpoint } from './persistence';
 export {
   GovernanceSDK,
   ProposalState,
+  GOVERNANCE_PAGE_SIZE,
+  GOVERNANCE_MAX_PAGE_SIZE,
+  paginateProposals,
   type GovernanceProposal,
+  type ProposalPage,
   type CallData,
   type LockInfo,
   type FeeDistribution,
@@ -133,60 +171,19 @@ export {
   GOVERNANCE_CONSTANTS
 } from './governance';
 
-// Required contract IDs are read from the environment rather than hardcoded,
-// since a hardcoded placeholder address is not a usable/deployed contract.
-// Set these to the real contract IDs from your deployment before using a
-// network config - see the README / examples for the full variable list.
-function requiredEnvContract(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `Missing required environment variable ${name}: set it to a real deployed contract ID before using this network config.`
-    );
-  }
-  return value;
-}
-
-function contractsFromEnv() {
-  return {
-    get yieldEngine() { return requiredEnvContract('YIELD_ENGINE_CONTRACT_ID'); },
-    get rewardDistributor() { return requiredEnvContract('REWARD_DISTRIBUTOR_CONTRACT_ID'); },
-    get rebalanceEngine() { return requiredEnvContract('REBALANCE_ENGINE_CONTRACT_ID'); },
-    get strategyRegistry() { return requiredEnvContract('STRATEGY_REGISTRY_CONTRACT_ID'); },
-    get governanceToken() { return requiredEnvContract('GOVERNANCE_TOKEN_CONTRACT_ID'); },
-    get votingEscrow() { return requiredEnvContract('VOTING_ESCROW_CONTRACT_ID'); },
-    get stakingContract() { return requiredEnvContract('STAKING_CONTRACT_ID'); },
-    get feeDistributor() { return requiredEnvContract('FEE_DISTRIBUTOR_CONTRACT_ID'); }
-  };
-}
-
-// Network configurations
-//
-// Public endpoints are only defaults: every one of them can be pointed at a
-// custom RPC via the environment, which is what `Soroban_RPC_URL` /
-// `HORIZON_URL` in `.env.example` are for. See `.emdfile` for the convention.
-export const TESTNET_CONFIG = {
-  network: 'testnet' as const,
-  horizonUrl: process.env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
-  sorobanRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
-  contracts: contractsFromEnv()
-};
-
-export const MAINNET_CONFIG = {
-  network: 'mainnet' as const,
-  horizonUrl: process.env.MAINNET_HORIZON_URL || 'https://horizon.stellar.org',
-  sorobanRpcUrl: process.env.MAINNET_SOROBAN_RPC_URL || 'https://soroban.stellar.org',
-  contracts: contractsFromEnv()
-};
-
 // Utility functions
-export function createVaultClient(vaultAddress: string, network: 'testnet' | 'mainnet' = 'testnet') {
-  const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
-  return new VaultClient(vaultAddress, config);
+export function createVaultClient(
+  vaultAddress: string | Address,
+  network: SupportedNetwork | OptionalNetworkConfig = DEFAULT_NETWORK,
+) {
+  const config = selectNetworkConfig(network);
+  return new VaultClient(vaultAddress as Address, config);
 }
 
-export function createRebalancerClient(network: 'testnet' | 'mainnet' = 'testnet') {
-  const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
+export function createRebalancerClient(
+  network: SupportedNetwork | OptionalNetworkConfig = DEFAULT_NETWORK,
+) {
+  const config = selectNetworkConfig(network);
   return new RebalancerClient(config);
 }
 
@@ -205,14 +202,21 @@ export interface CreateGovernanceClientOptions {
    * callers must pass these explicitly.
    */
   contracts?: Partial<GovernanceContracts>;
+  /**
+   * Optional Soroban RPC endpoint override. When omitted, the public default
+   * (or environment override) for the selected network is used.
+   */
+  sorobanRpcUrl?: string;
 }
 
 export function createGovernanceClient(
-  network: 'testnet' | 'mainnet' = 'testnet',
+  network: SupportedNetwork = DEFAULT_NETWORK,
   options: CreateGovernanceClientOptions = {},
 ): GovernanceSDK {
-  const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
-  const networkPassphrase = network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
+  const networkPassphrase = getNetworkPassphrase(network);
+  const config = options.sorobanRpcUrl !== undefined
+    ? resolveNetworkConfig({ network, sorobanRpcUrl: options.sorobanRpcUrl })
+    : selectNetworkConfig(network);
   return new GovernanceSDK(
     config.sorobanRpcUrl,
     networkPassphrase,

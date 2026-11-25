@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Vec as SorobanVec, Symbol, testutils::Address as _};
+use soroban_sdk::{testutils::Address as _, Address, Env, Symbol, Vec as SorobanVec};
 use stellar_liquidity_yield_engine::{RiskEngine, RiskEngineClient};
 
 fn main() {}
@@ -309,15 +309,32 @@ mod tests {
             SorobanVec::new(&env),
         );
 
-        assert!(assessment.impermanent_loss_risk <= 10000, "IL risk should be capped");
-        assert!(assessment.estimated_slippage <= 10000, "Slippage should be capped");
-        assert!(assessment.volatility_score <= 100, "Volatility score should be 0-100");
-        assert!(!assessment.circuit_breaker_triggered, "Should not trigger under normal conditions");
+        assert!(
+            assessment.impermanent_loss_risk <= 10000,
+            "IL risk should be capped"
+        );
+        assert!(
+            assessment.estimated_slippage <= 10000,
+            "Slippage should be capped"
+        );
+        assert!(
+            assessment.volatility_score <= 100,
+            "Volatility score should be 0-100"
+        );
+        assert!(
+            !assessment.circuit_breaker_triggered,
+            "Should not trigger under normal conditions"
+        );
         // position_size_multiplier_bps for vol_24h=500, vol_7d=500 → avg=500 → 10000-500=9500
-        assert_eq!(assessment.position_size_multiplier_bps, 9500,
-            "position_size_multiplier_bps should be 9500 for avg 500 bp volatility");
-        assert!(assessment.position_size_multiplier_bps >= 5000 && assessment.position_size_multiplier_bps <= 10000,
-            "multiplier must be in [5000, 10000]");
+        assert_eq!(
+            assessment.position_size_multiplier_bps, 9500,
+            "position_size_multiplier_bps should be 9500 for avg 500 bp volatility"
+        );
+        assert!(
+            assessment.position_size_multiplier_bps >= 5000
+                && assessment.position_size_multiplier_bps <= 10000,
+            "multiplier must be in [5000, 10000]"
+        );
     }
 
     #[test]
@@ -334,10 +351,20 @@ mod tests {
         };
 
         let assessment = client.assess_arbitrage_risk(
-            &pool_id, 10000, 10000, 1000000, 10000, metrics, false, 0, SorobanVec::new(&env),
+            &pool_id,
+            10000,
+            10000,
+            1000000,
+            10000,
+            metrics,
+            false,
+            0,
+            SorobanVec::new(&env),
         );
-        assert_eq!(assessment.position_size_multiplier_bps, 10000,
-            "zero volatility should give full position (10000)");
+        assert_eq!(
+            assessment.position_size_multiplier_bps, 10000,
+            "zero volatility should give full position (10000)"
+        );
     }
 
     #[test]
@@ -354,10 +381,20 @@ mod tests {
         };
 
         let assessment = client.assess_arbitrage_risk(
-            &pool_id, 10000, 10000, 1000000, 10000, metrics, false, 0, SorobanVec::new(&env),
+            &pool_id,
+            10000,
+            10000,
+            1000000,
+            10000,
+            metrics,
+            false,
+            0,
+            SorobanVec::new(&env),
         );
-        assert_eq!(assessment.position_size_multiplier_bps, 5000,
-            "very high volatility should floor position multiplier at 5000");
+        assert_eq!(
+            assessment.position_size_multiplier_bps, 5000,
+            "very high volatility should floor position multiplier at 5000"
+        );
     }
 
     #[test]
