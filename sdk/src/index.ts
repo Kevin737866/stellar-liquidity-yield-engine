@@ -106,6 +106,23 @@ export {
 } from './persistence';
 export type { CheckpointStore, KeeperCheckpoint } from './persistence';
 
+// Recovery planning after a failed contract upgrade. The operator runbook is
+// docs/RUNBOOK_FAILED_UPGRADE.md; this is its machine-checkable triage step.
+export {
+  UpgradeRecoveryInputError,
+  planUpgradeRecovery,
+  formatUpgradeRecoveryPlan,
+} from './upgradeRecovery';
+export type {
+  UpgradeFailurePhase,
+  LiveContractCode,
+  UpgradeRecoveryObservation,
+  UpgradeRecoveryOutcome,
+  UpgradeRecoveryPlan,
+  RecoverySeverity,
+  RecoveryStep,
+} from './upgradeRecovery';
+
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
 // Governance SDK exports
