@@ -199,6 +199,86 @@ fn test_migrate_is_admin_only() {
     assert!(actuary.try_migrate(&stranger).is_err());
 }
 
+// ==================== Storage migration compatibility ====================
+
+/// Data written before the version key existed must survive `migrate`: only the
+/// version is adopted, existing state is left untouched.
+#[test]
+fn test_migrate_from_unversioned_storage_preserves_existing_state() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, contract_id) = with_engine(&env);
+
+    let registry_before = client.get_strategy_registry();
+    remove_storage_version(&env, &contract_id);
+    assert_eq!(client.get_storage_version(), 0);
+
+    assert_eq!(client.migrate(&admin), 0);
+    assert_eq!(client.get_storage_version(), EXPECTED_VERSION);
+    assert_eq!(client.get_strategy_registry(), registry_before);
+}
+
+/// A migration that fails authorization must not move the version, so a retry
+/// by the real admin still reports the version it replaces.
+#[test]
+fn test_failed_migrate_does_not_change_the_recorded_version() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, admin, contract_id) = with_vault(&env);
+    let stranger = Address::generate(&env);
+
+    remove_storage_version(&env, &contract_id);
+    assert!(client.try_migrate(&stranger).is_err());
+    assert_eq!(client.get_storage_version(), 0);
+
+    assert_eq!(client.migrate(&admin), 0);
+    assert_eq!(client.get_storage_version(), EXPECTED_VERSION);
+}
+
+/// Every contract adopts the current version from an unversioned state and is
+/// idempotent afterwards.
+#[test]
+fn test_every_contract_migrates_from_unversioned_storage() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let (engine, engine_admin, engine_id) = with_engine(&env);
+    let (vault, vault_admin, vault_id) = with_vault(&env);
+    let (distributor, distributor_admin, distributor_id) = with_distributor(&env);
+    let (rebalance, rebalance_admin, rebalance_id) = with_rebalance_engine(&env);
+    let (registry, registry_admin, registry_id) = with_registry(&env);
+    let (insurance, insurance_admin, insurance_id) = with_insurance(&env);
+    let (actuary, actuary_admin, actuary_id) = with_actuary(&env);
+
+    for id in [
+        &engine_id,
+        &vault_id,
+        &distributor_id,
+        &rebalance_id,
+        &registry_id,
+        &insurance_id,
+        &actuary_id,
+    ] {
+        remove_storage_version(&env, id);
+    }
+
+    assert_eq!(engine.migrate(&engine_admin), 0);
+    assert_eq!(vault.migrate(&vault_admin), 0);
+    assert_eq!(distributor.migrate(&distributor_admin), 0);
+    assert_eq!(rebalance.migrate(&rebalance_admin), 0);
+    assert_eq!(registry.migrate(&registry_admin), 0);
+    assert_eq!(insurance.migrate(&insurance_admin), 0);
+    assert_eq!(actuary.migrate(&actuary_admin), 0);
+
+    assert_eq!(engine.migrate(&engine_admin), EXPECTED_VERSION);
+    assert_eq!(vault.migrate(&vault_admin), EXPECTED_VERSION);
+    assert_eq!(distributor.migrate(&distributor_admin), EXPECTED_VERSION);
+    assert_eq!(rebalance.migrate(&rebalance_admin), EXPECTED_VERSION);
+    assert_eq!(registry.migrate(&registry_admin), EXPECTED_VERSION);
+    assert_eq!(insurance.migrate(&insurance_admin), EXPECTED_VERSION);
+    assert_eq!(actuary.migrate(&actuary_admin), EXPECTED_VERSION);
+}
+
 // ==================== Upgrade ====================
 
 #[test]
