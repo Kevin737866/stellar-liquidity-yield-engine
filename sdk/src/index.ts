@@ -177,7 +177,9 @@ export function createVaultClient(
   network: SupportedNetwork | OptionalNetworkConfig = DEFAULT_NETWORK,
 ) {
   const config = selectNetworkConfig(network);
-  return new VaultClient(vaultAddress as Address, config);
+  const addressString: string =
+    typeof vaultAddress === 'string' ? vaultAddress : vaultAddress.toString();
+  return new VaultClient(addressString, config);
 }
 
 export function createRebalancerClient(

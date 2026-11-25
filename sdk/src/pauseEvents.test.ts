@@ -1,15 +1,39 @@
 import { VaultClient, RebalancerClient } from './index';
-import { Keypair, Address } from 'stellar-sdk';
-import { PauseReason, VaultEvent, RebalanceEvent } from './types';
+
+type PauseReason =
+  | 'security'
+  | 'circuit_breaker'
+  | 'slippage_protection'
+  | 'maintenance'
+  | 'governance'
+  | 'liquidity_issue'
+  | 'emergency'
+  | 'manual';
+
+interface VaultEvent {
+  type: 'pause' | 'unpause';
+  vault?: string;
+  reason?: PauseReason;
+  reasonDetails?: string;
+  timestamp: number;
+}
+
+interface RebalanceEvent {
+  type: 'pause' | 'unpause';
+  strategy?: number;
+  reason?: PauseReason;
+  reasonDetails?: string;
+  timestamp: number;
+}
 
 describe('Pause Event Emission', () => {
   describe('VaultClient pause events', () => {
     let vaultClient: VaultClient;
     let mockNetworkConfig: any;
-    let mockVaultAddress: Address;
+    let mockVaultAddress: string;
 
     beforeEach(() => {
-      mockVaultAddress = new Address('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
+      mockVaultAddress = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF';
       mockNetworkConfig = {
         network: 'testnet' as const,
         horizonUrl: 'https://horizon-testnet.stellar.org',
@@ -21,7 +45,7 @@ describe('Pause Event Emission', () => {
           strategyRegistry: ''
         }
       };
-      vaultClient = new VaultClient(mockVaultAddress, mockNetworkConfig);
+      vaultClient = new VaultClient(mockVaultAddress as any, mockNetworkConfig);
     });
 
     it('should emit pause event with security reason', (done) => {
@@ -32,12 +56,11 @@ describe('Pause Event Emission', () => {
         expect(event.type).toBe('pause');
         expect(event.reason).toBe(reason);
         expect(event.reasonDetails).toBe(reasonDetails);
-        expect(event.vault).toBe(mockVaultAddress.toString());
+        expect(event.vault).toBe(String(mockVaultAddress));
         expect(event.timestamp).toBeGreaterThan(0);
         done();
       });
 
-      // Simulate pause event emission (in real scenario, this would be called after successful pause)
       (vaultClient as any).emitPauseEvent(reason, reasonDetails);
     });
 
@@ -155,7 +178,7 @@ describe('Pause Event Emission', () => {
     it('should emit unpause event', (done) => {
       vaultClient.on('unpause', (event: VaultEvent) => {
         expect(event.type).toBe('unpause');
-        expect(event.vault).toBe(mockVaultAddress.toString());
+        expect(event.vault).toBe(String(mockVaultAddress));
         expect(event.timestamp).toBeGreaterThan(0);
         expect(event.reason).toBeUndefined();
         done();

@@ -437,3 +437,24 @@ fn test_rollback_readiness_requires_an_installed_previous_wasm_hash() {
     assert_eq!(published_admin, admin);
     assert_eq!(published_hash, installed_rollback_hash);
 }
+
+#[test]
+fn test_migrate_preserves_storage_version_across_all_contracts() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (engine, engine_admin, _) = with_engine(&env);
+    let (vault, vault_admin, _) = with_vault(&env);
+    let (distributor, distributor_admin, _) = with_distributor(&env);
+    let (rebalance, rebalance_admin, _) = with_rebalance_engine(&env);
+    let (registry, registry_admin, _) = with_registry(&env);
+    let (insurance, insurance_admin, _) = with_insurance(&env);
+    let (actuary, actuary_admin, _) = with_actuary(&env);
+
+    assert_eq!(engine.migrate(&engine_admin), EXPECTED_VERSION);
+    assert_eq!(vault.migrate(&vault_admin), EXPECTED_VERSION);
+    assert_eq!(distributor.migrate(&distributor_admin), EXPECTED_VERSION);
+    assert_eq!(rebalance.migrate(&rebalance_admin), EXPECTED_VERSION);
+    assert_eq!(registry.migrate(&registry_admin), EXPECTED_VERSION);
+    assert_eq!(insurance.migrate(&insurance_admin), EXPECTED_VERSION);
+    assert_eq!(actuary.migrate(&actuary_admin), EXPECTED_VERSION);
+}

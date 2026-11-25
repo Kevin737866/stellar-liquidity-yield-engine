@@ -20,6 +20,7 @@ describe('Optional network configuration behavior', () => {
   const originalEnv = process.env;
   const sampleContractAddress = Address.contract(Buffer.alloc(32, 1));
   const sampleContractId = sampleContractAddress.toString();
+  const sampleContractAddressStr: string = sampleContractId;
 
   beforeEach(() => {
     process.env = { ...originalEnv };
@@ -205,7 +206,7 @@ describe('Optional network configuration behavior', () => {
 
   describe('SDK client behavior when optional network config is absent', () => {
     it('VaultClient works with default testnet config even when contract env vars are unset', () => {
-      const client = new VaultClient(sampleContractAddress, selectNetworkConfig());
+      const client = new VaultClient(sampleContractAddressStr, selectNetworkConfig());
       expect(client).toBeInstanceOf(VaultClient);
       expect((client as any).networkConfig.network).toBe('testnet');
     });
@@ -215,7 +216,7 @@ describe('Optional network configuration behavior', () => {
         network: 'futurenet',
         sorobanRpcUrl: 'https://custom-futurenet-rpc.example.com',
       });
-      const client = new VaultClient(sampleContractAddress, config);
+      const client = new VaultClient(sampleContractAddressStr, config);
       expect(client).toBeInstanceOf(VaultClient);
       expect((client as any).networkConfig.network).toBe('futurenet');
       expect((client as any).networkConfig.sorobanRpcUrl).toBe(

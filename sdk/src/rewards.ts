@@ -8,7 +8,7 @@ import {
     Networks
 } from 'stellar-sdk';
 import { VaultClient } from './vaultClient';
-import { VaultClientConfig } from './types';
+import type { VaultClientConfig, NetworkConfig } from './types';
 
 /** Maximum router slippage tolerance in basis points (1%). */
 export const MAX_SLIPPAGE_BPS = 100;
@@ -935,11 +935,11 @@ export class RewardsSDK {
         let vaultClient = this.vaultClients.get(vaultKey);
 
         if (!vaultClient) {
-            vaultClient = new VaultClient(vault, this.networkConfig);
+            vaultClient = new VaultClient(vault, this.networkConfig as unknown as NetworkConfig);
             this.vaultClients.set(vaultKey, vaultClient);
         }
 
-        const position = await vaultClient.getUserPosition(new Address(user));
+        const position = await vaultClient.getUserPosition(user);
         return position.shares.toString();
     }
 

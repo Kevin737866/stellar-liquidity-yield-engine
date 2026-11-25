@@ -43,7 +43,24 @@
  * ```
  */
 
-import type { VaultEvent, RebalanceEvent, RewardEvent } from './types';
+/**
+ * Local structural event shapes. The `./types` module does not export these
+ * names, so they are declared here with the discriminants the listener uses.
+ */
+export interface VaultEvent {
+  type: 'deposit' | 'withdraw' | 'harvest' | 'pause' | 'unpause';
+  [key: string]: unknown;
+}
+
+export interface RebalanceEvent {
+  type: 'proposal' | 'execution' | 'failure';
+  [key: string]: unknown;
+}
+
+export interface RewardEvent {
+  type: 'distribution' | 'claim' | 'expiry';
+  [key: string]: unknown;
+}
 import { CONTRACT_EVENT_ORIGIN } from './eventOrigin';
 import type { EventOrigin } from './eventOrigin';
 import {
@@ -512,7 +529,7 @@ export class ContractEventListener {
       component: 'ContractEventListener',
       event: 'action_skipped',
       reason,
-      contractId: raw.contractId,
+      contractId: String(raw.contractId),
       ledger: raw.ledger,
       cursor: this.cursor,
       eventName,
@@ -866,15 +883,16 @@ export class ContractEventListener {
     let highestEventLedger = -1;
 
     for (const raw of events) {
+      const contractId = String(raw.contractId);
       // SDK-level guard: drop events not in the allow-list.
-      if (!this.isAllowed(raw.contractId)) {
+      if (!this.isAllowed(contractId)) {
         this.logSkipped('address_filtered', raw, null);
         continue;
       }
 
       const unknown: UnknownContractEvent = {
         origin: CONTRACT_EVENT_ORIGIN,
-        contractId: raw.contractId,
+        contractId,
         ledger: raw.ledger,
         ledgerClosedAt: raw.ledgerClosedAt,
         topic: raw.topic,
@@ -953,7 +971,7 @@ export class ContractEventListener {
    */
   private isAllowed(contractId: string): boolean {
     if (this.allowedAddresses.size === 0) return true;
-    return this.allowedAddresses.has(contractId.toLowerCase());
+    return this.allowedAddresses.has(String(contractId).toLowerCase());
   }
 
   /**
@@ -991,8 +1009,8 @@ export class ContractEventListener {
     const set = this.handlers.get(name);
     if (!set || set.size === 0) return false;
 
+    const contractId = String(raw.contractId);
     const base = {
-      contractId: raw.contractId,
       timestamp: Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000),
       data: raw.value,
     };
@@ -1010,10 +1028,10 @@ export class ContractEventListener {
     if ((vaultNames as string[]).includes(name)) {
       evt = {
         type: name as VaultEvent['type'],
-        vault: raw.contractId as unknown as import('stellar-sdk').Address,
+        vault: contractId,
         timestamp: base.timestamp,
         data: base.data,
-        contractId: raw.contractId,
+        contractId,
       } satisfies FilteredVaultEvent;
     } else if ((rebalanceNames as string[]).includes(name)) {
       evt = {
@@ -1021,20 +1039,20 @@ export class ContractEventListener {
         strategy: 0, // decoded by a full ABI consumer; we provide the raw data
         timestamp: base.timestamp,
         data: base.data,
-        contractId: raw.contractId,
+        contractId,
       } satisfies FilteredRebalanceEvent;
     } else {
       // rewardNames
       evt = {
         type: name as RewardEvent['type'],
-        vault: raw.contractId as unknown as import('stellar-sdk').Address,
+        vault: contractId,
         timestamp: base.timestamp,
         data: base.data,
-        contractId: raw.contractId,
+        contractId,
       } satisfies FilteredRewardEvent;
     }
 
-    set.forEach((h) => (h as (e: typeof evt) => void)(evt));
+    set.forEach((h) => (h as (e: EventHandlerMap[KnownEventName]) => void)(evt));
     return true;
   }
 }

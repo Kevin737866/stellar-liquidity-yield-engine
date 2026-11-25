@@ -22,6 +22,13 @@ import {
 } from 'stellar-sdk';
 import { NetworkConfig, YieldStrategy, StrategyError } from './types';
 
+export interface RegistryContractConfig {
+  contractAddress: string | null;
+  network: string;
+  sorobanRpcUrl: string;
+  isDeployed: boolean;
+}
+
 export class StrategyRegistryClient {
   private server: SorobanRpc.Server;
   private networkConfig: NetworkConfig;
@@ -34,6 +41,25 @@ export class StrategyRegistryClient {
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
+
+  /**
+   * Read-only: expose the configuration of the strategy registry contract
+   * instance. Performs no state-changing operations; never throws on a
+   * missing deployment — `isDeployed` is reported as false instead.
+   */
+  getRegistryContractConfig(): RegistryContractConfig {
+    const rawAddress = this.networkConfig.contracts?.strategyRegistry;
+    const contractAddress =
+      rawAddress !== undefined && rawAddress !== null && String(rawAddress) !== ''
+        ? String(rawAddress)
+        : null;
+    return {
+      contractAddress,
+      network: this.networkConfig.network,
+      sorobanRpcUrl: this.networkConfig.sorobanRpcUrl,
+      isDeployed: contractAddress !== null,
+    };
+  }
 
   /**
    * Fetch active strategies from the registry.
@@ -51,7 +77,7 @@ export class StrategyRegistryClient {
         return this.defaultStrategies(limit);
       }
 
-      const contract = new Contract(registryAddress as string);
+      const contract = new Contract(String(registryAddress));
 
       const simResult = await this.server.simulateTransaction(
         new TransactionBuilder(
