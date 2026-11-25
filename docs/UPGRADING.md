@@ -160,6 +160,88 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## Post-deployment smoke checks (Issue #511)
+
+Run these after every `upgrade` + `migrate` sequence, before directing any live
+traffic at the updated contracts. The checks call read-only entrypoints only —
+no tokens are moved and no admin-only calls are made.
+
+### CLI (quick)
+
+```bash
+# For each upgraded contract, confirm it answers and reports the right version.
+soroban contract invoke --id "$CONTRACT_ID" --network testnet -- get_storage_version
+soroban contract invoke --id "$CONTRACT_ID" --network testnet -- is_paused
+```
+
+Both calls must succeed without error. `get_storage_version` must equal the
+`STORAGE_VERSION` constant from `src/upgrade.rs` (currently **1**). `is_paused`
+returns a boolean; `true` is valid if the contract was deliberately paused
+before the upgrade (unpause it afterwards with `unpause`).
+
+### SDK (`runSmokeChecks`)
+
+The SDK provides `runSmokeChecks` from `sdk/src/smokeCheck.ts` for scripted
+post-deployment validation:
+
+```ts
+import { runSmokeChecks, formatSmokeCheckReport } from '@stellar-liquidity-yield-engine/sdk';
+import { Networks } from 'stellar-sdk';
+
+const report = await runSmokeChecks({
+  sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
+  networkPassphrase: Networks.TESTNET,
+  contracts: {
+    yieldEngine:        process.env.YIELD_ENGINE_CONTRACT_ID,
+    yieldVault:         process.env.YIELD_VAULT_CONTRACT_ID,
+    rebalanceEngine:    process.env.REBALANCE_ENGINE_CONTRACT_ID,
+    rewardDistributor:  process.env.REWARD_DISTRIBUTOR_CONTRACT_ID,
+    strategyRegistry:   process.env.STRATEGY_REGISTRY_CONTRACT_ID,
+    ilInsurance:        process.env.IL_INSURANCE_CONTRACT_ID,
+    actuary:            process.env.ACTUARY_CONTRACT_ID,
+  },
+  expectedStorageVersion: 1,  // must equal upgrade::STORAGE_VERSION
+});
+
+console.log(formatSmokeCheckReport(report));
+
+if (!report.passed) {
+  console.error('Smoke checks failed — do not direct traffic here.');
+  process.exit(1);
+}
+```
+
+Omit any contract key to skip that contract. Omit `expectedStorageVersion` to
+skip the version assertion (useful when probing contracts at different schema
+versions during a staged rollout).
+
+### What is checked
+
+| Probe | Entrypoint | Expected behaviour |
+| --- | --- | --- |
+| Storage version | `get_storage_version()` | Returns an integer equal to `expectedStorageVersion` when supplied |
+| Liveness | `is_paused()` | Call succeeds without error; return value is not asserted |
+
+A failed probe means the contract cannot serve normal calls and no live traffic
+should be routed to it. `runSmokeChecks` runs all probes even when earlier ones
+fail so a single report shows the full picture.
+
+### Smoke check in the upgrade sequence
+
+Insert the smoke-check step between migration and traffic cut-over:
+
+```
+upgrade (swap code)
+  → migrate (adopt new schema version)
+    → smoke check (confirm all entrypoints live)   ← new step
+      → unpause (if paused before upgrade)
+        → cut over traffic
+```
+
+If any check fails at the smoke-check step, do not unpause and do not cut over.
+Diagnose the failure, roll back with `upgrade` pointing at the previous wasm
+hash, and re-run the smoke check before attempting the upgrade again.
+
 ## Testing an upgrade
 
 - `tests/upgrade_tests.rs` covers all seven contracts: version recorded at
@@ -167,10 +249,10 @@ migrate the stored `streams` vector rather than decode it as-is.
   admin entrypoints, rejection of an unknown wasm hash, and a real code swap
   through the host deployer (the contract's entrypoints stop existing, while the
   address and storage survive).
-- The same file also covers rollback readiness (an uninstalled rollback hash is
-  rejected) and persistent-storage expiration boundaries: an entry is readable
-  on its last live ledger, archived on the next one, and `extend_ttl` moves that
-  boundary without losing the value.
+- The same file covers rollback readiness, persistent-storage expiration
+  boundaries, and the **post-deployment smoke-check probes** (`get_storage_version`
+  and `is_paused` on fresh, migrated, and paused contracts; detection of a
+  missing migration by version mismatch).
 - Run `cargo test --test upgrade_tests`.
 - The test builds the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
