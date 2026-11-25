@@ -111,6 +111,11 @@ contract's features.
   code's version, so a post-mortem can tell which build ran against which
   storage.
 
+A configuration change that also alters a stored shape is a migration: follow
+[docs/CONFIG_MIGRATION_CHECKLIST.md](CONFIG_MIGRATION_CHECKLIST.md) for the
+scope classification, bounds, snapshot/rollback and keeper-restart checklists,
+and bump `STORAGE_VERSION` here in the same change.
+
 An example of a change that needs both a bump and migration work: adding
 `RewardStream::claim_deadline` ([#121](https://github.com/Kevin737866/stellar-liquidity-yield-engine/issues/121))
 changes the encoding of the stored stream list, so a build containing it must

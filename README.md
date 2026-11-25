@@ -443,6 +443,12 @@ CHECK_INTERVAL=300000
 `sdk/src/governance.ts`. There is no working contract to deploy for those
 yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
 
+Protocol parameter changes (fees, rebalance threshold, insurance reserve)
+follow [docs/CONFIG_MIGRATION_CHECKLIST.md](docs/CONFIG_MIGRATION_CHECKLIST.md)
+and `buildConfigMigrationChecklist()` in the SDK. A change that alters a stored
+shape also needs the version bump and migration described in
+[docs/UPGRADING.md](docs/UPGRADING.md).
+
 ### Contract Deployment
 
 There is no `scripts/` directory in this repo — deploy with the `soroban`

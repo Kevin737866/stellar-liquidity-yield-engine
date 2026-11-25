@@ -133,6 +133,23 @@ export {
   GOVERNANCE_CONSTANTS
 } from './governance';
 
+// Migration checklist for protocol configuration changes. The operator
+// procedure is docs/CONFIG_MIGRATION_CHECKLIST.md.
+export {
+  PROTOCOL_CONFIG_BOUNDS,
+  buildConfigMigrationChecklist,
+  validateProtocolConfig,
+} from './configMigration';
+export type {
+  ConfigBound,
+  ConfigChangeScope,
+  ConfigMigrationChecklist,
+  ConfigValueChange,
+  ProtocolConfig,
+  ProtocolConfigChangeRequest,
+  ProtocolConfigField,
+} from './configMigration';
+
 // Required contract IDs are read from the environment rather than hardcoded,
 // since a hardcoded placeholder address is not a usable/deployed contract.
 // Set these to the real contract IDs from your deployment before using a
