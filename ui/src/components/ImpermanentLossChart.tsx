@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { ChartSummary } from '@/components/ui/chartSummary';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { buildChartSummary } from '@/lib/chartSummary';
+import { formatIlPercent, formatPriceRatio, parsePriceRatioList } from '@/lib/impermanentLossReport';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { TrendingDown, TrendingUp, Calculator, Activity } from 'lucide-react';
 import { YieldCalculator } from 'stellar-liquidity-yield-engine-sdk';
@@ -21,9 +24,11 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
 }) => {
   const [priceRatio, setPriceRatio] = useState(currentPriceRatio.toString());
   const [initialRatio, setInitialRatio] = useState(initialPriceRatio.toString());
+  const [elapsedDays, setElapsedDays] = useState(timeElapsed);
+  const [closedRatiosInput, setClosedRatiosInput] = useState('');
   const [volatility, setVolatility] = useState('20');
   const [timePeriod, setTimePeriod] = useState('30');
-  const [simulations, setSimulations] = useState(1000);
+  const [simulations, setSimulations] = useState('1000');
   const [simulationData, setSimulationData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [historicalData, setHistoricalData] = useState<Array<{ timestamp: number; priceRatio: number; ilPercent: number }>>([]);
@@ -31,10 +36,19 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
 
   // Calculate current IL
   const currentIL = useMemo(() => {
-    const ratio = parseFloat(priceRatio) || 1.0;
-    const initial = parseFloat(initialRatio) || 1.0;
-    return YieldCalculator.calculateImpermanentLoss(initial, ratio, timeElapsed);
-  }, [priceRatio, initialRatio, timeElapsed]);
+    return YieldCalculator.calculateImpermanentLoss(Number(initialRatio), Number(priceRatio), elapsedDays);
+  }, [priceRatio, initialRatio, elapsedDays]);
+
+  const parsedClosures = useMemo(() => parsePriceRatioList(closedRatiosInput), [closedRatiosInput]);
+
+  const ilBreakdown = useMemo(() => {
+    return YieldCalculator.calculateImpermanentLossBreakdown(
+      Number(initialRatio),
+      Number(priceRatio),
+      parsedClosures.values,
+      elapsedDays
+    );
+  }, [priceRatio, initialRatio, parsedClosures.values, elapsedDays]);
 
   // Generate chart data for different price ratios
   const chartData = useMemo(() => {
@@ -90,7 +104,7 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
       const initial = parseFloat(initialRatio) || 1.0;
       const vol = parseFloat(volatility) || 20;
       const period = parseInt(timePeriod) || 30;
-      const sims = parseInt(simulations) || 1000;
+      const sims = parseInt(simulations, 10) || 1000;
       
       const result = YieldCalculator.simulateImpermanentLoss(
         initial,
@@ -127,8 +141,49 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
     }
   };
 
-  const formatPercent = (value: number) => `${value.toFixed(2)}%`;
-  const formatRatio = (value: number) => value.toFixed(2);
+  const formatPercent = (value: number) => formatIlPercent(value);
+  const formatRatio = (value: number) => formatPriceRatio(value);
+
+  const priceRatioSummary = buildChartSummary({
+    title: 'Impermanent loss by price ratio',
+    categoryLabel: 'Price ratio',
+    categories: chartData.map((point) => formatRatio(point.priceRatio)),
+    series: [
+      {
+        label: 'Impermanent loss',
+        values: chartData.map((point) => point.impermanentLoss),
+        format: formatPercent,
+      },
+      {
+        label: 'LP position value',
+        values: chartData.map((point) => point.lpValue),
+        format: formatRatio,
+      },
+      {
+        label: 'Hold strategy value',
+        values: chartData.map((point) => point.holdValue),
+        format: formatRatio,
+      },
+    ],
+  });
+
+  const timelineSummary = buildChartSummary({
+    title: 'Impermanent loss over time',
+    categoryLabel: 'Day',
+    categories: timeSeriesData.map((point) => point.day),
+    series: [
+      {
+        label: 'Impermanent loss',
+        values: timeSeriesData.map((point) => point.impermanentLoss),
+        format: formatPercent,
+      },
+      {
+        label: 'Cumulative effect',
+        values: timeSeriesData.map((point) => point.cumulativeLoss),
+        format: formatPercent,
+      },
+    ],
+  });
 
   return (
     <Card className="w-full max-w-6xl mx-auto">
@@ -178,9 +233,23 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
                   <Input
                     id="time-elapsed"
                     type="number"
-                    value={timeElapsed}
-                    onChange={(e) => setTimeElapsed(parseInt(e.target.value) || 0)}
+                    value={elapsedDays}
+                    onChange={(e) => setElapsedDays(parseInt(e.target.value, 10) || 0)}
                   />
+                </div>
+
+                <div>
+                  <Label htmlFor="closed-ratios">Closed Price Ratios</Label>
+                  <Input
+                    id="closed-ratios"
+                    type="text"
+                    placeholder="4, 1"
+                    value={closedRatiosInput}
+                    onChange={(e) => setClosedRatiosInput(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Comma-separated ratios in withdrawal order.
+                  </p>
                 </div>
               </div>
               
@@ -196,24 +265,50 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
                     </div>
                   </CardContent>
                 </Card>
-                
+
                 <Card>
                   <CardContent className="p-4">
                     <h3 className="text-lg font-semibold mb-2">Price Change</h3>
                     <div className="text-2xl font-bold">
-                      {formatRatio(currentIL.currentPriceRatio / currentIL.initialPriceRatio)}x
+                      {Number.isFinite(currentIL.currentPriceRatio / currentIL.initialPriceRatio)
+                        ? `${formatRatio(currentIL.currentPriceRatio / currentIL.initialPriceRatio)}x`
+                        : 'Unavailable'}
                     </div>
                     <div className="text-sm text-gray-500 mt-1">
                       From {formatRatio(currentIL.initialPriceRatio)} to {formatRatio(currentIL.currentPriceRatio)}
                     </div>
                   </CardContent>
                 </Card>
-              </div>
+
+                <Card>
+                  <CardContent className="p-4">
+                    <h3 className="text-lg font-semibold mb-2">Realized vs Unrealized IL</h3>
+                    <dl className="grid grid-cols-2 gap-4">
+                      <div>
+                        <dt className="text-sm text-gray-500">Realized IL</dt>
+                        <dd className="text-2xl font-bold">{formatPercent(ilBreakdown.realizedIlPercent)}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-sm text-gray-500">Unrealized IL</dt>
+                        <dd className="text-2xl font-bold">{formatPercent(ilBreakdown.unrealizedIlPercent)}</dd>
+                      </div>
+                    </dl>
+                    <p className="text-sm text-gray-500 mt-2">
+                      Open position basis: {formatRatio(ilBreakdown.openPriceRatio)}
+                    </p>
+                    <p className="text-sm text-gray-500 mt-1" aria-live="polite">
+                      {ilBreakdown.skippedPriceRatios.length + parsedClosures.invalidEntries.length > 0
+                        ? `${ilBreakdown.skippedPriceRatios.length + parsedClosures.invalidEntries.length} invalid price ratio value(s) were ignored.`
+                        : 'All price ratio inputs are valid.'}
+                    </p>
+                  </CardContent>
+                </Card>
+               </div>
             </div>
           </TabsContent>
 
           <TabsContent value="chart" className="space-y-4">
-            <div className="h-96">
+            <div className="h-96" role="img" aria-label={priceRatioSummary.accessibleLabel}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -255,10 +350,10 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
               </ResponsiveContainer>
             </div>
             
-            <div className="text-sm text-gray-600">
-              <p>This chart shows impermanent loss across different price ratios.</p>
-              <p>The red line represents the loss percentage, while the blue line shows the LP position value relative to holding.</p>
-            </div>
+            <p className="text-sm text-gray-600">
+              Every series is identified by name in the legend and in the text summary below.
+            </p>
+            <ChartSummary summary={priceRatioSummary} announce />
           </TabsContent>
 
           <TabsContent value="timeline" className="space-y-4">
@@ -284,7 +379,7 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
                 </Button>
               </div>
             </div>
-            <div className="h-96">
+            <div className="h-96" role="img" aria-label={timelineSummary.accessibleLabel}>
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={timeSeriesData}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -320,9 +415,7 @@ export const ImpermanentLossChart: React.FC<ImpermanentLossChartProps> = ({
               </ResponsiveContainer>
             </div>
             
-            <div className="text-sm text-gray-600">
-              <p>This chart shows how impermanent loss evolves over time based on the current price trajectory.</p>
-            </div>
+            <ChartSummary summary={timelineSummary} announce />
           </TabsContent>
 
           <TabsContent value="simulation" className="space-y-4">

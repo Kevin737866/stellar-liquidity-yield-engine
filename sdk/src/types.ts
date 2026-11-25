@@ -200,6 +200,25 @@ export interface ImpermanentLossData {
   timeElapsed: number;
 }
 
+export interface RealizedImpermanentLossData {
+  initialPriceRatio: number;
+  exitPriceRatio: number;
+  ilPercent: number;
+  timeElapsed: number;
+}
+
+export interface ImpermanentLossBreakdown {
+  initialPriceRatio: number;
+  currentPriceRatio: number;
+  openPriceRatio: number;
+  realizedIlPercent: number;
+  unrealizedIlPercent: number;
+  totalIlPercent: number;
+  closedPriceRatios: number[];
+  skippedPriceRatios: number[];
+  timeElapsed: number;
+}
+
 export interface ApyProjection {
   projectedApy: number;
   confidence: number; // 0-100
@@ -436,6 +455,10 @@ export interface ILSnapshot {
   ilPercent: number;
   /** Token B / Token A price ratio at this point in time */
   priceRatio: number;
+  /** Realized IL locked in by previous exits (negative means loss) */
+  realizedIlPercent?: number;
+  /** Unrealized IL on the currently open position (negative means loss) */
+  unrealizedIlPercent?: number;
 }
 
 /**

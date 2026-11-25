@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { Dashboard } from '@/components/Dashboard';
 import { SkipLink } from '@/components/SkipLink';
 
@@ -45,5 +45,18 @@ describe('dashboard accessibility structure', () => {
       expect(progressBar).toHaveAccessibleName();
       expect(progressBar).toHaveAttribute('aria-valuenow');
     }
+  });
+
+  it('exposes a color-independent yield trend summary and data table', () => {
+    render(<Dashboard />);
+
+    expect(
+      screen.getByRole('img', { name: /net apy by day/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/net apy by day\. net apy:/i)).toBeInTheDocument();
+
+    const chartTable = screen.getByRole('table', { name: /net apy by day data/i });
+    expect(within(chartTable).getByRole('rowheader', { name: 'Mon' })).toBeInTheDocument();
+    expect(within(chartTable).getByText('8.4%')).toBeInTheDocument();
   });
 });

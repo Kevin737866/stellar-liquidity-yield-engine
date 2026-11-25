@@ -7,6 +7,8 @@ import {
     Tooltip,
     Legend
 } from 'recharts';
+import { ChartSummary } from '@/components/ui/chartSummary';
+import { buildChartSummary } from '@/lib/chartSummary';
 import {
     FaCoins,
     FaSync,
@@ -353,6 +355,24 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
         });
     }, []);
 
+    const pieSummary = buildChartSummary({
+        title: 'Pending reward distribution',
+        categoryLabel: 'Token',
+        categories: pieChartData.map((entry) => entry.name),
+        series: [
+            {
+                label: 'Amount',
+                values: pieChartData.map((entry) => entry.value),
+                format: (value) => formatAmount(value)
+            },
+            {
+                label: 'USD value',
+                values: pieChartData.map((entry) => entry.usdValue),
+                format: formatUsd
+            }
+        ]
+    });
+
     return (
         <div className="reward-dashboard">
             {/* Header */}
@@ -412,7 +432,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                             <FaChartPie />
                             <h3>Reward Distribution</h3>
                         </div>
-                        <div className="chart-container">
+                        <div className="chart-container" role="img" aria-label={pieSummary.accessibleLabel}>
                             {pieChartData.length > 0 ? (
                                 <ResponsiveContainer width="100%" height={250}>
                                     <PieChart>
@@ -463,6 +483,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                 </div>
                             )}
                         </div>
+                        <ChartSummary summary={pieSummary} announce />
                     </div>
 
                     {/* Total Summary */}

@@ -112,6 +112,7 @@ Then open a Pull Request against `main` on GitHub.
 - Keep components small and single-purpose
 - Use the existing hook patterns (`useYieldVault`, etc.)
 - Ensure accessibility (ARIA labels, keyboard nav)
+- Give every chart a text summary and equivalent data table via `ChartSummary`; never rely on color alone
 
 ### Documentation
 - Update README.md when adding or changing features

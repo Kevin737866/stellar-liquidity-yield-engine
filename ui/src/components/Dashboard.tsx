@@ -8,7 +8,9 @@ import {
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { ChartSummary } from '@/components/ui/chartSummary';
 import { Progress } from '@/components/ui/progress';
+import { buildChartSummary } from '@/lib/chartSummary';
 
 const yieldTrend = [
   { day: 'Mon', apy: 6.8 },
@@ -19,6 +21,19 @@ const yieldTrend = [
   { day: 'Sat', apy: 8.2 },
   { day: 'Sun', apy: 8.4 },
 ];
+
+const yieldTrendSummary = buildChartSummary({
+  title: 'Net APY by day',
+  categoryLabel: 'Day',
+  categories: yieldTrend.map((point) => point.day),
+  series: [
+    {
+      label: 'Net APY',
+      values: yieldTrend.map((point) => point.apy),
+      format: (value) => `${value.toFixed(1)}%`,
+    },
+  ],
+});
 
 const positions = [
   {
@@ -262,7 +277,7 @@ export function Dashboard() {
               <div
                 className="flex h-64 items-end gap-3"
                 role="img"
-                aria-label="Bar chart of net APY from 6.8% on Monday to 8.4% on Sunday."
+                aria-label={yieldTrendSummary.accessibleLabel}
               >
                 {yieldTrend.map((point) => {
                   const height = ((point.apy - 6) / 3) * 100;
@@ -281,23 +296,7 @@ export function Dashboard() {
                   );
                 })}
               </div>
-              <table className="sr-only">
-                <caption>Net APY by day</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Day</th>
-                    <th scope="col">Net APY</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {yieldTrend.map((point) => (
-                    <tr key={point.day}>
-                      <th scope="row">{point.day}</th>
-                      <td>{point.apy}%</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <ChartSummary className="mt-3" summary={yieldTrendSummary} />
             </CardContent>
           </Card>
         </section>
