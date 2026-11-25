@@ -86,6 +86,20 @@ export {
 } from './rpcSync';
 export type { RpcLagReport, RpcLagOptions, RpcLagThresholds, LagSeverity, LedgerHeadSource, RpcLagMonitorOptions } from './rpcSync';
 
+// Keeper readiness: validates RPC reachability/lag and signer configuration
+// before a keeper starts submitting transactions.
+export {
+  checkKeeperReadiness,
+  formatReadinessReport,
+  READINESS_STATUS,
+} from './keeperReadiness';
+export type {
+  KeeperReadinessOptions,
+  KeeperReadinessReport,
+  ReadinessCheck,
+  ReadinessStatus,
+} from './keeperReadiness';
+
 // Keeper health metrics for ops monitoring.
 export { KeeperMetrics, KEEPER_METRICS_PREFIX, } from './keeperMetrics';
 export type {
