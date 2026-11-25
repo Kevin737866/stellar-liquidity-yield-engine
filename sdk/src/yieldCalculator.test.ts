@@ -44,11 +44,110 @@ describe('YieldCalculator.calculateImpermanentLoss', () => {
     expect(nonPositiveCurrent.ilPercent).toBe(0);
   });
 
+  it('handles non-finite ratios without NaN/Infinity', () => {
+    expect(YieldCalculator.calculateImpermanentLoss(Number.NaN, 1, 1).ilPercent).toBe(0);
+    expect(YieldCalculator.calculateImpermanentLoss(1, Number.POSITIVE_INFINITY, 1).ilPercent).toBe(0);
+  });
+
   it('preserves supplied metadata in the result', () => {
     const result = YieldCalculator.calculateImpermanentLoss(1.2, 0.9, 60);
     expect(result.initialPriceRatio).toBe(1.2);
     expect(result.currentPriceRatio).toBe(0.9);
     expect(result.timeElapsed).toBe(60);
+  });
+});
+
+describe('YieldCalculator.calculateRealizedImpermanentLoss', () => {
+  it('locks in IL at the exit ratio', () => {
+    const result = YieldCalculator.calculateRealizedImpermanentLoss(1, 4, 30);
+    expect(result.ilPercent).toBeCloseTo(-20, 6);
+    expect(result.initialPriceRatio).toBe(1);
+    expect(result.exitPriceRatio).toBe(4);
+    expect(result.timeElapsed).toBe(30);
+  });
+
+  it('is symmetric for equivalent up and down moves', () => {
+    const up = YieldCalculator.calculateRealizedImpermanentLoss(1, 2);
+    const down = YieldCalculator.calculateRealizedImpermanentLoss(1, 0.5);
+    expect(up.ilPercent).toBeCloseTo(down.ilPercent, 10);
+  });
+
+  it('returns zero for an unchanged or invalid exit ratio', () => {
+    expect(YieldCalculator.calculateRealizedImpermanentLoss(1, 1).ilPercent).toBe(0);
+    expect(YieldCalculator.calculateRealizedImpermanentLoss(1, Number.NaN).ilPercent).toBe(0);
+    expect(YieldCalculator.calculateRealizedImpermanentLoss(0, 1).ilPercent).toBe(0);
+  });
+
+  it('normalizes a non-finite elapsed time to zero', () => {
+    expect(YieldCalculator.calculateRealizedImpermanentLoss(1, 2, Number.NaN).timeElapsed).toBe(0);
+  });
+});
+
+describe('YieldCalculator.calculateImpermanentLossBreakdown', () => {
+  it('reports all IL as unrealized when no position has been closed', () => {
+    const result = YieldCalculator.calculateImpermanentLossBreakdown(1, 4, [], 7);
+    expect(result.realizedIlPercent).toBe(0);
+    expect(result.unrealizedIlPercent).toBeCloseTo(-20, 6);
+    expect(result.totalIlPercent).toBeCloseTo(-20, 6);
+    expect(result.openPriceRatio).toBe(1);
+    expect(result.timeElapsed).toBe(7);
+  });
+
+  it('separates realized IL from the open position after an exit', () => {
+    const result = YieldCalculator.calculateImpermanentLossBreakdown(1, 2, [4], 30);
+    expect(result.realizedIlPercent).toBeCloseTo(-20, 6);
+    expect(result.unrealizedIlPercent).toBeCloseTo(-5.7190958418, 6);
+    expect(result.totalIlPercent).toBeCloseTo(-25.7190958418, 6);
+    expect(result.openPriceRatio).toBe(4);
+    expect(result.closedPriceRatios).toEqual([4]);
+    expect(result.skippedPriceRatios).toEqual([]);
+  });
+
+  it('reconciles multiple closed positions without losing realized IL', () => {
+    const result = YieldCalculator.calculateImpermanentLossBreakdown(1, 1, [4, 1]);
+    expect(result.realizedIlPercent).toBeCloseTo(-40, 6);
+    expect(result.unrealizedIlPercent).toBeCloseTo(0, 10);
+    expect(result.totalIlPercent).toBeCloseTo(-40, 6);
+    expect(result.closedPriceRatios).toEqual([4, 1]);
+  });
+
+  it('skips invalid exit ratios without affecting the breakdown', () => {
+    const result = YieldCalculator.calculateImpermanentLossBreakdown(1, 2, [0, Number.NaN, 4, -1]);
+    expect(result.realizedIlPercent).toBeCloseTo(-20, 6);
+    expect(result.closedPriceRatios).toEqual([4]);
+    expect(result.skippedPriceRatios).toHaveLength(3);
+    expect(result.skippedPriceRatios[0]).toBe(0);
+    expect(Number.isNaN(result.skippedPriceRatios[1])).toBe(true);
+    expect(result.skippedPriceRatios[2]).toBe(-1);
+  });
+
+  it('reports an invalid current ratio as skipped and keeps realized IL', () => {
+    const result = YieldCalculator.calculateImpermanentLossBreakdown(1, Number.NaN, [4]);
+    expect(result.realizedIlPercent).toBeCloseTo(-20, 6);
+    expect(result.unrealizedIlPercent).toBe(0);
+    expect(result.skippedPriceRatios).toHaveLength(1);
+    expect(Number.isNaN(result.skippedPriceRatios[0])).toBe(true);
+  });
+
+  it('returns a zeroed breakdown for an invalid initial ratio', () => {
+    const result = YieldCalculator.calculateImpermanentLossBreakdown(0, 2, [4, 0], 5);
+    expect(result.realizedIlPercent).toBe(0);
+    expect(result.unrealizedIlPercent).toBe(0);
+    expect(result.totalIlPercent).toBe(0);
+    expect(result.closedPriceRatios).toEqual([]);
+    expect(result.skippedPriceRatios).toEqual([0, 4, 0]);
+    expect(result.timeElapsed).toBe(5);
+  });
+
+  it('treats a non-array exit list as empty', () => {
+    const result = YieldCalculator.calculateImpermanentLossBreakdown(
+      1,
+      4,
+      undefined as unknown as number[],
+    );
+    expect(result.realizedIlPercent).toBe(0);
+    expect(result.unrealizedIlPercent).toBeCloseTo(-20, 6);
+    expect(result.closedPriceRatios).toEqual([]);
   });
 });
 

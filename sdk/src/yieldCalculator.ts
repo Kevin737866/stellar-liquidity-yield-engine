@@ -1,6 +1,8 @@
 import { Address } from 'stellar-sdk';
 import {
   ImpermanentLossData,
+  RealizedImpermanentLossData,
+  ImpermanentLossBreakdown,
   ApyProjection,
   FeeRevenue,
   PoolInfo,
@@ -13,6 +15,10 @@ import {
 } from './types';
 
 export class YieldCalculator {
+  private static isValidRatio(value: number): boolean {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0;
+  }
+
   /**
    * Calculate impermanent loss for a liquidity position
    */
@@ -21,9 +27,9 @@ export class YieldCalculator {
     currentPriceRatio: number,
     timeElapsed: number
   ): ImpermanentLossData {
-    // A non-positive baseline is undefined for the IL formula; return a
-    // zero-damage result instead of NaN/Infinity so callers can render.
-    if (initialPriceRatio <= 0 || currentPriceRatio <= 0) {
+    // A non-positive or non-finite baseline is undefined for the IL formula;
+    // return a zero-damage result instead of NaN/Infinity so callers can render.
+    if (!this.isValidRatio(initialPriceRatio) || !this.isValidRatio(currentPriceRatio)) {
       return {
         currentPriceRatio,
         initialPriceRatio,
@@ -42,6 +48,83 @@ export class YieldCalculator {
       initialPriceRatio,
       ilPercent,
       timeElapsed
+    };
+  }
+
+  static calculateRealizedImpermanentLoss(
+    initialPriceRatio: number,
+    exitPriceRatio: number,
+    timeElapsed: number = 0
+  ): RealizedImpermanentLossData {
+    const result = this.calculateImpermanentLoss(initialPriceRatio, exitPriceRatio, timeElapsed);
+    return {
+      initialPriceRatio: result.initialPriceRatio,
+      exitPriceRatio: result.currentPriceRatio,
+      ilPercent: result.ilPercent,
+      timeElapsed: Number.isFinite(timeElapsed) ? timeElapsed : 0
+    };
+  }
+
+  static calculateImpermanentLossBreakdown(
+    initialPriceRatio: number,
+    currentPriceRatio: number,
+    closedPriceRatios: number[] = [],
+    timeElapsed: number = 0
+  ): ImpermanentLossBreakdown {
+    const exits = Array.isArray(closedPriceRatios) ? closedPriceRatios : [];
+    const skippedPriceRatios: number[] = [];
+    const elapsed = Number.isFinite(timeElapsed) ? timeElapsed : 0;
+
+    if (!this.isValidRatio(initialPriceRatio)) {
+      skippedPriceRatios.push(initialPriceRatio, ...exits);
+      if (!this.isValidRatio(currentPriceRatio)) {
+        skippedPriceRatios.push(currentPriceRatio);
+      }
+      return {
+        initialPriceRatio,
+        currentPriceRatio,
+        openPriceRatio: initialPriceRatio,
+        realizedIlPercent: 0,
+        unrealizedIlPercent: 0,
+        totalIlPercent: 0,
+        closedPriceRatios: [],
+        skippedPriceRatios,
+        timeElapsed: elapsed
+      };
+    }
+
+    let openPriceRatio = initialPriceRatio;
+    let realizedIlPercent = 0;
+    const acceptedRatios: number[] = [];
+
+    for (const exitRatio of exits) {
+      if (!this.isValidRatio(exitRatio)) {
+        skippedPriceRatios.push(exitRatio);
+        continue;
+      }
+      realizedIlPercent += this.calculateImpermanentLoss(openPriceRatio, exitRatio, 0).ilPercent;
+      acceptedRatios.push(exitRatio);
+      openPriceRatio = exitRatio;
+    }
+
+    if (!this.isValidRatio(currentPriceRatio)) {
+      skippedPriceRatios.push(currentPriceRatio);
+    }
+
+    const unrealizedIlPercent = this.isValidRatio(currentPriceRatio)
+      ? this.calculateImpermanentLoss(openPriceRatio, currentPriceRatio, 0).ilPercent
+      : 0;
+
+    return {
+      initialPriceRatio,
+      currentPriceRatio,
+      openPriceRatio,
+      realizedIlPercent,
+      unrealizedIlPercent,
+      totalIlPercent: realizedIlPercent + unrealizedIlPercent,
+      closedPriceRatios: acceptedRatios,
+      skippedPriceRatios,
+      timeElapsed: elapsed
     };
   }
 

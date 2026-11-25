@@ -247,7 +247,25 @@ const il = YieldCalculator.calculateImpermanentLoss(
 );
 
 console.log(`Current IL: ${il.ilPercent.toFixed(2)}%`);
+
+// Split IL locked in at previous exits from the currently open position
+const breakdown = YieldCalculator.calculateImpermanentLossBreakdown(
+  1.0,     // Initial price ratio
+  1.5,     // Current price ratio
+  [1.25],  // Price ratios where liquidity was withdrawn
+  30       // Days elapsed
+);
+
+console.log(`Realized IL: ${breakdown.realizedIlPercent.toFixed(2)}%`);
+console.log(`Unrealized IL: ${breakdown.unrealizedIlPercent.toFixed(2)}%`);
 ```
+
+Negative percentages are losses. Realized IL is the sum of IL locked in at
+each closed price ratio. Unrealized IL is marked to market from the most recent
+closed ratio (or the initial ratio if no position has been closed). Pass closed
+ratios in withdrawal order. With no closed ratios, all IL is unrealized.
+Non-positive, non-finite, or malformed ratios are skipped and reported in
+`skippedPriceRatios` instead of producing `NaN`.
 
 ### Risk Metrics
 - **Value at Risk (VaR)**: 95% confidence level
@@ -355,6 +373,13 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 />
 ```
 
+The panel shows realized and unrealized IL as separate labeled values. Enter
+comma-separated price ratios in **Closed Price Ratios** to record exits where
+IL was realized; invalid entries are reported and excluded. Charts expose a
+text summary and an equivalent data table through `ChartSummary`, so color is
+never the only way to read a series. An empty dataset reports "No data
+available" and invalid values appear as "Unavailable".
+
 ## 🔒 Security Features
 
 ### Contract Security
@@ -388,13 +413,14 @@ uses the validated configured default.
 - **APY**: Annual percentage yield after fees
 - **TVL**: Total value locked across all vaults
 - **Harvest Efficiency**: Rewards harvested per gas spent
-- **IL Impact**: Average impermanent loss experienced
+- **IL Impact**: Realized IL locked in by exits and unrealized IL on open positions
 - **User Retention**: User engagement and retention rates
 
 ### Analytics Dashboard
 Real-time monitoring of:
 - Vault performance and rankings
 - Strategy effectiveness
+- Realized and unrealized impermanent loss
 - Risk metrics and alerts
 - Gas usage and optimization
 - User activity patterns
@@ -618,6 +644,8 @@ class RebalancerClient {
 class YieldCalculator {
   // Impermanent loss
   static calculateImpermanentLoss(initialRatio: number, currentRatio: number, timeElapsed: number): ImpermanentLossData
+  static calculateRealizedImpermanentLoss(initialRatio: number, exitRatio: number, timeElapsed?: number): RealizedImpermanentLossData
+  static calculateImpermanentLossBreakdown(initialRatio: number, currentRatio: number, closedRatios?: number[], timeElapsed?: number): ImpermanentLossBreakdown
   static simulateImpermanentLoss(initialRatio: number, volatility: number, timePeriod: number, simulations: number): SimulationResult
   
   // Yield calculations
