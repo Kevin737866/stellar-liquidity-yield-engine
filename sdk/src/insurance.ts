@@ -31,6 +31,25 @@ export interface ReserveStats {
   collateralizationRatioBps: number;
 }
 
+export interface PremiumHistoryEntry {
+  policyId: bigint;
+  purchasedAt: number;
+  coveragePeriod: number;
+  coverageAmount: bigint;
+  premiumPaid: bigint;
+  expiry: number;
+  claimed: boolean;
+  autoRenew: boolean;
+  status: "active" | "expired" | "claimed";
+}
+
+export interface CoverageSummary {
+  activeCoverage: bigint;
+  totalPremiumsPaid: bigint;
+  activePolicyCount: number;
+  history: PremiumHistoryEntry[];
+}
+
 export type CoverageDuration = "7d" | "30d" | "90d";
 
 const DURATION_SECONDS: Record<CoverageDuration, number> = {
@@ -225,6 +244,85 @@ export async function getReserveStats(
     policyCount: BigInt(native.policy_count),
     collateralizationRatioBps,
   };
+}
+
+// ─── Coverage & Premium History ──────────────────────────────────────────────
+
+/**
+ * Build a coverage and premium history view for a set of policies.
+ *
+ * Entries are sorted by startTime descending (most recent first). Each entry's
+ * status is derived from the reference time: "claimed" if claimed, "expired" if
+ * expiry <= now, otherwise "active".
+ *
+ * @param policies - Policies to summarize (e.g. fetched for one owner)
+ * @param now      - Reference time in unix seconds (defaults to current time)
+ * @returns CoverageSummary with totals and per-policy history
+ * @throws Error if a policy has invalid (non-positive or inverted) timing or negative amounts
+ */
+export function buildCoverageHistory(
+  policies: InsurancePolicy[],
+  now: number = Math.floor(Date.now() / 1000)
+): CoverageSummary {
+  const history: PremiumHistoryEntry[] = policies.map((p) => {
+    if (p.coverageAmount < 0n || p.premiumPaid < 0n) {
+      throw new Error(`Policy ${p.policyId} has negative amounts`);
+    }
+    if (p.startTime <= 0 || p.expiry < p.startTime) {
+      throw new Error(`Policy ${p.policyId} has invalid timing`);
+    }
+    const status: PremiumHistoryEntry["status"] = p.claimed
+      ? "claimed"
+      : p.expiry <= now
+        ? "expired"
+        : "active";
+    return {
+      policyId: p.policyId,
+      purchasedAt: p.startTime,
+      coveragePeriod: p.expiry - p.startTime,
+      coverageAmount: p.coverageAmount,
+      premiumPaid: p.premiumPaid,
+      expiry: p.expiry,
+      claimed: p.claimed,
+      autoRenew: p.autoRenew,
+      status,
+    };
+  });
+
+  history.sort((a, b) => b.purchasedAt - a.purchasedAt);
+
+  let activeCoverage = 0n;
+  let totalPremiumsPaid = 0n;
+  let activePolicyCount = 0;
+  for (const entry of history) {
+    totalPremiumsPaid += entry.premiumPaid;
+    if (entry.status === "active") {
+      activeCoverage += entry.coverageAmount;
+      activePolicyCount += 1;
+    }
+  }
+
+  return { activeCoverage, totalPremiumsPaid, activePolicyCount, history };
+}
+
+/**
+ * Fetch live coverage and premium history for a set of policies from the
+ * insurance contract's reserve statistics, combined with locally supplied
+ * policy records.
+ *
+ * @param insuranceContractId - Deployed ILInsurance contract ID
+ * @param server              - SorobanRpc server
+ * @param policies            - Policy records to include in the history view
+ * @returns CoverageSummary including live reserve totals
+ */
+export async function getCoverageHistory(
+  insuranceContractId: string,
+  server: SorobanRpc.Server,
+  policies: InsurancePolicy[]
+): Promise<CoverageSummary & { reserve: ReserveStats }> {
+  const reserve = await getReserveStats(insuranceContractId, server);
+  const summary = buildCoverageHistory(policies);
+  return { ...summary, reserve };
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
 export * from './insurance';
 export * from './utils';
+
 export {
   DEFAULT_NETWORK,
   DEFAULT_NETWORK_ENDPOINTS,

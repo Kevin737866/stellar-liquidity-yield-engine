@@ -173,6 +173,7 @@ export interface EventHandlerMap {
   distribution: FilteredRewardEvent;
   claim: FilteredRewardEvent;
   expiry: FilteredRewardEvent;
+  [eventName: string]: unknown;
 }
 
 export type EventHandler<K extends KnownEventName> = (event: EventHandlerMap[K]) => void;
@@ -546,7 +547,7 @@ export class ContractEventListener {
     if (!this.handlers.has(name)) {
       this.handlers.set(name, new Set());
     }
-    (this.handlers.get(name) as Set<EventHandler<K>>).add(handler);
+    (this.handlers.get(name) as Set<EventHandler<KnownEventName>>).add(handler as EventHandler<KnownEventName>);
     return this;
   }
 

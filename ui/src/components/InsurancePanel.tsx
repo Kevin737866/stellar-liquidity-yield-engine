@@ -70,6 +70,121 @@ const SectionCard: React.FC<SectionCardProps> = ({ title, children, className = 
   </div>
 );
 
+// ─── Coverage & Premium History ───────────────────────────────────────────────
+
+export interface PolicyHistoryEntry {
+  policyId: bigint;
+  startTime: number;
+  expiry: number;
+  coverageAmount: bigint;
+  premiumPaid: bigint;
+  claimed: boolean;
+  claimedAmount?: bigint;
+}
+
+export function summarizePolicyHistory(entries: PolicyHistoryEntry[], nowSecs: number) {
+  let totalPremiums = 0n;
+  let totalClaimed = 0n;
+  let activeCount = 0;
+  let expiredCount = 0;
+  let claimedCount = 0;
+  for (const e of entries) {
+    if (e.premiumPaid < 0n || e.coverageAmount < 0n) {
+      throw new RangeError(`Invalid negative amount in policy ${e.policyId.toString()}`);
+    }
+    if (e.expiry < e.startTime) {
+      throw new RangeError(`Policy ${e.policyId.toString()} expiry precedes start`);
+    }
+    totalPremiums += e.premiumPaid;
+    if (e.claimed && e.claimedAmount !== undefined) {
+      totalClaimed += e.claimedAmount;
+    }
+    if (e.claimed) claimedCount++;
+    if (!e.claimed && e.expiry > nowSecs) activeCount++;
+    if (e.expiry <= nowSecs) expiredCount++;
+  }
+  return {
+    totalPolicies: entries.length,
+    activeCount,
+    expiredCount,
+    claimedCount,
+    totalPremiums,
+    totalClaimed,
+  };
+}
+
+export const CoverageHistoryPanel: React.FC<{ entries?: PolicyHistoryEntry[] }> = ({
+  entries = [],
+}) => {
+  const nowSecs = Math.floor(Date.now() / 1000);
+
+  const summary = useMemo(() => {
+    try {
+      return { ok: true as const, data: summarizePolicyHistory(entries, nowSecs) };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : "Invalid history data" };
+    }
+  }, [entries, nowSecs]);
+
+  if (!summary.ok) {
+    return (
+      <SectionCard title="🧾 Coverage & Premium History">
+        <p className="history-error" role="alert">Unable to load history: {summary.error}</p>
+      </SectionCard>
+    );
+  }
+
+  if (entries.length === 0) {
+    return (
+      <SectionCard title="🧾 Coverage & Premium History">
+        <p className="history-empty">No insurance policies recorded yet.</p>
+      </SectionCard>
+    );
+  }
+
+  const s = summary.data;
+  return (
+    <SectionCard title="🧾 Coverage & Premium History">
+      <div className="history-grid">
+        <div className="reserve-stat">
+          <span>Total Policies</span>
+          <strong>{s.totalPolicies}</strong>
+        </div>
+        <div className="reserve-stat">
+          <span>Active</span>
+          <strong>{s.activeCount}</strong>
+        </div>
+        <div className="reserve-stat">
+          <span>Expired</span>
+          <strong>{s.expiredCount}</strong>
+        </div>
+        <div className="reserve-stat">
+          <span>Claimed</span>
+          <strong>{s.claimedCount}</strong>
+        </div>
+        <div className="reserve-stat">
+          <span>Premiums Paid</span>
+          <strong>{formatAmount(s.totalPremiums)} XLM</strong>
+        </div>
+        <div className="reserve-stat">
+          <span>Total Claimed</span>
+          <strong>{formatAmount(s.totalClaimed)} XLM</strong>
+        </div>
+      </div>
+      <ul className="history-list">
+        {entries.map((e) => (
+          <li key={e.policyId.toString()} className="history-item">
+            <span>Policy #{e.policyId.toString()}</span>
+            <span>{formatAmount(e.coverageAmount)} XLM coverage</span>
+            <span>{formatAmount(e.premiumPaid)} XLM premium</span>
+            <span>{e.claimed ? "Claimed" : e.expiry > nowSecs ? "Active" : "Expired"}</span>
+          </li>
+        ))}
+      </ul>
+    </SectionCard>
+  );
+};
+
 // ─── Premium Calculator ───────────────────────────────────────────────────────
 
 interface PremiumCalculatorProps {
@@ -357,12 +472,14 @@ export interface InsurancePanelProps {
   reserveStats?: ReserveStats;
   activePolicy?: InsurancePolicy;
   currentPriceRatioScaled?: bigint;
+  policyHistory?: PolicyHistoryEntry[];
 }
 
 const InsurancePanel: React.FC<InsurancePanelProps> = ({
   reserveStats = MOCK_RESERVE_STATS,
   activePolicy = MOCK_ACTIVE_POLICY,
   currentPriceRatioScaled = 1_050_000n, // ~5% price increase example
+  policyHistory = [],
 }) => {
   const [purchasedQuote, setPurchasedQuote] = useState<PremiumQuote | null>(null);
 
@@ -388,6 +505,7 @@ const InsurancePanel: React.FC<InsurancePanelProps> = ({
         <ReservePoolPanel stats={reserveStats} />
         <ILEstimator />
       </div>
+      <CoverageHistoryPanel entries={policyHistory} />
 
       {purchasedQuote && (
         <div className="toast-notification">

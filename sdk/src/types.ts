@@ -456,53 +456,18 @@ export interface HarvestEfficiencyMetrics {
   avgGasPerHarvest: number;
 }
 
-/**
- * Pause reason categories for vault and rebalance engine pause events.
- * These help monitors and dashboards understand why a system was paused.
- */
+// Pause reasons emitted with pause/unpause events.
 export type PauseReason =
-  | 'security' // Security concern detected (exploit, suspicious activity)
-  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large slippage)
-  | 'slippage_protection' // Price deviation exceeded threshold
-  | 'maintenance' // Scheduled maintenance or upgrade
-  | 'governance' // Governance decision or protocol vote
-  | 'liquidity_issue' // Insufficient liquidity in pool
-  | 'emergency' // Emergency situation requiring immediate pause
-  | 'manual'; // Manual administrative pause
+  | "emergency"
+  | "slippage_protection"
+  | "maintenance"
+  | "governance"
+  | "liquidity_issue"
+  | "security"
+  | "circuit_breaker"
+  | "manual";
 
-// Event Types
-export interface VaultEvent {
-  type: "deposit" | "withdraw" | "harvest" | "pause" | "unpause";
-  vault: Address;
-  user?: Address;
-  amount?: bigint;
-  timestamp: number;
-  data?: any;
-  /** Reason for pause/unpause events */
-  reason?: PauseReason;
-  /** Additional context about the pause reason */
-  reasonDetails?: string;
-}
-
-export interface RebalanceEvent {
-  type: "proposal" | "execution" | "failure";
-  strategy: number;
-  fromPool?: Address;
-  toPool?: Address;
-  amount?: bigint;
-  timestamp: number;
-  data?: any;
-  /** Reason for pause/unpause events */
-  reason?: PauseReason;
-  /** Additional context about the pause reason */
-  reasonDetails?: string;
-}
-
-export interface RewardEvent {
-  type: "distribution" | "claim" | "expiry";
-  vault: Address;
-  user?: Address;
-  amount?: bigint;
-  timestamp: number;
-  data?: any;
-}
+// Re-export event types consumed by eventListener and pauseEvents.
+export type VaultEvent = { type: string; [key: string]: any };
+export type RebalanceEvent = { type: string; [key: string]: any };
+export type RewardEvent = { type: string; [key: string]: any };

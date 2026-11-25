@@ -2,6 +2,14 @@
 
 Issue: [#120](https://github.com/Kevin737866/stellar-liquidity-yield-engine/issues/120).
 
+> Related analytics work: the insurance coverage and premium history view
+> (Analytics and reporting) should record each premium change and coverage
+> boundary as an append-only history. Upgrades must keep that history intact:
+> a `migrate` that touches the premium or coverage records must be idempotent,
+> and boundary values (zero coverage, expired policies, premium at the cap) must
+> be covered by `tests/upgrade_tests.rs` before a change to those stored shapes
+> ships.
+
 Soroban has **no proxy pattern**. There is no separate "implementation"
 contract to point at, and a contract's address is fixed for life. What the host
 does provide is

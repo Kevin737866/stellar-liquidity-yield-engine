@@ -1,6 +1,6 @@
 import { VaultClient, RebalancerClient } from './index';
-import { Keypair, Address } from 'stellar-sdk';
-import { PauseReason, VaultEvent, RebalanceEvent } from './types';
+import { Address } from 'stellar-sdk';
+import type { VaultEvent, RebalanceEvent, PauseReason } from './types';
 
 describe('Pause Event Emission', () => {
   describe('VaultClient pause events', () => {
@@ -37,7 +37,6 @@ describe('Pause Event Emission', () => {
         done();
       });
 
-      // Simulate pause event emission (in real scenario, this would be called after successful pause)
       (vaultClient as any).emitPauseEvent(reason, reasonDetails);
     });
 

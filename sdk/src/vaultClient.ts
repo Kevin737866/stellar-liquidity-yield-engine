@@ -23,8 +23,6 @@ import {
   VaultError,
   NetworkConfig,
   VaultClientOptions,
-  PauseReason,
-  VaultEvent
 } from './types';
 import { waitForTransaction } from './utils/transaction';
 
@@ -378,7 +376,7 @@ export class VaultClient extends EventEmitter {
    */
   async pause(
     adminKeyPair: any,
-    reason?: PauseReason,
+    reason?: string,
     reasonDetails?: string,
     options?: TransactionOptions
   ): Promise<TransactionResult> {
@@ -473,8 +471,8 @@ export class VaultClient extends EventEmitter {
   /**
    * Emit a pause event with reason for monitoring and dashboards
    */
-  private emitPauseEvent(reason: PauseReason, reasonDetails?: string): void {
-    const event: VaultEvent = {
+  private emitPauseEvent(reason: string, reasonDetails?: string): void {
+    const event = {
       type: 'pause',
       vault: this.contract.address(),
       timestamp: Math.floor(Date.now() / 1000),
@@ -489,7 +487,7 @@ export class VaultClient extends EventEmitter {
    * Emit an unpause event for monitoring and dashboards
    */
   private emitUnpauseEvent(): void {
-    const event: VaultEvent = {
+    const event = {
       type: 'unpause',
       vault: this.contract.address(),
       timestamp: Math.floor(Date.now() / 1000)
