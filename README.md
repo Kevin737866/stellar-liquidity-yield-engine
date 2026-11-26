@@ -554,6 +554,7 @@ before running step 4 above).
 
 For reproducible randomized swap path and quote tests, including seed replay
 and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
+For UI component handling and test coverage of wallet disconnection during transaction submission, see [Wallet Disconnection Handling](docs/WALLET_DISCONNECTION_HANDLING.md).
 
 ### Unit Tests
 ```bash
