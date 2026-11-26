@@ -14,6 +14,7 @@
 #![allow(ambiguous_glob_reexports)]
 
 use soroban_sdk::{contract, contracterror, contractimpl, Address, BytesN, Env, Symbol};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
 
 /// Typed failures of the umbrella engine contract.
 ///
