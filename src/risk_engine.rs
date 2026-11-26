@@ -37,12 +37,12 @@ pub struct EmergencyEvent {
 /// Storage keys for the append-only emergency audit history.
 /// Note: there is deliberately no key allowing in-place mutation or
 /// deletion of individual entries.
-#[num_from_u64]
+#[contracttype]
 enum EmergencyKey {
     // Number of emergency events recorded so far.
-    Count = 0,
+    Count,
     // Event at index i.
-    Event = 1,
+    Event(u64),
 }
 
 /// Configurable circuit breaker thresholds per pool
@@ -93,7 +93,6 @@ impl RiskEngine {
         env.storage()
             .persistent()
             .get(&Self::breaker_key(&env, &pool_id))
-            .unwrap_or_optimized()
             .unwrap_or(false)
     }
 
@@ -255,7 +254,7 @@ impl RiskEngine {
             }
         }
 
-        tripped
+        false
     }
 
     /// Create a comprehensive risk assessment for an arbitrage opportunity
@@ -369,7 +368,7 @@ impl RiskEngine {
         env.storage()
             .instance()
             .get(&EmergencyKey::Count)
-            .unwrap_or_default(&env, 0)
+            .unwrap_or(0)
     }
 
     /// Retrieve a single emergency event by its sequence index.

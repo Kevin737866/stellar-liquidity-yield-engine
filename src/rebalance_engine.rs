@@ -1,7 +1,7 @@
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, unwrap::UnwrapOptimized,
+    Address, Env, Map, Symbol, Vec,
 };
 
 /// Typed failures of the rebalance engine.
@@ -53,6 +53,20 @@ pub const DEFAULT_MAX_APY_AGE: u64 = 86_400;
 /// Default number of rejected observations that excludes a pool from routing
 /// until its feed is accepted again (Issue #289).
 pub const DEFAULT_FEED_FAILURE_THRESHOLD: u32 = 3;
+
+/// Data-age snapshot of a pool's oracle feed (Issue #293).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedDataAge {
+    /// Ledger timestamp of the most recent observation (0 when never published).
+    pub updated_at: u64,
+    /// Seconds elapsed since that observation (0 when never published).
+    pub age_seconds: u64,
+    /// Age after which the observation is considered stale.
+    pub max_age_seconds: u64,
+    /// Whether the observation is within `max_age_seconds` and was published.
+    pub fresh: bool,
+}
 
 /// Number of consecutive failed rebalances that trips the circuit breaker.
 pub const EMERGENCY_STOP_WINDOW: u32 = 3;
@@ -417,6 +431,7 @@ impl RebalanceEngine {
         // single window. Only successful rebalances consume the budget.
         let moved_amount = proposal.amount_a + proposal.amount_b;
         if moved_amount > 0 && !Self::pacing_allows(&env, &proposal.from_pool, moved_amount) {
+            Self::record_failed_attempt(&env, &proposal);
             return false;
         }
 
@@ -425,6 +440,7 @@ impl RebalanceEngine {
         // as the only safeguard: the bound carried on the proposal must still
         // hold against the configured maximum slippage.
         if !Self::slippage_allows(&env, &proposal) {
+            Self::record_failed_attempt(&env, &proposal);
             return false;
         }
 
@@ -459,6 +475,27 @@ impl RebalanceEngine {
         Self::add_to_history(&env, history_entry);
 
         success
+    }
+
+    /// Record an attempt that was rejected before any token moved.
+    ///
+    /// A rejection is a failed rebalance, not a no-op: the circuit breaker
+    /// counts consecutive failures from the history, so dropping rejected
+    /// attempts would let a repeatedly rejected keeper mask a broken strategy.
+    fn record_failed_attempt(env: &Env, proposal: &RebalanceProposal) {
+        let apy = Self::get_pool_current_apy(env.clone(), proposal.from_pool.clone());
+        Self::add_to_history(
+            env,
+            RebalanceHistory {
+                timestamp: env.ledger().timestamp(),
+                from_pool: proposal.from_pool.clone(),
+                to_pool: proposal.to_pool.clone(),
+                amount_moved: proposal.amount_a + proposal.amount_b,
+                apy_before: apy,
+                apy_after: apy,
+                success: false,
+            },
+        );
     }
 
     /// Current maximum slippage tolerated at execution time, in basis points.
