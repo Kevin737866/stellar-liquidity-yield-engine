@@ -106,6 +106,26 @@ export {
 } from './persistence';
 export type { CheckpointStore, KeeperCheckpoint } from './persistence';
 
+// Compatibility checks for contract storage migrations: run a captured storage
+// fixture through a migration ladder before shipping the wasm. The operator
+// procedure is docs/STORAGE_MIGRATION_COMPATIBILITY.md.
+export {
+  MigrationCompatibilityError,
+  assertMigrationCompatible,
+  checkMigrationCompatibility,
+  formatMigrationCompatibilityReport,
+  validateMigrationLadder,
+} from './storageMigrationCompat';
+export type {
+  MigrationCompatibilityIssue,
+  MigrationCompatibilityOptions,
+  MigrationCompatibilityResult,
+  MigrationIssueCode,
+  MigrationStep,
+  StorageFixture,
+  StoredEntry,
+} from './storageMigrationCompat';
+
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
 // Governance SDK exports
