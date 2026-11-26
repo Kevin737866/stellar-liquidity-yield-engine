@@ -10,6 +10,7 @@ on:
       - 'package-lock.json'
       - 'tsconfig.json'
       - 'jest.config.js'
+      - '.eslintrc.json'
   pull_request:
     paths:
       - 'sdk/**'
@@ -18,6 +19,7 @@ on:
       - 'package-lock.json'
       - 'tsconfig.json'
       - 'jest.config.js'
+      - '.eslintrc.json'
 
 jobs:
   build-lint-test:
