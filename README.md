@@ -560,6 +560,9 @@ and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
 # Run contract tests (run from the repository root)
 cargo test
 
+# Run token amount boundary tests (zero, minimum, maximum)
+cargo test --test token_amount_boundary_tests
+
 # Run SDK tests
 cd sdk/
 npm test
