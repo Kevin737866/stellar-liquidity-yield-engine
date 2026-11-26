@@ -247,14 +247,14 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 <Wallet className="h-3 w-3" />
                 {shortenAddress(walletAddress || '')}
               </Badge>
-              <Button variant="ghost" size="sm" onClick={disconnect}>
+              <Button variant="ghost" size="sm" onClick={disconnect} disabled={isTxInFlight}>
                 Disconnect
               </Button>
             </div>
           ) : (
             <Button
               onClick={connect}
-              disabled={connecting}
+              disabled={connecting || isTxInFlight}
               variant="outline"
               size="sm"
               className="gap-1"
@@ -409,8 +409,10 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-sm text-gray-500">Token A Amount</label>
+                <label htmlFor="deposit-token-a" className="text-sm text-gray-500">Token A Amount</label>
                 <Input
+                  id="deposit-token-a"
+                  aria-label="Token A Amount"
                   type="number"
                   placeholder="0"
                   value={depositAmountA}
@@ -419,8 +421,10 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
                 />
               </div>
               <div>
-                <label className="text-sm text-gray-500">Token B Amount</label>
+                <label htmlFor="deposit-token-b" className="text-sm text-gray-500">Token B Amount</label>
                 <Input
+                  id="deposit-token-b"
+                  aria-label="Token B Amount"
                   type="number"
                   placeholder="0"
                   value={depositAmountB}
@@ -453,8 +457,10 @@ export const YieldVaultCard: React.FC<YieldVaultCardProps> = ({
           <h3 className="text-lg font-semibold mb-3">Withdraw</h3>
           <div className="space-y-3">
             <div>
-              <label className="text-sm text-gray-500">Shares to Withdraw</label>
+              <label htmlFor="withdraw-shares" className="text-sm text-gray-500">Shares to Withdraw</label>
               <Input
+                id="withdraw-shares"
+                aria-label="Shares to Withdraw"
                 type="number"
                 placeholder="0"
                 value={withdrawShares}
