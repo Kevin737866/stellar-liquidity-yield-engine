@@ -160,6 +160,54 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## Reproducible artifact checks
+
+CI builds every deployable feature twice for the wasm matrix: once as a
+reference, then again after `cargo clean -p stellar-liquidity-yield-engine
+--target wasm32-unknown-unknown --release` removes this crate's artifacts.
+Both builds use Rust `1.88.0`,
+`SOURCE_DATE_EPOCH=1`, the committed `Cargo.lock`, and the release profile in
+`Cargo.toml`. `scripts/verify-wasm-artifact.js` then checks the wasm magic
+bytes and compares SHA-256 hashes. A missing artifact, a non-wasm file, or a
+hash mismatch fails the job; a passing check prints
+`sha256=<hash> size=<bytes> path=<artifact>` and the second build is uploaded
+as `contract-wasm-<contract>`.
+
+Reproduce the check locally before an upgrade:
+
+```bash
+SOURCE_DATE_EPOCH=1 cargo build \
+  --target wasm32-unknown-unknown --release \
+  --no-default-features --features yield-vault
+cp target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm reference.wasm
+
+SOURCE_DATE_EPOCH=1 cargo clean -p stellar-liquidity-yield-engine \
+  --target wasm32-unknown-unknown --release
+SOURCE_DATE_EPOCH=1 cargo build \
+  --target wasm32-unknown-unknown --release \
+  --no-default-features --features yield-vault
+
+npm run check:wasm-artifact -- \
+  --first reference.wasm \
+  --second target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
+```
+
+When the project moves to a different Rust toolchain, update the pinned
+version in `.github/workflows/ci.yml` in the same change; otherwise CI will
+compare builds from different compilers and the hashes will not be
+reproducible across releases.
+
+Before invoking `upgrade`, validate the manifest that contains `$CONTRACT_ID`:
+
+```bash
+npm run validate:deployment-manifest -- deployment-manifest.json
+```
+
+The command exits `0` only when every declared ID is a valid Stellar contract
+StrKey and no role or ID is duplicated. See the "Deployment manifest
+validation" section of the README for accepted manifest shapes and error
+codes.
+
 ## Testing an upgrade
 
 - `tests/upgrade_tests.rs` covers all seven contracts: version recorded at

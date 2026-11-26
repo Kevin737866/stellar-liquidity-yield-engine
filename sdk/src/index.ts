@@ -20,6 +20,16 @@ import {
   type OptionalNetworkConfig,
   type SupportedNetwork,
 } from './networkConfig';
+import {
+  CONTRACT_ID_PATTERN,
+  DeploymentManifestError,
+  assertValidDeploymentManifest,
+  isValidContractId,
+  validateDeploymentManifest,
+  type DeploymentManifestErrorCode,
+  type DeploymentManifestIssue,
+  type DeploymentManifestValidationResult,
+} from './deploymentManifest';
 export * from './keeperBackoff';
 export * from './types';
 export { VaultClient } from './vaultClient';
@@ -42,6 +52,16 @@ export {
   type NetworkEndpointDefaults,
   type OptionalNetworkConfig,
   type SupportedNetwork,
+};
+export {
+  CONTRACT_ID_PATTERN,
+  DeploymentManifestError,
+  assertValidDeploymentManifest,
+  isValidContractId,
+  validateDeploymentManifest,
+  type DeploymentManifestErrorCode,
+  type DeploymentManifestIssue,
+  type DeploymentManifestValidationResult,
 };
 
 // Re-export commonly used types and classes for convenience
