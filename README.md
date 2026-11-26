@@ -480,9 +480,10 @@ objects):
 
 ### Contract Deployment
 
-There is no `scripts/` directory in this repo — deploy with the `soroban`
-CLI directly. All commands below run from the **repository root** (that's
-where `Cargo.toml` lives; the crate is *not* under `src/`).
+Deployment uses the `soroban` CLI directly. The `scripts/` directory contains
+validation helpers for deployment manifests and wasm artifacts. All commands
+below run from the **repository root** (that's where `Cargo.toml` lives; the
+crate is *not* under `src/`).
 
 > **One contract per wasm.** Soroban exports a contract's entrypoints under
 > their plain function names, so two contracts cannot live in the same wasm
@@ -544,6 +545,41 @@ Save the resulting `CONTRACT_ID` into your `.env` file as
 need, such as `STRATEGY_REGISTRY_ADDRESS` and `REWARD_DISTRIBUTOR_ADDRESS`,
 before running step 4 above).
 
+#### Deployment manifest validation
+
+Record deployed addresses in a JSON manifest before wiring contracts together
+or upgrading them. The simplest form is a `contractIds` object:
+
+```json
+{
+  "network": "testnet",
+  "contractIds": {
+    "yieldEngine": "C...YOUR_DEPLOYED_CONTRACT_ID...",
+    "rewardDistributor": "C...YOUR_DEPLOYED_CONTRACT_ID..."
+  }
+}
+```
+
+A `contracts` object or array is also accepted. Array entries use `name` plus
+`contractId` (or `id` / `address`), and object entries may map each role
+directly to an ID or to an object with one of those fields. Extra fields such
+as `network` are ignored, so existing deployment records can be validated
+without being rewritten.
+
+```bash
+npm run validate:deployment-manifest -- deployment-manifest.json
+```
+
+On success the command prints the normalized ID for each role and exits `0`.
+Surrounding whitespace is trimmed. On failure it prints one
+`path: message (CODE)` line per problem and exits `1`. The error codes are
+`INVALID_MANIFEST`, `MISSING_CONTRACT_IDS`, `INVALID_CONTRACT_ID`,
+`DUPLICATE_CONTRACT_NAME`, and `DUPLICATE_CONTRACT_ID`; malformed IDs and IDs
+with an invalid Stellar checksum are both rejected.
+
+The same rules are available programmatically through `validateDeploymentManifest`
+and `assertValidDeploymentManifest` in the SDK.
+
 ## 🧪 Testing
 
 For reproducible randomized swap path and quote tests, including seed replay
@@ -554,9 +590,15 @@ and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
 # Run contract tests (run from the repository root)
 cargo test
 
-# Run SDK tests
-cd sdk/
+# Run SDK and deployment-check tests from the repository root
 npm test
+
+# Build the SDK and CLI helpers
+npm run build
+
+# Validate deployment manifests and wasm artifacts
+npm run validate:deployment-manifest -- deployment-manifest.json
+npm run check:wasm-artifact -- --first reference.wasm --second rebuilt.wasm
 
 # Run component tests
 cd ui/

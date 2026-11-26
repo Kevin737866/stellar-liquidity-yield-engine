@@ -64,6 +64,8 @@ jobs:
   wasm:
     name: build wasm (${{ matrix.contract }})
     runs-on: ubuntu-latest
+    env:
+      SOURCE_DATE_EPOCH: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -78,34 +80,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           targets: wasm32-unknown-unknown
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build contract wasm
+      - name: Build reference wasm
         run: |
           cargo build \
             --target wasm32-unknown-unknown \
             --release \
             --no-default-features \
             --features ${{ matrix.contract }}
+          cp target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm "$RUNNER_TEMP/reference.wasm"
 
-      - name: Verify wasm artifact
+      - name: Rebuild wasm from clean crate artifacts
         run: |
-          wasm=target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
-          if [ ! -f "$wasm" ]; then
-            echo "::error::expected wasm artifact was not produced: $wasm"
-            exit 1
-          fi
-          # Soroban modules start with the wasm magic number `\0asm`.
-          magic=$(head -c 4 "$wasm" | od -An -tx1 | tr -d ' \n')
-          if [ "$magic" != "0061736d" ]; then
-            echo "::error::$wasm is not a valid wasm module (magic bytes: $magic)"
-            exit 1
-          fi
-          echo "built $wasm ($(wc -c < "$wasm") bytes)"
+          cargo clean -p stellar-liquidity-yield-engine --target wasm32-unknown-unknown --release
+          cargo build \
+            --target wasm32-unknown-unknown \
+            --release \
+            --no-default-features \
+            --features ${{ matrix.contract }}
+
+      - name: Verify reproducible wasm artifact
+        id: wasm_check
+        run: |
+          check_output=$(node scripts/verify-wasm-artifact.js \
+            --first "$RUNNER_TEMP/reference.wasm" \
+            --second target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm)
+          echo "$check_output"
+          sha256=${check_output#sha256=}
+          sha256=${sha256%% *}
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload wasm artifact
         uses: actions/upload-artifact@v4
