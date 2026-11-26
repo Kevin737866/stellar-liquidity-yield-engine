@@ -296,8 +296,11 @@ await bot.forceHarvest('VAULT_ADDRESS');
 
 ### Surviving Restarts and Outages
 Keepers can checkpoint their position so a restart resumes exactly where the
-previous process stopped — no replay, no gaps. Pass a `CheckpointStore` to the
-event listener, the RPC lag monitor, and/or the auto-rebalancer:
+previous process stopped without gaps when the checkpoint is saved
+successfully. A crash after a handler's external side effect but before the
+checkpoint save can replay that event, so handlers should be idempotent. Pass
+a `CheckpointStore` to the event listener, the RPC lag monitor, and/or the
+auto-rebalancer:
 
 ```typescript
 import { ContractEventListener, FileCheckpointStore } from 'stellar-liquidity-yield-engine-sdk';
@@ -317,6 +320,9 @@ model and `examples/restart-during-outage.ts` for a runnable demonstration:
 ```bash
 npx ts-node examples/restart-during-outage.ts
 ```
+
+For on-call recovery steps, checkpoint inspection, and failure handling, see
+the [indexer checkpoint recovery runbook](docs/INDEXER_CHECKPOINT_RECOVERY.md).
 
 ## 🎛️ React Components
 
