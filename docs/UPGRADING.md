@@ -172,5 +172,13 @@ migrate the stored `streams` vector rather than decode it as-is.
   on its last live ledger, archived on the next one, and `extend_ttl` moves that
   boundary without losing the value.
 - Run `cargo test --test upgrade_tests`.
+- Cross-release SDK API compatibility is guarded by regression tests that pin the
+  entrypoint surface (`upgrade`, `migrate`, `get_storage_version`) and the
+  `contract_upgraded` / `contract_migrated` event shapes. A new release that
+  renames or removes one of these must update the tests deliberately; a change
+  that breaks an existing deployed integration fails CI instead of slipping
+  through silently. Normal behavior, boundary cases (version `0` from legacy
+  deployments, repeated `migrate` calls) and failure cases (non-admin callers,
+  unknown wasm hashes) are each covered explicitly.
 - The test builds the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
