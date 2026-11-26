@@ -441,7 +441,42 @@ CHECK_INTERVAL=300000
 `.env.example` also lists governance-related addresses
 (`GOVERNANCE_CONTRACT`, `VOTING_ESCROW_CONTRACT`, etc.) read by
 `sdk/src/governance.ts`. There is no working contract to deploy for those
-yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
+yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). The SDK history reader
+does support bounded pages via `getProposalPage()` / `paginateProposals()` for
+keepers and UI callers.
+
+### Optional Network Configuration Behavior
+
+When optional network configuration fields or environment variables are omitted
+(or contain only whitespace), the SDK resolves deterministic defaults via
+`resolveNetworkConfig()` (and the preset `TESTNET_CONFIG` / `MAINNET_CONFIG`
+objects):
+
+- **Default network:** Omitting `network` defaults to `'testnet'`
+  (`DEFAULT_NETWORK`).
+- **Default endpoints:** Omitting `horizonUrl` / `sorobanRpcUrl` checks the
+  matching network environment variables (`HORIZON_URL` / `SOROBAN_RPC_URL` for
+  testnet, `MAINNET_HORIZON_URL` / `MAINNET_SOROBAN_RPC_URL` for mainnet,
+  `FUTURENET_HORIZON_URL` / `FUTURENET_SOROBAN_RPC_URL` for futurenet) and falls
+  back to the public Stellar endpoints in `DEFAULT_NETWORK_ENDPOINTS`.
+- **Optional client config:**
+  - `createVaultClient(vaultAddress)` defaults to `'testnet'` and does not
+    require contract environment variables to construct.
+  - `createGovernanceClient()` defaults to `'testnet'`, starts read-only when
+    `keypair` is omitted, and reports unconfigured contracts via
+    `isContractConfigured(...) === false`.
+  - `StrategyRegistryClient` falls back to built-in default strategies when
+    `contracts.strategyRegistry` is empty or unavailable.
+- **Explicit failure cases:**
+  - Passing an unsupported network name throws `NetworkConfigError`
+    (`INVALID_NETWORK`) rather than silently targeting mainnet.
+  - Supplying a malformed or non-`http(s)` endpoint URL (via config or env)
+    throws `NetworkConfigError` (`INVALID_ENDPOINT_URL`).
+  - Accessing an unset or whitespace-only contract ID on
+    `TESTNET_CONFIG.contracts.*` / `MAINNET_CONFIG.contracts.*` throws
+    `NetworkConfigError` (`MISSING_CONTRACT_ID`) naming the missing variable,
+    and constructing `RebalancerClient` without a `rebalanceEngine` contract ID
+    throws `RebalanceError` (`MISSING_CONTRACT_ID`).
 
 Protocol parameter changes (fees, rebalance threshold, insurance reserve)
 follow [docs/CONFIG_MIGRATION_CHECKLIST.md](docs/CONFIG_MIGRATION_CHECKLIST.md)

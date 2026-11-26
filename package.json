@@ -8,7 +8,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "test": "jest",
-    "lint": "eslint src/**/*.ts",
+    "lint": "eslint \"sdk/src/**/*.ts\"",
     "clean": "rm -rf dist"
   },
   "dependencies": {
