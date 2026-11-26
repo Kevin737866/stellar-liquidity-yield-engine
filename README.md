@@ -501,7 +501,34 @@ where `Cargo.toml` lives; the crate is *not* under `src/`).
 
 Deployable contracts: `engine` (the umbrella `StellarLiquidityYieldEngine`),
 `yield-vault`, `rebalance-engine`, `reward-distributor`, `strategy-registry`,
-`il-insurance`, `actuary`.
+`il-insurance`, `actuary`, `oracle-registry`, and `risk-engine`.
+
+#### Generate deployment manifests
+
+The network and contract initialization inputs live in
+[`deployments/schema.json`](deployments/schema.json). Generate a deployment
+plan for each configured network from the repository root:
+
+```bash
+npm run generate:deployment-manifests
+# Writes deployments/manifests/testnet.json and mainnet.json
+```
+
+Use `node scripts/generate-deployment-manifests.js --schema PATH --output-dir PATH`
+to select a schema or output directory. The generator validates the schema
+version, network URLs, supported contract names, and each contract's exact
+initializer arguments; invalid input exits with an error and does not write
+manifests. Each JSON manifest contains the selected network's RPC/Horizon
+endpoints and passphrase, plus a per-contract Cargo feature, wasm artifact
+path, and `initialize` argument values. `${...}` values are deliberate
+operator-supplied placeholders, not credentials. Replace them with addresses
+and configuration appropriate to that network before using the plan.
+
+Manifests describe a deployment; they do not execute transactions, build wasm,
+or create/fund signer identities. Use the `cliNetwork` and per-contract build
+feature from a manifest with the commands below. Build each contract
+separately, deploy it, and invoke its listed initializer arguments only after
+its dependencies are deployed.
 
 ```bash
 # 0. One-time setup: install the wasm target and create/fund a testnet identity
