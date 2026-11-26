@@ -248,3 +248,21 @@ export {
   isContractEvent,
 } from './eventOrigin';
 export type { EventOrigin, LedgerEvent } from './eventOrigin';
+
+// Normalized Horizon and Soroban RPC error boundary.
+export {
+  SdkBoundaryError,
+  normalizeSdkError,
+  normalizeHorizonError,
+  normalizeSorobanRpcError,
+  isSdkBoundaryError,
+  isRetryableSdkError,
+  withNormalizedBoundaryError,
+} from './errors';
+export type {
+  SdkErrorSource,
+  SdkErrorCategory,
+  HorizonResultCodes,
+  NormalizeErrorContext,
+  NormalizedSdkErrorDetails,
+} from './errors';

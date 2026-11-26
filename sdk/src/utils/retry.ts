@@ -5,6 +5,8 @@
  * should be retried with exponential backoff to reduce spurious failures.
  */
 
+import { isSdkBoundaryError } from '../errors';
+
 export interface RetryOptions {
   /** Maximum number of retry attempts. Defaults to 3. */
   maxRetries?: number;
@@ -80,14 +82,23 @@ const TRANSIENT_ERROR_PATTERNS = [
  * Determine if an error is transient and should trigger a retry.
  */
 function isTransientError(error: Error): boolean {
+  // Respect normalized SDK boundary errors directly
+  if (isSdkBoundaryError(error)) {
+    return error.retryable;
+  }
+
   // Check error code
   if ('code' in error && TRANSIENT_ERROR_CODES.includes((error as any).code)) {
     return true;
   }
 
-  // Check HTTP status code
+  // Check HTTP status code (direct or axios response.status)
   if ('status' in error && typeof (error as any).status === 'number') {
     return TRANSIENT_HTTP_STATUS_CODES.includes((error as any).status);
+  }
+  const responseStatus = (error as any)?.response?.status;
+  if (typeof responseStatus === 'number') {
+    return TRANSIENT_HTTP_STATUS_CODES.includes(responseStatus);
   }
 
   // Check error message
