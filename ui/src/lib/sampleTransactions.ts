@@ -9,6 +9,8 @@ export const sampleTransactions: TransactionRecord[] = [
     asset: 'USDC',
     timestamp: '2026-11-21 14:32',
     hash: '0x8f3a…c21d',
+    vault: 'Stable Growth Vault',
+    pool: 'XLM / USDC',
   },
   {
     id: 'tx-2',
@@ -18,6 +20,8 @@ export const sampleTransactions: TransactionRecord[] = [
     asset: 'XLM',
     timestamp: '2026-11-21 11:05',
     hash: '0x2b71…9e4a',
+    vault: 'Balanced Yield Vault',
+    pool: 'XLM / EURC',
   },
   {
     id: 'tx-3',
@@ -27,6 +31,8 @@ export const sampleTransactions: TransactionRecord[] = [
     asset: 'USDC',
     timestamp: '2026-11-20 18:47',
     hash: '0x71c9…4f0b',
+    vault: 'Stable Growth Vault',
+    pool: 'XLM / USDC',
   },
   {
     id: 'tx-4',
@@ -36,6 +42,8 @@ export const sampleTransactions: TransactionRecord[] = [
     asset: 'AQUA',
     timestamp: '2026-11-20 09:15',
     hash: '0x9d02…77ae',
+    vault: 'Aqua Incentive Vault',
+    pool: 'AQUA / USDC',
   },
   {
     id: 'tx-5',
@@ -45,5 +53,7 @@ export const sampleTransactions: TransactionRecord[] = [
     asset: 'USDC',
     timestamp: '2026-11-19 16:08',
     hash: '0x4e88…1c3d',
+    vault: 'Stable Growth Vault',
+    pool: 'XLM / USDC',
   },
 ];

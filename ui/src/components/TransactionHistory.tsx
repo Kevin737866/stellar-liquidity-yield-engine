@@ -1,10 +1,12 @@
 'use client';
 
-import { useId, useMemo, useState } from 'react';
+import { Fragment, useId, useMemo, useState } from 'react';
+import { TransactionConfirmationDetails } from '@/components/TransactionConfirmationDetails';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
+import { getTransactionConfirmation } from '@/lib/transactionConfirmation';
 import {
   ALL_TRANSACTIONS,
   DEFAULT_TRANSACTION_FILTERS,
@@ -54,6 +56,8 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
   const statusId = useId();
   const operationId = useId();
   const summaryId = useId();
+  const detailsIdPrefix = useId();
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const filtered = useMemo(
     () => filterTransactions(transactions, { status, operation }),
@@ -70,7 +74,8 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
             Transaction history
           </h2>
           <p className="text-sm text-slate-600">
-            Review deposits, withdrawals, rebalances, harvests, and claims.
+            Review deposits, withdrawals, rebalances, harvests, and claims. Open a
+            transaction's details to see the vault and pool selected for it.
           </p>
         </div>
         <Button
@@ -142,7 +147,7 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
             <table className="w-full text-left text-sm">
               <caption className="sr-only">
                 Filtered transaction history. Use the status and operation filters to narrow the
-                list.
+                list, and the details buttons to review the selected vault and pool.
               </caption>
               <thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
                 <tr>
@@ -161,37 +166,72 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
                   <th scope="col" className="px-3 py-3 font-medium">
                     Transaction
                   </th>
+                  <th scope="col" className="px-3 py-3 font-medium">
+                    Details
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-3 py-8 text-center text-slate-600">
+                    <td colSpan={6} className="px-3 py-8 text-center text-slate-600">
                       No transactions match the selected filters.
                     </td>
                   </tr>
                 ) : (
-                  filtered.map((transaction) => (
-                    <tr key={transaction.id}>
-                      <th scope="row" className="whitespace-nowrap px-3 py-3 font-medium text-slate-900">
-                        {transaction.timestamp}
-                      </th>
-                      <td className="px-3 py-3 text-slate-600">
-                        {operationLabel[transaction.operation]}
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-3 text-slate-900">
-                        {transaction.amount} {transaction.asset}
-                      </td>
-                      <td className="px-3 py-3">
-                        <Badge variant={statusVariant[transaction.status]}>
-                          {statusLabel[transaction.status]}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-3 font-mono text-xs text-slate-500">
-                        {transaction.hash ?? '—'}
-                      </td>
-                    </tr>
-                  ))
+                  filtered.map((transaction) => {
+                    const isExpanded = expandedId === transaction.id;
+                    const detailsId = `${detailsIdPrefix}-${transaction.id}`;
+                    const operation =
+                      operationLabel[transaction.operation] ?? transaction.operation;
+
+                    return (
+                      <Fragment key={transaction.id}>
+                        <tr>
+                          <th scope="row" className="whitespace-nowrap px-3 py-3 font-medium text-slate-900">
+                            {transaction.timestamp}
+                          </th>
+                          <td className="px-3 py-3 text-slate-600">{operation}</td>
+                          <td className="whitespace-nowrap px-3 py-3 text-slate-900">
+                            {transaction.amount} {transaction.asset}
+                          </td>
+                          <td className="px-3 py-3">
+                            <Badge variant={statusVariant[transaction.status]}>
+                              {statusLabel[transaction.status]}
+                            </Badge>
+                          </td>
+                          <td className="px-3 py-3 font-mono text-xs text-slate-500">
+                            {transaction.hash ?? '—'}
+                          </td>
+                          <td className="px-3 py-3">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              aria-expanded={isExpanded}
+                              aria-controls={detailsId}
+                              aria-label={`${isExpanded ? 'Hide' : 'View'} confirmation details for ${operation} on ${transaction.timestamp}`}
+                              onClick={() => {
+                                setExpandedId(isExpanded ? null : transaction.id);
+                              }}
+                            >
+                              {isExpanded ? 'Hide details' : 'View details'}
+                            </Button>
+                          </td>
+                        </tr>
+                        {isExpanded && (
+                          <tr>
+                            <td colSpan={6} className="px-3 pb-4">
+                              <div id={detailsId}>
+                                <TransactionConfirmationDetails
+                                  confirmation={getTransactionConfirmation(transaction)}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })
                 )}
               </tbody>
             </table>

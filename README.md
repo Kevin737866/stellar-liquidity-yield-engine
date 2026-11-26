@@ -399,6 +399,8 @@ Real-time monitoring of:
 - Gas usage and optimization
 - User activity patterns
 
+The `/transactions` history includes expandable [transaction confirmation details](docs/TRANSACTION_CONFIRMATION_DETAILS.md) showing the vault and pool selected for each transaction.
+
 ## 🌐 Network Support
 
 ### Testnet
