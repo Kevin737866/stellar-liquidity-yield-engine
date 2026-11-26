@@ -361,6 +361,10 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 - **In-place Upgrades**: Every contract exposes admin-only `upgrade(admin, new_wasm_hash)`,
   `migrate(admin)` and `get_storage_version()` so deployed state can be fixed
   without changing the contract address — see [docs/UPGRADING.md](docs/UPGRADING.md)
+- **Staged Upgrade Validation**: `planStagedUpgrade()` gates a promotion on
+  installed wasm, simulation, a verified staging copy, approvals and a written
+  rollback plan, and refuses to advance until each stage is complete — see
+  [docs/STAGED_UPGRADE_VALIDATION.md](docs/STAGED_UPGRADE_VALIDATION.md)
 - **Emergency Pause**: Admin can pause all operations
 - **Access Control**: Role-based permissions
 - **Input Validation**: Comprehensive parameter checks

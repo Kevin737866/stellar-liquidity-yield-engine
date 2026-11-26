@@ -64,6 +64,18 @@ The upgrade is atomic: if the hash was never uploaded, or the admin check
 fails, the call reverts and the old code stays live (covered by
 `tests/upgrade_tests.rs::test_upgrade_of_unknown_wasm_hash_fails_without_touching_the_contract`).
 
+### Validating the stages first
+
+A production promotion goes through seven gates: preflight, install, simulate,
+staging on a separate contract, promote, verify and closeout. Build the plan
+from the evidence gathered so far with
+`planStagedUpgrade()` (`sdk/src/stagedUpgrade.ts`) and refuse to submit
+`upgrade` until `plan.canPromote` is true and `plan.nextStage === 'promote'`.
+It blocks a promotion with a missing rollback hash, a schema downgrade, a
+migration whose version does not move, an unverified staging copy, or too few
+approvals — the full procedure is
+[docs/STAGED_UPGRADE_VALIDATION.md](STAGED_UPGRADE_VALIDATION.md).
+
 ### Rolling back
 
 Upload the previous build and point `upgrade` at it. A rollback is only safe if
