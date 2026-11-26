@@ -4,6 +4,7 @@ Thank you for your interest in contributing! This guide covers everything you ne
 
 ## Table of Contents
 - [Development Workflow](#development-workflow)
+- [Contract Change Checklist](#contract-change-checklist)
 - [Code Standards](#code-standards)
 - [Pull Request Process](#pull-request-process)
 - [Issue Reporting](#issue-reporting)
@@ -92,6 +93,29 @@ test: add governance quorum edge case tests
 git push -u origin feat/your-feature-name
 ```
 Then open a Pull Request against `main` on GitHub.
+
+## Contract Change Checklist
+
+Changes to `src/` contracts or contract-facing SDK and deployment code require the
+[contract change checklist](docs/CONTRACT_CHANGE_CHECKLIST.md). Use it when
+changing entrypoints, storage, authorization, upgrade behavior, events, fees,
+token transfers, or WASM build/deployment configuration.
+
+The pull request template includes the minimum contract-change sign-off:
+
+- [ ] Normal behavior and success paths are covered by tests.
+- [ ] Boundary values (zero, maximum, overflow, cooldown, and limit cases) are
+      covered explicitly.
+- [ ] Failure behavior (invalid inputs, unauthorized callers, pause state, and
+      migration/upgrade failures) is covered explicitly.
+- [ ] Storage compatibility and migration behavior are documented.
+- [ ] Authorization, pause, fee, and event changes are reflected in
+      `docs/SECURITY_CHECKLIST.md`.
+- [ ] Every affected contract is built as a separate WASM artifact.
+- [ ] User-facing behavior and deployment or migration steps are documented.
+
+If a contract change is not applicable to an item, explain why in the PR rather
+than leaving the checkbox unexplained.
 
 ## Code Standards
 
