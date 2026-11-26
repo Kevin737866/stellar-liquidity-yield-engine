@@ -1,7 +1,7 @@
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, unwrap::UnwrapOptimized,
+    Address, Env, Map, Symbol, Vec,
 };
 
 /// Typed failures of the rebalance engine.
@@ -53,6 +53,20 @@ pub const DEFAULT_MAX_APY_AGE: u64 = 86_400;
 /// Default number of rejected observations that excludes a pool from routing
 /// until its feed is accepted again (Issue #289).
 pub const DEFAULT_FEED_FAILURE_THRESHOLD: u32 = 3;
+
+/// Data-age snapshot of a pool's oracle feed (Issue #293).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedDataAge {
+    /// Ledger timestamp of the most recent observation (0 when never published).
+    pub updated_at: u64,
+    /// Seconds elapsed since that observation (0 when never published).
+    pub age_seconds: u64,
+    /// Age after which the observation is considered stale.
+    pub max_age_seconds: u64,
+    /// Whether the observation is within `max_age_seconds` and was published.
+    pub fresh: bool,
+}
 
 /// Number of consecutive failed rebalances that trips the circuit breaker.
 pub const EMERGENCY_STOP_WINDOW: u32 = 3;
@@ -247,9 +261,10 @@ impl RebalanceEngine {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_apy_age"), &DEFAULT_MAX_APY_AGE);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "max_slippage_bps"), &DEFAULT_MAX_SLIPPAGE_BPS);
+        env.storage().instance().set(
+            &Symbol::new(&env, "max_slippage_bps"),
+            &DEFAULT_MAX_SLIPPAGE_BPS,
+        );
         // Record the storage schema version of this build; `migrate` moves it
         // forward after an upgrade swaps the code.
         crate::upgrade::set_storage_version(&env, crate::upgrade::STORAGE_VERSION);
@@ -416,6 +431,7 @@ impl RebalanceEngine {
         // single window. Only successful rebalances consume the budget.
         let moved_amount = proposal.amount_a + proposal.amount_b;
         if moved_amount > 0 && !Self::pacing_allows(&env, &proposal.from_pool, moved_amount) {
+            Self::record_failed_attempt(&env, &proposal);
             return false;
         }
 
@@ -424,6 +440,7 @@ impl RebalanceEngine {
         // as the only safeguard: the bound carried on the proposal must still
         // hold against the configured maximum slippage.
         if !Self::slippage_allows(&env, &proposal) {
+            Self::record_failed_attempt(&env, &proposal);
             return false;
         }
 
@@ -460,6 +477,27 @@ impl RebalanceEngine {
         success
     }
 
+    /// Record an attempt that was rejected before any token moved.
+    ///
+    /// A rejection is a failed rebalance, not a no-op: the circuit breaker
+    /// counts consecutive failures from the history, so dropping rejected
+    /// attempts would let a repeatedly rejected keeper mask a broken strategy.
+    fn record_failed_attempt(env: &Env, proposal: &RebalanceProposal) {
+        let apy = Self::get_pool_current_apy(env.clone(), proposal.from_pool.clone());
+        Self::add_to_history(
+            env,
+            RebalanceHistory {
+                timestamp: env.ledger().timestamp(),
+                from_pool: proposal.from_pool.clone(),
+                to_pool: proposal.to_pool.clone(),
+                amount_moved: proposal.amount_a + proposal.amount_b,
+                apy_before: apy,
+                apy_after: apy,
+                success: false,
+            },
+        );
+    }
+
     /// Current maximum slippage tolerated at execution time, in basis points.
     pub fn get_max_slippage_bps(env: Env) -> u32 {
         env.storage()
@@ -471,7 +509,10 @@ impl RebalanceEngine {
     /// Set the maximum slippage tolerated at execution time (admin only).
     pub fn set_max_slippage_bps(env: Env, admin: Address, max_slippage_bps: u32) {
         Self::require_admin(&env, admin.clone());
-        require!(max_slippage_bps <= 10000, "max_slippage_bps must not exceed 10000");
+        require!(
+            max_slippage_bps <= 10000,
+            "max_slippage_bps must not exceed 10000"
+        );
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_slippage_bps"), &max_slippage_bps);
@@ -1751,7 +1792,12 @@ impl RebalanceEngine {
     }
 
     /// Set consecutive failure breaker threshold for a specific strategy (admin only).
-    pub fn set_strategy_breaker_threshold(env: Env, admin: Address, strategy_id: u32, threshold: u32) {
+    pub fn set_strategy_breaker_threshold(
+        env: Env,
+        admin: Address,
+        strategy_id: u32,
+        threshold: u32,
+    ) {
         Self::require_admin(&env, admin.clone());
         require!(threshold > 0, "threshold must be greater than zero");
         let mut thresholds: Map<u32, u32> = env
@@ -1764,7 +1810,10 @@ impl RebalanceEngine {
             .instance()
             .set(&Symbol::new(&env, "strat_breaker_thresh"), &thresholds);
         env.events().publish(
-            (Symbol::new(&env, "strat_breaker_thresh_updated"), strategy_id),
+            (
+                Symbol::new(&env, "strat_breaker_thresh_updated"),
+                strategy_id,
+            ),
             (admin, threshold),
         );
     }
@@ -2312,6 +2361,8 @@ mod tests {
 
         let err = client.try_get_strategy(&7).unwrap_err().unwrap();
         assert_eq!(err, RebalanceError::StrategyNotFound.into());
+    }
+
     // ============ REBALANCE PACING TESTS (Issue #302) ============
 
     /// Real token contracts for a rebalance leg: the engine pulls the `from`
@@ -2547,7 +2598,10 @@ mod tests {
 
         assert_eq!(client.get_pool_breaker_threshold(&pool_a), 2);
         assert_eq!(client.get_pool_breaker_threshold(&pool_b), 4);
-        assert_eq!(client.get_pool_breaker_threshold(&pool_c), EMERGENCY_STOP_WINDOW);
+        assert_eq!(
+            client.get_pool_breaker_threshold(&pool_c),
+            EMERGENCY_STOP_WINDOW
+        );
 
         // Record 2 failures for Pool A
         client.execute_rebalance(&caller, &failed_proposal(&env, &pool_a));

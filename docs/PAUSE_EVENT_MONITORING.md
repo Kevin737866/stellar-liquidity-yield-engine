@@ -24,6 +24,32 @@ Pause events now include structured reason categories that help monitoring syste
 | `emergency` | Emergency situation requiring immediate pause | Critical alerts, immediate response |
 | `manual` | Manual administrative pause | Informational, admin action |
 
+## Emergency multisig actions
+
+The vault's multisig `emergency_pause` and `emergency_unpause` entrypoints
+require a reason string in addition to the signer set. The reason is published
+with the event, so a monitor can tell why the vault was paused or resumed
+without reconstructing the multisig session:
+
+```text
+topics: ("emergency_pause",)
+data:   (contract_address, reason)
+```
+
+```text
+topics: ("emergency_unpause",)
+data:   (contract_address, reason)
+```
+
+- The reason must be non-empty and at most 256 bytes. An empty reason fails
+  with `EmergencyReasonRequired` (20); an over-long one fails with
+  `EmergencyReasonTooLong` (21). Neither failure changes the paused state.
+- The 256-byte limit is a byte length, not a character count. A UTF-8 reason
+  with multi-byte characters consumes more than one byte per character.
+- Read the reason from the second element of the event data to display or
+  alert on it. The first element remains the emitting vault address, so
+  existing address-based filters keep working.
+
 ## Consuming Pause Events
 
 ### VaultClient Example
