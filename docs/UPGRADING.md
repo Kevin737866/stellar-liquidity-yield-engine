@@ -33,8 +33,36 @@ behind an address changed without the address changing.
 
 `initialize` records `upgrade::STORAGE_VERSION` (`src/upgrade.rs`), so a freshly
 deployed contract starts at the version of the code that deployed it. A
-contract deployed before this existed reads `0`, which is exactly what
-`migrate` is for.
+contract deployed before this existed also reads `0`. Therefore, `0` alone does
+not tell an operator whether a deployment is uninitialized or is an initialized
+legacy deployment; establish deployment history before choosing a migration.
+
+## Supported paths between releases
+
+The crate currently uses storage schema version `1` for the upgrade-managed
+contracts. This number describes stored data, not the package version or wasm
+release. Equal version numbers are necessary but not sufficient for
+compatibility: check the stored shapes and migration behavior of the specific
+contract being upgraded.
+
+| Source storage | Target storage | Supported path |
+| --- | --- | --- |
+| `1` | `1` | In-place upgrade when the new code preserves the existing stored shapes. Do not call `migrate`; a logic-only upgrade needs no schema transaction. |
+| `0` | `1` | In-place only when the target code already understands the source layout. The current migration only records version `1`; it does not convert stored values. |
+| `N` | `M`, where `M > N` | In-place only if the target release implements and tests a forward migration from that specific source layout. If it does not, this path is unsupported; redeploy and move state deliberately instead. |
+| `M` | `N`, where `N < M` | Not supported by default. A downgrade needs an explicitly tested reverse-compatible wasm and reversible data migration. |
+
+`migrate` currently records the target build's `STORAGE_VERSION` and emits
+`contract_migrated`; it does not validate the source version or select a
+version-specific migration. Operators must compare the contract's reported
+version with the target release's documented source-version support before
+calling it. Do not use `migrate` to mark an incompatible layout as compatible.
+
+For each release that changes `STORAGE_VERSION`, its release notes should state
+the source schema versions supported by that contract, the migration performed,
+whether a redeploy is required, and whether rollback remains safe. Until a
+source-to-target path is explicitly documented and tested, treat it as
+unsupported for in-place upgrades.
 
 ## Flow A — in-place upgrade (storage-compatible change)
 
@@ -68,11 +96,22 @@ soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet 
   --admin "$(soroban keys address deployer)" \
   --new_wasm_hash "$NEW_WASM_HASH"
 
-# 4. Confirm the new code is live and, if it bumped the schema version, migrate.
+# 3. Confirm the schema version now stored on the contract.
 soroban contract invoke --id "$CONTRACT_ID" --network testnet -- get_storage_version
+```
+
+Run `migrate` only if the target release documents a migration from the
+reported source version:
+
+```bash
 soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- \
   migrate --admin "$(soroban keys address deployer)"
 ```
+
+For a `1` to `1` storage-compatible upgrade, stop after checking the version;
+calling `migrate` anyway writes the same version and emits an unnecessary
+`contract_migrated` event. For a `0` to `1` legacy deployment, run it only after
+confirming that the target understands the existing stored layout.
 
 The upgrade is atomic: if the hash was never uploaded, or the admin check
 fails, the call reverts and the old code stays live (covered by
@@ -197,5 +236,13 @@ threshold semantics and archival failure modes are in
   on its last live ledger, archived on the next one, and `extend_ttl` moves that
   boundary without losing the value.
 - Run `cargo test --test upgrade_tests`.
+- Cross-release SDK API compatibility is guarded by regression tests that pin the
+  entrypoint surface (`upgrade`, `migrate`, `get_storage_version`) and the
+  `contract_upgraded` / `contract_migrated` event shapes. A new release that
+  renames or removes one of these must update the tests deliberately; a change
+  that breaks an existing deployed integration fails CI instead of slipping
+  through silently. Normal behavior, boundary cases (version `0` from legacy
+  deployments, repeated `migrate` calls) and failure cases (non-admin callers,
+  unknown wasm hashes) are each covered explicitly.
 - The test builds the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
