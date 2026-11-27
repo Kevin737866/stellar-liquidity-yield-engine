@@ -200,6 +200,22 @@ export interface ImpermanentLossData {
   timeElapsed: number;
 }
 
+/**
+ * Projected APY for a pool or vault.
+ *
+ * Annualization assumptions:
+ * - `projectedApy` is an annual percentage yield expressed as a percentage
+ *   (e.g. 12.5 means 12.5% per year), not basis points.
+ * - Figures are derived from the historical per-period yield series by
+ *   averaging it and treating that average as the steady-state rate for the
+ *   full `timeHorizon`. No compounding is assumed unless stated by the caller.
+ * - `timeHorizon` is in days and is used only for labeling and confidence
+ *   weighting; it does not alter the annualized rate.
+ * - Market adjustments (bullish/bearish, volume) are applied multiplicatively
+ *   to the annualized historical average.
+ * - Empty history yields `projectedApy = 0` and `confidence = 0`, meaning no
+ *   annualized figure is available rather than a true 0% yield.
+ */
 export interface ApyProjection {
   projectedApy: number;
   confidence: number; // 0-100
@@ -338,6 +354,49 @@ export interface VaultConfig {
   maxSlippage: number; // Basis points
 }
 
+// Event Types (consumed by eventListener / pauseEvents)
+export type PauseReason =
+  | "emergency"
+  | "maintenance"
+  | "governance"
+  | "security"
+  | "circuit_breaker"
+  | "slippage_protection"
+  | "unknown";
+
+export interface VaultEvent {
+  type: string;
+  vault: Address;
+  vaultAddress?: Address;
+  timestamp: number;
+  txHash?: string;
+  data?: Record<string, unknown>;
+  contractId?: string;
+}
+
+export interface RebalanceEvent {
+  type: string;
+  vaultAddress: Address;
+  strategy?: number;
+  fromPool: Address;
+  toPool: Address;
+  amountMoved: bigint;
+  timestamp: number;
+  txHash?: string;
+  data?: unknown;
+  contractId?: string;
+}
+
+export interface RewardEvent {
+  type: string;
+  vaultAddress: Address;
+  amount: bigint;
+  timestamp: number;
+  txHash?: string;
+  data?: unknown;
+  contractId?: string;
+}
+
 // Error Types
 export class VaultError extends Error {
   constructor(
@@ -397,6 +456,12 @@ export interface PaginationOptions {
 // Performance History Types (Issue #128)
 
 /**
+ * Harvest event used by the yield calculator. Alias of `RawHarvestEvent`,
+ * exported under this name so `yieldCalculator.ts` can import it from `./types`.
+ */
+export type HarvestEvent = RawHarvestEvent;
+
+/**
  * A snapshot of vault performance at a point in time, derived from harvest
  * events. Used by `VaultClient.getPerformanceHistory()`.
  */
@@ -412,31 +477,23 @@ export interface PerformanceSnapshot {
 }
 
 /**
- * A single raw harvest event returned by `VaultClient.getHarvestHistory()`.
+ * A single raw harvest event as emitted by the vault contract.
  */
-export interface HarvestEvent {
-  /** Unix timestamp (seconds) of the harvest */
+export type RawHarvestEvent = {
   timestamp: number;
-  /** Total rewards collected during this harvest */
-  rewardsHarvested: bigint;
-  /** Gas units consumed by this harvest transaction */
-  gasUsed: number;
-  /** Transaction hash of the harvest */
-  txHash: string;
-}
+  amount: bigint;
+  apy?: number;
+  tvl?: bigint;
+};
 
-/**
- * An impermanent loss snapshot derived from on-chain price data.
- * Returned by `VaultClient.getILHistory()`.
- */
-export interface ILSnapshot {
-  /** Unix timestamp (seconds) of the measurement */
-  timestamp: number;
-  /** IL as a percentage (negative means loss) */
-  ilPercent: number;
-  /** Token B / Token A price ratio at this point in time */
-  priceRatio: number;
-}
+// Event type unions used by eventListener filtering
+export type VaultEventType = VaultEvent["type"];
+export type RebalanceEventType = RebalanceEvent["type"];
+export type RewardEventType = RewardEvent["type"];
+
+export type FilteredVaultEvent = VaultEvent & { vault: string };
+export type FilteredRebalanceEvent = RebalanceEvent & { vaultAddress: string };
+export type FilteredRewardEvent = RewardEvent & { vaultAddress: string };
 
 /**
  * Aggregate harvest efficiency metrics computed by

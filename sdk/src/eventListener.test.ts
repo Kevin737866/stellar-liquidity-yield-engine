@@ -720,7 +720,7 @@ describe('durable state', () => {
       store,
     });
     const errors: string[] = [];
-    listener.onError((e) => errors.push(e.error.message));
+    listener.onError((e: ListenerErrorEvent) => errors.push(e.error.message));
 
     await listener.poll();
 

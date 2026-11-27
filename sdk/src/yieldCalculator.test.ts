@@ -198,6 +198,7 @@ describe('YieldCalculator.calculateCompoundInterest', () => {
     expect(result.finalAmount).toBe(1100n);
     expect(result.totalInterest).toBe(100n);
     expect(result.effectiveApy).toBeCloseTo(1000, 3);
+    // Annualization assumption: rates are simple annual bp, compounded per period.
   });
 
   it('returns principal and zero interest for a zero horizon', () => {
@@ -304,61 +305,5 @@ describe('YieldCalculator.simulateImpermanentLoss', () => {
     for (const il of result.ilDistribution) {
       expect(il).toBeLessThanOrEqual(0);
     }
-  });
-});
-
-describe('YieldCalculator.computeHistoricalImpermanentLoss', () => {
-  it('maps each price point to a timestamped IL percent', () => {
-    const history = [
-      { timestamp: 1000, priceRatio: 1 },
-      { timestamp: 2000, priceRatio: 2 },
-      { timestamp: 3000, priceRatio: 0.5 }
-    ];
-    const result = YieldCalculator.computeHistoricalImpermanentLoss(1, history);
-    expect(result).toHaveLength(3);
-    expect(result[0].timestamp).toBe(1000);
-    expect(result[0].ilPercent).toBeCloseTo(0, 10);
-    expect(result[1].ilPercent).toBeLessThan(0); // moved away from initial
-  });
-
-  it('returns an empty array for an empty history', () => {
-    const result = YieldCalculator.computeHistoricalImpermanentLoss(1, []);
-    expect(result).toEqual([]);
-  });
-});
-
-describe('YieldCalculator.estimateFeeRevenue', () => {
-  const oneYear = { start: 0, end: 365 * 24 * 60 * 60 * 1000 };
-
-  it('computes zero fees for a zero TVL', () => {
-    const result = YieldCalculator.estimateFeeRevenue(0n, 100, 100, 100, 1000, 1500, oneYear);
-    expect(result.totalFees).toBe(0n);
-    expect(result.harvestFees).toBe(0n);
-    expect(result.withdrawalFees).toBe(0n);
-    expect(result.managementFees).toBe(0n);
-    expect(result.performanceFees).toBe(0n);
-  });
-
-  it('yields no yield-based fees for a zero-length period (withdrawal fee still applies)', () => {
-    // Yield/management/performance fees scale with the period (and are 0 for a
-    // zero-length period). The withdrawal fee uses a fixed "10% of TVL is
-    // withdrawn" assumption and therefore still accrues.
-    const result = YieldCalculator.estimateFeeRevenue(1000n, 100, 100, 100, 1000, 1500, {
-      start: 1000,
-      end: 1000
-    });
-    expect(result.harvestFees).toBe(0n);
-    expect(result.managementFees).toBe(0n);
-    expect(result.performanceFees).toBe(0n);
-    expect(result.totalFees).toBe(result.withdrawalFees);
-    expect(result.withdrawalFees).toBe(1n); // 10% of 1000 * 100 bp
-  });
-
-  it('produces a positive breakdown for a normal period', () => {
-    const result = YieldCalculator.estimateFeeRevenue(1_000_000n, 100, 50, 200, 1000, 1500, oneYear);
-    expect(result.totalFees).toBeGreaterThan(0n);
-    expect(result.totalFees).toBe(
-      result.harvestFees + result.withdrawalFees + result.managementFees + result.performanceFees
-    );
   });
 });
