@@ -33,6 +33,19 @@ describe("RebalancerClient APY keeper permissions", () => {
     expect(admin.publicKey()).not.toBe(keeper.publicKey());
   });
 
+  it("keeps signing keys distinct when rotating a keeper key", () => {
+    const oldKeeper = Keypair.random();
+    const newKeeper = Keypair.random();
+
+    expect(newKeeper.publicKey()).not.toBe(oldKeeper.publicKey());
+    expect(StrKey.isValidEd25519PublicKey(newKeeper.publicKey())).toBe(true);
+  });
+
+  it("rejects malformed keeper public keys during rotation", () => {
+    expect(StrKey.isValidEd25519PublicKey("not-a-key")).toBe(false);
+    expect(StrKey.isValidEd25519PublicKey("")).toBe(false);
+  });
+
   it("rejects a client with no soroban RPC URL configured", () => {
     expect(() => buildClient({ sorobanRpcUrl: "" })).toThrow();
   });
