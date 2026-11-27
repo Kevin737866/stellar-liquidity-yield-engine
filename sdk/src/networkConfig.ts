@@ -53,6 +53,31 @@ export interface OptionalNetworkConfig {
   contracts?: Partial<NetworkConfig['contracts']>;
 }
 
+/**
+ * Result of a keeper readiness check for RPC endpoint and signer configuration.
+ * `ready` is true only when `issues` is empty.
+ */
+export interface KeeperReadinessReport {
+  ready: boolean;
+  network: SupportedNetwork | null;
+  horizonUrl: string | null;
+  sorobanRpcUrl: string | null;
+  issues: KeeperReadinessIssue[];
+}
+
+export type KeeperReadinessIssueCode =
+  | 'INVALID_NETWORK'
+  | 'INVALID_ENDPOINT_URL'
+  | 'MISSING_SIGNER_SECRET'
+  | 'INVALID_SIGNER_SECRET'
+  | 'MISSING_CONTRACT_ID';
+
+export interface KeeperReadinessIssue {
+  code: KeeperReadinessIssueCode;
+  field: string;
+  message: string;
+}
+
 type EnvRecord = Readonly<Record<string, string | undefined>>;
 
 const ENDPOINT_ENV_KEYS: Readonly<
@@ -235,4 +260,75 @@ export function selectNetworkConfig(
   if (networkOrConfig === 'testnet') return TESTNET_CONFIG;
   if (networkOrConfig === 'mainnet') return MAINNET_CONFIG;
   return resolveNetworkConfig({ network: networkOrConfig });
+}
+
+/**
+ * Check whether RPC endpoint and keeper signer configuration is usable.
+ *
+ * Never throws: every problem is reported as a structured issue so operators
+ * can see all readiness gaps at once. The signer secret is validated for
+ * presence and Stellar secret-key format only; it is never echoed back.
+ *
+ * Reads `KEEPER_SIGNER_SECRET` (a Stellar `S...` secret key) from `env`.
+ */
+export function checkKeeperReadiness(
+  config?: OptionalNetworkConfig,
+  env?: EnvRecord,
+): KeeperReadinessReport {
+  const runtimeEnv = readRuntimeEnv(env);
+  const issues: KeeperReadinessIssue[] = [];
+
+  let network: SupportedNetwork | null = null;
+  let horizonUrl: string | null = null;
+  let sorobanRpcUrl: string | null = null;
+
+  try {
+    const resolved = resolveNetworkConfig(config, runtimeEnv);
+    network = resolved.network;
+    horizonUrl = resolved.horizonUrl;
+    sorobanRpcUrl = resolved.sorobanRpcUrl;
+  } catch (error) {
+    if (error instanceof NetworkConfigError) {
+      const code: KeeperReadinessIssueCode =
+        error.code === 'INVALID_NETWORK'
+          ? 'INVALID_NETWORK'
+          : error.code === 'INVALID_ENDPOINT_URL'
+            ? 'INVALID_ENDPOINT_URL'
+            : 'MISSING_CONTRACT_ID';
+      const field =
+        error.code === 'INVALID_NETWORK'
+          ? 'network'
+          : error.code === 'INVALID_ENDPOINT_URL'
+            ? (error.message.includes('sorobanRpcUrl') ? 'sorobanRpcUrl' : 'horizonUrl')
+            : 'contracts';
+      issues.push({ code, field, message: error.message });
+    } else {
+      throw error;
+    }
+  }
+
+  const secret = normalizeOptionalString(runtimeEnv.KEEPER_SIGNER_SECRET);
+  if (!secret) {
+    issues.push({
+      code: 'MISSING_SIGNER_SECRET',
+      field: 'KEEPER_SIGNER_SECRET',
+      message:
+        'Missing KEEPER_SIGNER_SECRET: set it to the keeper Stellar secret key (starts with "S").',
+    });
+  } else if (!/^S[A-Z2-7]{55}$/.test(secret)) {
+    issues.push({
+      code: 'INVALID_SIGNER_SECRET',
+      field: 'KEEPER_SIGNER_SECRET',
+      message:
+        'Invalid KEEPER_SIGNER_SECRET: expected a Stellar secret key (56 characters, starts with "S"). Value not shown.',
+    });
+  }
+
+  return {
+    ready: issues.length === 0,
+    network,
+    horizonUrl,
+    sorobanRpcUrl,
+    issues,
+  };
 }

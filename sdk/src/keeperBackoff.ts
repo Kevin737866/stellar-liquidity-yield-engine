@@ -5,6 +5,10 @@
  * flapping keeper stops hammering the RPC during an outage. The state is persisted through a
  * store, so a restart during the outage does not reset the delay.
  *
+ * Readiness: `getReadiness()` reports whether the keeper may currently call the RPC, including
+ * the remaining backoff wait and the last recorded error, so operators can expose it on health
+ * endpoints or governance dashboards.
+ *
  * Role rotation note: keeper and governance role rotation must not be driven by a backoff
  * window that is still active. Callers rotating a keeper role should check `remainingMs()`
  * (or `canRunNow()`) first, and a rotation that completes while a backoff is pending should
@@ -75,6 +79,22 @@ export type TickResult<T> =
   | { ran: true; ok: true; value: T }
   | { ran: true; ok: false; error: unknown; delayMs: number }
   | { ran: false; waitMs: number };
+
+/** Operator-facing readiness snapshot for the keeper's RPC/signer loop. */
+export interface KeeperReadiness {
+  /** True when the keeper is allowed to call the RPC right now. */
+  ready: boolean;
+  /** True when the keeper is inside a backoff window. */
+  backingOff: boolean;
+  consecutiveFailures: number;
+  /** Milliseconds until the keeper may run again (0 when ready). */
+  waitMs: number;
+  /** Epoch ms of the next permitted attempt (0 when ready). */
+  nextAttemptAt: number;
+  lastError?: string;
+  /** Epoch ms of the last recorded outcome (0 if none). */
+  updatedAt: number;
+}
 
 const EMPTY: BackoffState = { consecutiveFailures: 0, nextAttemptAt: 0, updatedAt: 0 };
 
@@ -155,6 +175,25 @@ export class KeeperBackoff {
   /** True when the keeper may call the RPC now. Useful before a role rotation takes effect. */
   canRunNow(): boolean {
     return this.remainingMs() === 0;
+  }
+
+  /**
+   * Readiness snapshot for operators. Restores persisted state first so a freshly started keeper
+   * reports the real backoff window instead of a misleading "ready".
+   */
+  async getReadiness(): Promise<KeeperReadiness> {
+    await this.init();
+    const waitMs = this.remainingMs();
+    const backingOff = waitMs > 0;
+    return {
+      ready: !backingOff,
+      backingOff,
+      consecutiveFailures: this.state.consecutiveFailures,
+      waitMs,
+      nextAttemptAt: backingOff ? this.state.nextAttemptAt : 0,
+      lastError: this.state.lastError,
+      updatedAt: this.state.updatedAt,
+    };
   }
 
   /**
