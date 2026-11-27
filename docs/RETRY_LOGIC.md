@@ -66,6 +66,40 @@ const retryServer = createRetryRpcServerFromUrl(
 );
 ```
 
+## RPC endpoint health checks
+
+Transaction submissions can opt in to a Soroban RPC health check. When
+configured, the SDK calls `getHealth` immediately before sending; an unhealthy
+response, transport error, or timeout aborts submission and reports the
+endpoint. Omitting `rpcHealthCheck` preserves the existing behavior.
+
+Existing clients that accept `TransactionOptions` take this setting per
+transaction:
+
+```typescript
+await vaultClient.deposit(keypair, params, {
+  rpcHealthCheck: { timeoutMs: 2_000 },
+});
+```
+
+`GovernanceSDK.submitTransaction` and `RetryRpcServer` support the same
+configuration:
+
+```typescript
+await governanceClient.submitTransaction(transaction, {
+  rpcHealthCheck: { timeoutMs: 2_000 },
+});
+
+const retryServer = createRetryRpcServer(server, {
+  rpcHealthCheck: { timeoutMs: 2_000 },
+});
+```
+
+The timeout defaults to 5 seconds and must be a positive finite number. A
+failed check is fail-closed: the transaction is not submitted. Configure this
+only where the additional pre-submit RPC request and fail-closed behavior are
+desired.
+
 ### Custom Retry Options
 
 ```typescript

@@ -1,7 +1,11 @@
 // Utility functions for the Stellar Liquidity Yield Engine SDK
 
-export { waitForTransaction } from './transaction';
-export type { WaitForTransactionOptions } from './transaction';
+export { checkRpcHealth, RpcHealthCheckError, waitForTransaction } from './transaction';
+export type {
+  RpcHealthCheckOptions,
+  RpcHealthCheckReport,
+  WaitForTransactionOptions,
+} from './transaction';
 
 export {
   withRetry,

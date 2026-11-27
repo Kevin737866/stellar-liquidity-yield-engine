@@ -25,7 +25,7 @@ import {
   PauseReason,
   VaultEvent
 } from './types';
-import { waitForTransaction } from './utils/transaction';
+import { checkRpcHealth, waitForTransaction } from './utils/transaction';
 
 export class VaultClient extends EventEmitter {
   private contract: Contract;
@@ -71,6 +71,9 @@ export class VaultClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signWith(userKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -120,6 +123,9 @@ export class VaultClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signWith(userKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -183,6 +189,9 @@ export class VaultClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signWith(userKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -393,6 +402,9 @@ export class VaultClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signWith(adminKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {
@@ -439,6 +451,9 @@ export class VaultClient extends EventEmitter {
         .build();
 
       const signedTx = await this.signWith(adminKeyPair, tx);
+      if (options?.rpcHealthCheck) {
+        await checkRpcHealth(this.server, options.rpcHealthCheck);
+      }
       const result = await this.server.sendTransaction(signedTx);
 
       if (result.status === 'ERROR') {

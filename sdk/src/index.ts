@@ -150,6 +150,7 @@ export {
   GOVERNANCE_MAX_PAGE_SIZE,
   paginateProposals,
   type GovernanceProposal,
+  type SubmitTransactionOptions,
   type ProposalPage,
   type CallData,
   type LockInfo,
