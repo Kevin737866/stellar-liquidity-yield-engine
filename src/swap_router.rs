@@ -1396,9 +1396,12 @@ mod tests {
 
     fn assert_panic_contains<F>(f: F, expected: &str)
     where
-        F: FnOnce() + std::panic::UnwindSafe,
+        F: FnOnce(),
     {
-        let payload = std::panic::catch_unwind(f).expect_err("expected panic");
+        // `AssertUnwindSafe` is required because the `Env` handle is interior
+        // mutable; the test only asserts that the call panics.
+        let payload =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected panic");
         let message = payload
             .downcast_ref::<String>()
             .map(String::as_str)
@@ -1415,32 +1418,35 @@ mod tests {
     #[test]
     fn test_uninitialized_admin_and_treasury_are_rejected_with_clear_errors() {
         let env = Env::default();
-        let admin = Address::generate(&env);
-        let user = Address::generate(&env);
-        let input_token = Address::generate(&env);
-        let output_token = Address::generate(&env);
-        let path = Vec::from_array(&env, [input_token.clone(), output_token.clone()]);
+        let contract = env.register(SwapRouter, ());
+        env.as_contract(&contract, || {
+            let admin = Address::generate(&env);
+            let user = Address::generate(&env);
+            let input_token = Address::generate(&env);
+            let output_token = Address::generate(&env);
+            let path = Vec::from_array(&env, [input_token.clone(), output_token.clone()]);
 
-        assert_panic_contains(
-            || SwapRouter::pause_oracle(env.clone(), admin.clone()),
-            "admin not configured",
-        );
+            assert_panic_contains(
+                || SwapRouter::pause_oracle(env.clone(), admin.clone()),
+                "admin not configured",
+            );
 
-        assert_panic_contains(
-            || {
-                SwapRouter::swap(
-                    env.clone(),
-                    user,
-                    input_token,
-                    output_token,
-                    1_000,
-                    900,
-                    path,
-                    None,
-                );
-            },
-            "treasury not configured",
-        );
+            assert_panic_contains(
+                || {
+                    SwapRouter::swap(
+                        env.clone(),
+                        user,
+                        input_token,
+                        output_token,
+                        1_000,
+                        900,
+                        path,
+                        None,
+                    );
+                },
+                "treasury not configured",
+            );
+        });
     }
 
     #[test]

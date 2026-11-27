@@ -2355,21 +2355,24 @@ mod tests {
             apy: 2_500,
         };
 
-        env.storage().instance().set(
-            &Symbol::new(&env, "harvest_snapshot"),
-            &snapshot,
-        );
-        env.storage().instance().set(
-            &Symbol::new(&env, "metrics"),
-            &VaultMetrics {
-                total_shares: 10,
-                total_amount_a: 5_000,
-                total_amount_b: 5_000,
-                apy: 0,
-                tvl: 10_000,
-                last_harvest: 1_000,
-            },
-        );
+        // The snapshot and metrics live in the vault's own storage, so they can
+        // only be written from inside its contract context.
+        env.as_contract(&vault.address, || {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "harvest_snapshot"), &snapshot);
+            env.storage().instance().set(
+                &Symbol::new(&env, "metrics"),
+                &VaultMetrics {
+                    total_shares: 10,
+                    total_amount_a: 5_000,
+                    total_amount_b: 5_000,
+                    apy: 0,
+                    tvl: 10_000,
+                    last_harvest: 1_000,
+                },
+            );
+        });
 
         env.ledger().set_timestamp(20_000);
 

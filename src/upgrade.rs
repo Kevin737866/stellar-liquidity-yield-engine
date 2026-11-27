@@ -137,10 +137,10 @@ pub fn record_release(
     release_version: String,
     source_commit: String,
 ) -> ReleaseRecord {
-    if release_version.len() == 0 {
+    if release_version.is_empty() {
         env.panic_with_error(ReleaseError::EmptyReleaseVersion);
     }
-    if source_commit.len() == 0 {
+    if source_commit.is_empty() {
         env.panic_with_error(ReleaseError::EmptySourceCommit);
     }
     if artifact_checksum == zero_hash(env) {
