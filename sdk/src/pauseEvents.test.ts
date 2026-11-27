@@ -1,6 +1,7 @@
 import { VaultClient, RebalancerClient } from './index';
 import { Keypair, Address } from 'stellar-sdk';
-import { PauseReason, VaultEvent, RebalanceEvent } from './types';
+import { VaultEvent, RebalanceEvent } from './types';
+import { PauseReason } from './keeperBackoff';
 
 describe('Pause Event Emission', () => {
   describe('VaultClient pause events', () => {

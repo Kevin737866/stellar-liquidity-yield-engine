@@ -457,9 +457,61 @@ export interface HarvestEfficiencyMetrics {
 }
 
 /**
- * Pause reason categories for vault and rebalance engine pause events.
- * These help monitors and dashboards understand why a system was paused.
+ * Pause reason identifier used by pause event tracking and vault clients.
+ * Re-exported under the `PauseReason` name for callers importing from `./types`.
  */
-export type PauseReason =
-  | 'security' // Security concern detected (exploit, suspicious activity)
-  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large
+export type PauseReason = string;
+
+/**
+ * Built-in pause reason categories for vault and rebalance engine pause events.
+ * These help monitors and dashboards understand why a system was paused.
+ *
+ * Operators may extend this set with custom reasons via `PauseReasonCatalog`;
+ * custom reason IDs must not collide with the built-in identifiers below.
+ */
+export const BUILT_IN_PAUSE_REASONS = {
+  MANUAL: "manual",
+  CIRCUIT_BREAKER: "circuit_breaker",
+  HIGH_VOLATILITY: "high_volatility",
+  ORACLE_FAILURE: "oracle_failure",
+  GOVERNANCE_HALT: "governance_halt",
+} as const;
+
+export type BuiltInPauseReason =
+  (typeof BUILT_IN_PAUSE_REASONS)[keyof typeof BUILT_IN_PAUSE_REASONS];
+
+/**
+ * Operator-configurable pause reason catalog. Maps custom reason IDs to
+ * human-readable descriptions. Custom IDs must not shadow built-in reasons.
+ */
+export type PauseReasonCatalog = Readonly<Record<string, string>>;
+
+/**
+ * Returns true when `id` is one of the built-in pause reason identifiers.
+ */
+export function isBuiltInPauseReason(id: string): id is BuiltInPauseReason {
+  return (Object.values(BUILT_IN_PAUSE_REASONS) as string[]).includes(id);
+}
+
+/**
+ * Validates an operator-supplied catalog. Throws if any custom ID is empty or
+ * collides with a built-in reason. Returns a frozen copy on success.
+ */
+export function validatePauseReasonCatalog(
+  catalog: Record<string, string>,
+): PauseReasonCatalog {
+  const copy: Record<string, string> = {};
+  for (const [id, description] of Object.entries(catalog)) {
+    if (id.trim() === "") {
+      throw new Error("Pause reason ID must be a non-empty string");
+    }
+    if (isBuiltInPauseReason(id)) {
+      throw new Error(`Pause reason ID "${id}" collides with a built-in reason`);
+    }
+    if (description.trim() === "") {
+      throw new Error(`Pause reason "${id}" must have a non-empty description`);
+    }
+    copy[id] = description;
+  }
+  return Object.freeze(copy);
+}
