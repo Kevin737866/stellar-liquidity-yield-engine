@@ -8,7 +8,6 @@ const MAX_REWARD_STREAMS: u32 = 10;
 
 /// Basis points divisor (10000 = 100%)
 const BPS_DIVISOR: i128 = 10000;
-const BASIS_POINTS_DIVISOR: i128 = BPS_DIVISOR;
 
 /// Treasury fee in basis points (0.25% = 25 bps)
 const TREASURY_FEE_BPS: u32 = 25;

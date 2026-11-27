@@ -10,6 +10,11 @@
  * new version, and can be promoted or rolled back deterministically. Keepers outside the
  * current stage keep running the previous version. Stage membership is derived from a stable
  * hash of the keeper id, so the same keeper always lands in the same bucket for a given rollout.
+ *
+ * Key rotation note: backoff state is independent of signing keys. Rotating a keeper signing
+ * key does not require clearing backoff state; a keeper that is mid-backoff should simply
+ * continue to honor `nextAttemptAt` after the new key is loaded, and the first successful
+ * tick with the new key resets the counters via `recordSuccess()`.
  */
 
 export interface BackoffPolicy {
