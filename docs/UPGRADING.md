@@ -178,6 +178,44 @@ admin key) or when a change cannot be expressed as a migration.
 Budget for step 3 before choosing Flow B — for the vault it means replaying every
 holder's `UserPosition`.
 
+## Staged rollout for new strategy versions
+
+New strategy versions should not go live for every pool at once. The staged
+rollout procedure moves a new version through explicit stages so the keeper and
+governance operators can observe behaviour and halt the rollout at any point.
+
+The rollout is driven by the governance operations surface. Keeper backoff for
+failed canary rebalances follows the `sdk/src/keeperBackoff.ts` helper, so the
+failure threshold below is evaluated against the same retry accounting the keeper
+uses.
+
+1. **Register** the new version with the `StrategyRegistry` as inactive, so it
+   cannot be selected by the engine.
+2. **Canary**: enable the new version for a small, configured subset of pools
+   (the first stage). Keepers only route rebalances to canary pools.
+3. **Expand**: after a monitoring window with no failed rebalances and no
+   adverse yield deviation, widen the rollout to the next set of pools.
+4. **Complete**: enable the version everywhere and retire the previous one.
+
+Boundary behaviour:
+- A rollout stage of 0% or of an empty pool set is rejected; the version stays
+  inactive.
+- Advancing a stage is only allowed when the previous stage is complete; skipping
+  stages is rejected by the governance entrypoint.
+- Setting a rollout to 100% is equivalent to a full enable and is allowed only
+  after the canary stage has been recorded.
+
+Failure behaviour:
+- If the keeper reports failures for the canary pools beyond the configured
+  threshold, the rollout is automatically halted and the previous version is
+  kept active for all pools.
+- A halted rollout can only be resumed or rolled back by the governance admin.
+  Every stage transition emits an event so operators can audit the rollout.
+
+New configuration: the canary pool set and the failure threshold are supplied
+to the governance entrypoint when the rollout is started and should be recorded
+in the operations runbook before the rollout begins.
+
 ## Version policy
 
 `STORAGE_VERSION` in `src/upgrade.rs` describes the **stored layout**, not the
