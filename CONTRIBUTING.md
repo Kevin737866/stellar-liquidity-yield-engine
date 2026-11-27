@@ -142,6 +142,23 @@ than leaving the checkbox unexplained.
 - Update README.md when adding or changing features
 - Add JSDoc comments to all exported SDK functions
 - Keep code examples in docs accurate and runnable
+- When adding or changing wallet provider support, update the "Supported Wallet Providers" table below with each provider's supported operations and required permissions
+
+### Supported Wallet Providers
+
+| Provider | Status | Permissions Required | Notes |
+|----------|--------|----------------------|-------|
+| Freighter | Supported | Read account address, sign transactions | Primary browser extension wallet |
+| Albedo | Supported | Read account address, sign transactions | Web-based signing flow, no extension install |
+| xBull | Supported | Read account address, sign transactions | Browser extension wallet |
+| Manual secret key (SDK/CLI only) | Supported (non-browser) | Full key access | Never use in browser UIs; intended for scripts and tests |
+
+**Permission boundaries:**
+- Read-only operations (balances, vault positions) must not request signing permissions.
+- Transaction signing requires explicit user approval through the wallet provider UI.
+- Providers that are unreachable or unauthorized should fail with a clear error and must not fall back to a different provider silently.
+
+**Failure behavior:** If a wallet provider is not installed, the UI should prompt installation; if the user rejects a permission request, no transaction is submitted.
 
 ## Pull Request Process
 

@@ -417,6 +417,23 @@ Real-time monitoring of:
 - **Horizon**: `https://horizon.stellar.org`
 - **Network Passphrase**: `Public Global Stellar Network ; September 2015`
 
+### Supported Wallet Providers
+
+The SDK and UI interact with user wallets only through the signing interface
+exposed by the connected provider. Permissions are granted per request; the
+SDK never stores private keys.
+
+| Provider | Networks | Permissions Requested | Notes |
+|----------|----------|------------------------|-------|
+| Freighter | Testnet, Mainnet | Read account address, sign transactions | Browser extension; user approves each signature |
+| Albedo | Testnet, Mainnet | Read account address, sign transactions | Web-based signer; no extension required |
+| Keypair (`Keypair` from Stellar SDK) | Testnet, Mainnet | Sign transactions locally | Server-side bots only; the key must be supplied via environment configuration |
+
+Behavior by case:
+- **Normal**: the provider returns a public address and signs requested transactions after user approval.
+- **Boundary**: a wallet on a network different from the configured `STELLAR_NETWORK` is rejected before any transaction is built.
+- **Failure**: if a provider is missing, denies a permission, or returns a malformed signature, the operation fails with an explicit error and no transaction is submitted.
+
 ## 🔧 Configuration
 
 ### Environment Variables

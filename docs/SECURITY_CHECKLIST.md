@@ -6,6 +6,30 @@ The checklist is organized by assumption area. Top-items (⭐) are verified by t
 
 ---
 
+## 0. Supported Wallet Providers and Permissions
+
+Assumption: only the wallet providers listed below are supported for end-user and operator flows. Each provider's signing scope is limited to the permissions described; no provider is granted admin rights by default.
+
+| Provider | Role | Permitted operations | Notes |
+|---|---|---|---|
+| Freighter (browser extension) | End user | `deposit`, `withdraw`, `harvest` (caller-signed) | Signs user flows only; must not hold the admin key. |
+| Albedo (web signer) | End user | `deposit`, `withdraw`, `harvest` (caller-signed) | Same permission scope as Freighter. |
+| Hardware wallet via Freighter (Ledger-backed) | Operator / admin | `pause`, `unpause`, `update_admin`, `update_strategy_registry`, `update_reward_distributor`, `upgrade`, `migrate` | Admin keys should be hardware-backed; multisig is recommended for `update_admin`. |
+| Keeper service key (server-side) | Automation | `harvest`, rebalance triggers | Must never hold admin authority; rejected by `require_admin`. |
+
+Boundary behavior:
+- A provider that is not in this list is unsupported; the contracts do not distinguish providers on-chain, so support is an off-chain policy enforced by the frontend and operator runbooks.
+- Any signer that is not the stored admin is rejected by `require_admin` for privileged entrypoints.
+- Keeper keys calling admin-only entrypoints must fail with an authorization panic; this is the expected failure mode.
+
+Failure behavior:
+- Unsupported wallet signatures fail at transaction submission (signature/authorization check) before reaching contract logic.
+- A wallet that loses admin rights via `update_admin` must be removed from operator tooling; keepers should be notified via the admin-transfer event (see Open Follow-Ups).
+
+Verification: admin-only authorization is covered by `teststs/yield_vault_integration_tests.rs::test_non_admin_cannot_pause_or_unpause` and `teststs/rebalance_engine_tests.rs::test_authorization_non_admin_rejected_from_admin_functions`.
+
+---
+
 ## 1. Paused State (circuit breaker)
 
 Assumption: a paused contract rejects all state-mutating user flows, while admin-recovery flows (unpause, upgrade, migrate) remain available.
@@ -195,6 +219,7 @@ Items marked `[ ]` above are not yet covered by tests. They are tracked here so 
 - Add a test asserting the treasury address is stable across harvests.
 - Add a negative test for out-of-range fee basis points.
 - Add pause / unpause events and cover them in a test.
+- Add a test confirming keeper keys are rejected from every admin-only entrypoint.
 - Add two-step role rotation tests (propose, accept, cancel, re-propose, wrong-caller, no-pending) per Section 7.
 - Add rotation and keeper-set update events and cover them in a test.
 - Add rotation-procedure tests once the pending-key registration flow exists in the contract.
