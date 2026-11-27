@@ -142,6 +142,23 @@ export type { CheckpointStore, KeeperCheckpoint } from './persistence';
 
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
+// Post-deployment smoke checks for critical contract entrypoints (Issue #511).
+// Run these after every `upgrade` + `migrate` sequence to confirm that every
+// deployed contract is live and reports the expected storage version.
+export {
+  runSmokeChecks,
+  probeStorageVersion,
+  probeLiveness,
+  formatSmokeCheckReport,
+  extractU32,
+} from './smokeCheck';
+export type {
+  SmokeCheckContracts,
+  SmokeCheckOptions,
+  SmokeCheckResult,
+  SmokeCheckReport,
+} from './smokeCheck';
+
 // Governance SDK exports
 export {
   GovernanceSDK,
