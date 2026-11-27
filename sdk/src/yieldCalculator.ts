@@ -8,9 +8,15 @@ import {
   PriceData,
   TimeInterval,
   PerformanceSnapshot,
-  HarvestEvent,
-  HarvestEfficiencyMetrics
+  HarvestEvent
 } from './types';
+
+export interface HarvestEfficiencyMetrics {
+  totalRewards: bigint;
+  totalGas: number;
+  efficiencyRatio: number;
+  avgGasPerHarvest: number;
+}
 
 export class YieldCalculator {
   /**

@@ -251,6 +251,29 @@ impl StellarLiquidityYieldEngine {
         env.events().publish(("circuit_breaker_reset",), (admin,));
     }
 
+    /// Get the instance configuration of this engine in one read-only call.
+    ///
+    /// Returns the stored admin, strategy registry and reward distributor
+    /// addresses together with the paused / circuit-breaker flags and the
+    /// storage schema version. Fails with [`EngineError::NotInitialized`] when
+    /// the contract has not been initialized.
+    pub fn get_instance_config(env: Env) -> (Address, Address, Address, bool, bool, u32) {
+        let admin = Self::get_admin(env.clone());
+        let strategy_registry = Self::get_strategy_registry(env.clone());
+        let reward_distributor = Self::get_reward_distributor(env.clone());
+        let paused = Self::is_paused(env.clone());
+        let circuit_tripped = Self::is_circuit_breaker_tripped(env.clone());
+        let storage_version = crate::upgrade::storage_version(&env);
+        (
+            admin,
+            strategy_registry,
+            reward_distributor,
+            paused,
+            circuit_tripped,
+            storage_version,
+        )
+    }
+
     /// Get admin address
     ///
     /// Fails with [`EngineError::NotInitialized`] when the contract has not

@@ -22,10 +22,31 @@ import {
   VaultError,
   NetworkConfig,
   VaultClientOptions,
-  PauseReason,
-  VaultEvent
+  PauseReason
 } from './types';
 import { waitForTransaction } from './utils/transaction';
+
+/**
+ * Read-only configuration of the vault contract instance.
+ */
+export interface ContractConfig {
+  admin: string | null;
+  wasmHash: string | null;
+  upgradedAt: number | null;
+  deployedAt: number | null;
+}
+
+/**
+ * Event payload emitted on pause/unpause transitions.
+ */
+export interface VaultEvent {
+  type: 'pause' | 'unpause';
+  vault: string;
+  timestamp: number;
+  reason?: PauseReason;
+  reasonDetails?: string;
+}
+
 
 export class VaultClient extends EventEmitter {
   private contract: Contract;
@@ -34,12 +55,12 @@ export class VaultClient extends EventEmitter {
   private simulationSource?: string;
 
   constructor(
-    vaultAddress: Address,
+    vaultAddress: string,
     networkConfig: NetworkConfig,
     options: VaultClientOptions = {}
   ) {
     super();
-    this.contract = new Contract(vaultAddress.toString());
+    this.contract = new Contract(vaultAddress);
     this.server = new SorobanRpc.Server(networkConfig.sorobanRpcUrl);
     this.networkConfig = networkConfig;
     this.simulationSource = options.simulationSource;
@@ -263,7 +284,7 @@ export class VaultClient extends EventEmitter {
   /**
    * Get user position
    */
-  async getUserPosition(userAddress: Address): Promise<UserPosition> {
+  async getUserPosition(userAddress: string): Promise<UserPosition> {
     try {
       const result = await this.server.simulateTransaction(
         new TransactionBuilder(
@@ -339,6 +360,57 @@ export class VaultClient extends EventEmitter {
     } catch (error) {
       throw new VaultError(`Failed to get TVL: ${error.message}`, 'GET_TVL_ERROR');
     }
+  }
+
+  /**
+   * Get the contract instance configuration (read-only).
+   *
+   * Returns the configuration stored on the vault's contract instance,
+   * including the admin address, upgrade status and deployment metadata.
+   * Boundary: a missing or uninitialized configuration key yields `null`
+   * fields rather than throwing. Failure: simulation errors surface as a
+   * `VaultError` with code `GET_CONFIG_ERROR`.
+   */
+  async getContractConfig(): Promise<ContractConfig> {
+    try {
+      const result = await this.server.simulateTransaction(
+        new TransactionBuilder(
+          await this.getSimulationAccount(),
+          {
+            fee: BASE_FEE,
+            networkPassphrase: this.getNetworkPassphrase()
+          }
+        )
+          .addOperation(this.contract.call('get_contract_config'))
+          .build()
+      );
+
+      if (result.result?.status !== 'SUCCESS') {
+        throw new Error('Failed to get contract config');
+      }
+
+      return this.parseContractConfig(result.result.returnValue);
+    } catch (error) {
+      throw new VaultError(`Failed to get contract config: ${error.message}`, 'GET_CONFIG_ERROR');
+    }
+  }
+
+  /**
+   * Parse the `get_contract_config` return value into a typed `ContractConfig`.
+   * Missing fields are normalized to `null` instead of throwing.
+   */
+  private parseContractConfig(returnValue: xdr.ScVal): ContractConfig {
+    const data = (scValToNative(returnValue) ?? {}) as any;
+    return {
+      admin: data.admin ? String(data.admin) : null,
+      wasmHash: data.wasm_hash ? String(data.wasm_hash) : null,
+      upgradedAt: data.upgraded_at !== undefined && data.upgraded_at !== null
+        ? Number(data.upgraded_at)
+        : null,
+      deployedAt: data.deployed_at !== undefined && data.deployed_at !== null
+        ? Number(data.deployed_at)
+        : null
+    };
   }
 
   /**
@@ -475,7 +547,7 @@ export class VaultClient extends EventEmitter {
   private emitPauseEvent(reason: PauseReason, reasonDetails?: string): void {
     const event: VaultEvent = {
       type: 'pause',
-      vault: this.contract.address(),
+      vault: this.contract.address().toString(),
       timestamp: Math.floor(Date.now() / 1000),
       reason,
       reasonDetails
@@ -490,7 +562,7 @@ export class VaultClient extends EventEmitter {
   private emitUnpauseEvent(): void {
     const event: VaultEvent = {
       type: 'unpause',
-      vault: this.contract.address(),
+      vault: this.contract.address().toString(),
       timestamp: Math.floor(Date.now() / 1000)
     };
     this.emit('unpause', event);
@@ -556,9 +628,9 @@ export class VaultClient extends EventEmitter {
     const data = scValToNative(returnValue) as any;
     return {
       name: data.name,
-      tokenA: new Address(data.token_a),
-      tokenB: new Address(data.token_b),
-      poolId: new Address(data.pool_id),
+      tokenA: String(data.token_a),
+      tokenB: String(data.token_b),
+      poolId: String(data.pool_id),
       strategyId: Number(data.strategy_id),
       feeRate: Number(data.fee_rate),
       harvestFee: Number(data.harvest_fee),

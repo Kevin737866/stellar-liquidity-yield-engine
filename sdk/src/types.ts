@@ -3,9 +3,9 @@ import { Address, Transaction } from "stellar-sdk";
 // Vault Types
 export interface VaultInfo {
   name: string;
-  tokenA: Address;
-  tokenB: Address;
-  poolId: Address;
+  tokenA: Address | string;
+  tokenB: Address | string;
+  poolId: Address | string;
   strategyId: number;
   feeRate: number; // Basis points (100 = 1%)
   harvestFee: number; // Basis points
@@ -27,6 +27,39 @@ export interface VaultMetrics {
   tvl: bigint; // Total Value Locked in USD (scaled)
   lastHarvest: number;
 }
+
+/**
+ * Reason a vault is paused. Used by `VaultClient` status reads.
+ */
+export type PauseReason = "admin" | "emergency" | "maintenance" | "unknown";
+
+/**
+ * Read-only view of a contract instance's configuration, as exposed by the
+ * upgrade/deployment read APIs. Fields that a contract has not yet been
+ * configured with are `null` rather than placeholder values.
+ */
+export interface ContractInstanceConfig {
+  /** Contract ID (C-string). Empty string means the instance is not deployed. */
+  contractId: string;
+  /** Hash of the currently installed WASM, or null if unknown. */
+  wasmHash: string | null;
+  /** Version reported by the contract, or null if the contract has none. */
+  version: number | null;
+  /** Whether the instance is paused. */
+  paused: boolean;
+  /** Admin contract/account ID (C- or G-string) that controls upgrades, or null if unset. */
+  admin: Address | string | null;
+  /** Pending upgrade WASM hash awaiting activation, or null if none. */
+  pendingUpgradeHash: string | null;
+}
+
+/**
+ * Result of a read-only configuration query. Failures are reported in the
+ * result instead of thrown so dashboards can render partial state.
+ */
+export type ContractInstanceConfigResult =
+  | { ok: true; config: ContractInstanceConfig }
+  | { ok: false; error: string; code: string };
 
 export interface DepositParams {
   amountA: bigint;
@@ -292,12 +325,8 @@ export interface NetworkConfig {
   /**
    * Deployed contract IDs (C-strings) for the engine contracts.
    *
-   * These are plain strings rather than `stellar-sdk` `Address` instances:
-   * `new Contract(id)` accepts a string, `Contract.fromAddress` is not used
-   * here, and an unconfigured deployment legitimately has no ID yet. Clients
-   * treat an empty string as "not configured" instead of constructing a
-   * placeholder `Address`, which is what previously forced callers to cast
-   * their config with `as NetworkConfig`.
+   * Clients treat an empty string as "not configured". Callers that still
+   * hold `Address` instances may pass them directly via `Address.toString()`.
    */
   contracts: {
     yieldEngine: string;
@@ -430,12 +459,10 @@ export interface HarvestEvent {
  * Returned by `VaultClient.getILHistory()`.
  */
 export interface ILSnapshot {
-  /** Unix timestamp (seconds) of the measurement */
+  /** Unix timestamp (seconds) of the snapshot */
   timestamp: number;
-  /** IL as a percentage (negative means loss) */
-  ilPercent: number;
-  /** Token B / Token A price ratio at this point in time */
-  priceRatio: number;
+  /** Impermanent loss in basis points */
+  ilBps: number;
 }
 
 /**
