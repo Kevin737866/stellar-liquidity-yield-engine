@@ -24,7 +24,15 @@
 //! pending. They never mutate state and return zero/`false` defaults for
 //! contracts deployed before this module existed.
 //!
-//! See `docs/UPGRADING.md` for the operational flow.
+//! Role rotation during an upgrade is handled by [`rotate_admin`], which is
+//! the only sanctioned way to change the admin that authorizes `upgrade` and
+//! `migrate`. It rejects rotation to the current admin (a no-op that would
+//! hide operator mistakes) and emits an event recording both parties, so the
+//! handover is auditable. Rotation must be performed *before* `upgrade` if the
+//! new admin should authorize the upgrade itself.
+//!
+//! See `docs/UPGRADING.md` for the operational flow and the role rotation
+//! procedure.
 
 use soroban_sdk::{contracttype, Address, BytesN, Env, Symbol};
 
@@ -102,13 +110,53 @@ pub fn mark_migrated(env: &Env, admin: &Address) -> u32 {
     previous
 }
 
+/// Hand the admin role from `current` to `next`.
+///
+/// The caller must already have been authenticated as `current` by the
+/// contract entrypoint. Returns an error without touching storage if `next`
+/// equals `current`, so a no-op rotation cannot silently mask an operator
+/// mistake (for example pasting the existing admin address into a rotation
+/// script). On success the new admin is written to the instance storage under
+/// the admin key, and a `admin_rotated` event records `(previous, next)`.
+pub fn rotate_admin(env: &Env, current: &Address, next: &Address) -> Result<(), RotationError> {
+    if current == next {
+        return Err(RotationError::SameAdmin);
+    }
+
+    env.storage().instance().set(&admin_key(env), next);
+
+    env.events().publish(
+        (Symbol::new(env, "admin_rotated"),),
+        (current.clone(), next.clone()),
+    );
+
+    Ok(())
+}
+
+/// The admin currently recorded in storage, if any.
+pub fn current_admin(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&admin_key(env))
+}
+
+/// Errors returned by [`rotate_admin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotationError {
+    /// The proposed new admin is the same as the current admin.
+    SameAdmin,
+}
+
 fn version_key(env: &Env) -> Symbol {
     Symbol::new(env, "storage_version")
+}
+
+fn admin_key(env: &Env) -> Symbol {
+    Symbol::new(env, "admin")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{contract, contractimpl, Env};
 
     #[contract]
@@ -123,6 +171,10 @@ mod tests {
         env.as_contract(&id, || f(&env))
     }
 
+    fn set_admin(env: &Env, admin: &Address) {
+        env.storage().instance().set(&admin_key(env), admin);
+    }
+
     #[test]
     fn never_recorded_reports_pending_migration() {
         with_instance(|env| {
@@ -130,6 +182,43 @@ mod tests {
             assert_eq!(cfg.recorded_version, 0);
             assert_eq!(cfg.expected_version, STORAGE_VERSION);
             assert!(cfg.migration_pending);
+        });
+    }
+
+    #[test]
+    fn rotate_admin_hands_over_role() {
+        with_instance(|env| {
+            let a = Address::generate(env);
+            let b = Address::generate(env);
+            set_admin(env, &a);
+            assert_eq!(rotate_admin(env, &a, &b), Ok(()));
+            assert_eq!(current_admin(env), Some(b));
+        });
+    }
+
+    #[test]
+    fn rotate_admin_rejects_same_admin() {
+        with_instance(|env| {
+            let a = Address::generate(env);
+            set_admin(env, &a);
+            assert_eq!(rotate_admin(env, &a, &a), Err(RotationError::SameAdmin));
+            assert_eq!(current_admin(env), Some(a));
+        });
+    }
+
+    #[test]
+    fn current_admin_is_none_before_set() {
+        with_instance(|env| {
+            assert_eq!(current_admin(env), None);
+        });
+    }
+
+    #[test]
+    fn storage_version_defaults_to_zero_and_round_trips() {
+        with_instance(|env| {
+            assert_eq!(storage_version(env), 0);
+            set_storage_version(env, STORAGE_VERSION);
+            assert_eq!(storage_version(env), STORAGE_VERSION);
         });
     }
 
@@ -150,6 +239,16 @@ mod tests {
             let cfg = upgrade_config(env);
             assert_eq!(cfg.recorded_version, STORAGE_VERSION + 1);
             assert!(!cfg.migration_pending);
+        });
+    }
+
+    #[test]
+    fn mark_migrated_is_idempotent() {
+        with_instance(|env| {
+            let admin = Address::generate(env);
+            assert_eq!(mark_migrated(env, &admin), 0);
+            assert_eq!(mark_migrated(env, &admin), STORAGE_VERSION);
+            assert_eq!(storage_version(env), STORAGE_VERSION);
         });
     }
 
