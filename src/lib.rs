@@ -106,9 +106,14 @@ pub struct StellarLiquidityYieldEngine;
 /// monotonically increasing list and neither the entries nor their order can be
 /// rewritten. The length is a separate counter that only ever grows.
 #[cfg(feature = "engine")]
-const EMERGENCY_HISTORY_LEN: &str = "emergency_history_len";
+fn emergency_history_len_key(env: &Env) -> Symbol {
+    Symbol::new(env, "emergency_history_len")
+}
+
 #[cfg(feature = "engine")]
-const EMERGENCY_HISTORY_ITEM: &str = "emergency_history_item";
+fn emergency_history_item_key(env: &Env) -> Symbol {
+    Symbol::new(env, "emergency_history_item")
+}
 
 /// A single append-only emergency audit record.
 ///
@@ -348,7 +353,7 @@ impl StellarLiquidityYieldEngine {
     pub fn get_emergency_history_len(env: Env) -> u32 {
         env.storage()
             .instance()
-            .get(&Symbol::new(&env, EMERGENCY_HISTORY_LEN))
+            .get(&emergency_history_len_key(&env))
             .unwrap_or(0)
     }
 
@@ -359,14 +364,14 @@ impl StellarLiquidityYieldEngine {
         let len: u32 = env
             .storage()
             .instance()
-            .get(&Symbol::new(&env, EMERGENCY_HISTORY_LEN))
+            .get(&emergency_history_len_key(&env))
             .unwrap_or(0);
         if index >= len {
             panic!("emergency history index out of bounds")
         }
         env.storage()
             .persistent()
-            .get(&(Symbol::new(&env, EMERGENCY_HISTORY_ITEM), index))
+            .get(&(emergency_history_item_key(&env), index))
             .unwrap()
     }
 
@@ -378,7 +383,7 @@ impl StellarLiquidityYieldEngine {
         let index: u32 = env
             .storage()
             .instance()
-            .get(&Symbol::new(env, EMERGENCY_HISTORY_LEN))
+            .get(&emergency_history_len_key(env))
             .unwrap_or(0);
 
         let record = EmergencyRecord {
@@ -391,12 +396,12 @@ impl StellarLiquidityYieldEngine {
         // Write the immutable entry at the next free slot.
         env.storage()
             .persistent()
-            .set(&(Symbol::new(env, EMERGENCY_HISTORY_ITEM), index), &record);
+            .set(&(emergency_history_item_key(env), index), &record);
 
         // Advance the append-only counter only after the entry is stored.
         env.storage()
             .instance()
-            .set(&Symbol::new(env, EMERGENCY_HISTORY_LEN), &(index + 1));
+            .set(&emergency_history_len_key(env), &(index + 1));
 
         env.events()
             .publish(("emergency_record_appended",), (index, action, admin));

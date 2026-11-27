@@ -361,6 +361,8 @@ mod tests {
             expected_apy_improvement: 500,
             estimated_gas_cost: 10,
             timestamp: env.ledger().timestamp(),
+            min_output: 0,
+            post_rebalance_il_bps: 0,
         };
 
         assert!(f.engine.execute_rebalance(&f.admin, &proposal));
@@ -412,6 +414,8 @@ mod tests {
             expected_apy_improvement: 500,
             estimated_gas_cost: 10,
             timestamp: env.ledger().timestamp(),
+            min_output: 0,
+            post_rebalance_il_bps: 0,
         };
 
         // The in-flight rebalance runs to completion.
@@ -454,6 +458,8 @@ mod tests {
             expected_apy_improvement: 500,
             estimated_gas_cost: 10,
             timestamp: env.ledger().timestamp(),
+            min_output: 0,
+            post_rebalance_il_bps: 0,
         };
         assert!(
             f.engine
@@ -469,7 +475,7 @@ mod tests {
         );
 
         // An authorized admin reset clears the tripped breaker.
-        f.engine.reset_circuit_breaker(&f.admin);
+        f.engine.unpause(&f.admin);
 
         // The keeper cycle can run again without redeployment.
         let proposals = f.engine.analyze_rebalance_opportunities(&strategy_id);
@@ -495,6 +501,8 @@ mod tests {
             expected_apy_improvement: 500,
             estimated_gas_cost: 10,
             timestamp: env.ledger().timestamp(),
+            min_output: 0,
+            post_rebalance_il_bps: 0,
         };
         assert!(f
             .engine
@@ -503,7 +511,7 @@ mod tests {
 
         let intruder = Address::generate(&env);
         assert!(
-            f.engine.try_reset_circuit_breaker(&intruder).is_err(),
+            f.engine.try_unpause(&intruder).is_err(),
             "a non-admin must not be able to reset the breaker"
         );
     }

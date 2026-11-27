@@ -1,6 +1,4 @@
-use soroban_sdk::{
-    contract, contractimpl, contracttype, unwrap::UnwrapOptimized, Address, Env, Symbol, Vec,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 /// Risk management engine for liquidity arbitrage
 #[contracttype]
@@ -236,15 +234,9 @@ impl RiskEngine {
 
         // 3. Last 3 rebalances were all losses
         if recent_losses.len() >= 3 {
-            let last_three_loss = recent_losses
-                .get(recent_losses.len() - 3)
-                .unwrap_optimized()
-                && recent_losses
-                    .get(recent_losses.len() - 2)
-                    .unwrap_optimized()
-                && recent_losses
-                    .get(recent_losses.len() - 1)
-                    .unwrap_optimized();
+            let last_three_loss = recent_losses.get(recent_losses.len() - 3).unwrap()
+                && recent_losses.get(recent_losses.len() - 2).unwrap()
+                && recent_losses.get(recent_losses.len() - 1).unwrap();
 
             if last_three_loss {
                 return true;
