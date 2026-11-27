@@ -199,6 +199,54 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## Safe role rotation
+
+Admin and keeper roles are the only keys that can change code (`upgrade`),
+migrate storage (`migrate`), and move funds or configuration. Rotating them is
+an operational step that must not leave a contract without a reachable admin.
+
+### Normal rotation
+
+1. Generate the new key and fund it on the target network.
+2. Use the current admin to rotate the admin role to the new address (the
+   `set_admin`/`transfer_admin` entrypoint on the affected contract). The
+   change takes effect immediately and emits an admin-changed event.
+3. Verify with a read-only call from the new key before retiring the old key.
+4. Rotate keeper roles the same way (`set_keeper` on `RebalanceEngine` and
+   related contracts). Keepers are operationally separated from the admin, so
+   a keeper rotation never requires admin authority to be shared.
+5. Only after both roles are verified on the new keys, revoke the old keys.
+
+### Boundary cases
+
+- **Rotating to the same address** is a no-op and should be treated as a
+  successful but unchanged operation; it must not emit a misleading event.
+- **Rotating to the zero/invalid address** must be rejected. A contract with no
+  admin cannot be upgraded or recovered.
+- **Rotating a keeper while it has in-flight rebalances** is safe: the old
+  keeper's pending calls revert once the role is revoked, and the operator
+  should re-submit them from the new keeper.
+- **Multiple contracts** share an operator key in practice. Rotate them in a
+  fixed order (registry, distributor, vault, engine) and record each contract's
+  new admin before moving on, so a partial rotation is visible.
+
+### Failure behaviour
+
+- If the rotation transaction reverts (wrong caller, bad address), the role
+  stays with the previous holder. Nothing is half-applied; retry from step 2.
+- If the new key is lost before step 5, the old key must still be held. Do not
+  revoke the old key until the new key has demonstrably signed a transaction.
+- If the old key is compromised mid-rotation, prefer `upgrade` to a fixed build
+  that stores the new admin, or re-deploy (Flow B), rather than racing the
+  attacker for the admin entrypoint.
+
+### Tests
+
+Rotation coverage lives alongside the upgrade tests: a rotated admin can call
+`upgrade`/`migrate`, the previous admin cannot, rotating to the same address is
+a no-op, and a failed rotation leaves the existing admin in place. Run
+`cargo test --test upgrade_tests` to exercise these paths.
+
 ## Testing an upgrade
 
 - `tests/upgrade_tests.rs` covers all seven contracts: version recorded at
