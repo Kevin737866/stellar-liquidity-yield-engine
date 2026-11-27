@@ -324,4 +324,4 @@ This validation prevents several potential issues:
 
 - See `examples/allocation_validation_demo.rs` for code examples
 - See `tests/rebalance_engine_tests.rs` for test cases
-- See `ISSUE_RESOLUTION.md` for implementation details
+- See `ISSUE_RESOLUTION.md` for implementation details.
