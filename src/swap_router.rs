@@ -109,8 +109,67 @@ pub struct SwapQuote {
     pub minimum_output: i128,
     pub expected_output: i128,
     pub price_impact_bps: i128,
+    /// Protocol treasury fee taken from `expected_output` (0.25%), in output units.
     pub protocol_fee: i128,
+    /// Basis points retained by the pools on this route.
+    pub pool_fee_bps: u32,
+    /// Basis points charged by the protocol treasury.
+    pub protocol_fee_bps: u32,
+    /// Effective fee of the whole route, compounded across every pool hop and
+    /// the protocol fee. This is the number a consumer should compare against
+    /// other routes and venues.
+    pub total_fee_bps: u32,
     pub route_type: RouteType, // Direct, XLM_HOP, or MULTI_HOP
+}
+
+/// Fee charged on one hop of a route.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteFeeLeg {
+    pub pool: Address,
+    pub token_in: Address,
+    pub token_out: Address,
+    /// Trading fee configured on the pool, in basis points.
+    pub pool_fee_bps: u32,
+    /// Amount entering this hop.
+    pub input_amount: i128,
+    /// Portion of `input_amount` retained by the pool, in `token_in` units.
+    pub pool_fee: i128,
+    /// Amount leaving this hop after the pool fee.
+    pub output_amount: i128,
+}
+
+/// Effective fees applicable to a swap route.
+///
+/// Returned by [`SwapRouter::get_route_fees`] so consumers and keepers can see
+/// what a route actually costs, per hop and in aggregate, without replaying the
+/// router's math off-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteFeeQuote {
+    pub path: Vec<Address>,
+    pub pools: Vec<Address>,
+    pub route_type: RouteType,
+    pub input_amount: i128,
+    /// Gross route output, before the protocol treasury fee.
+    pub expected_output: i128,
+    /// Per-hop fee breakdown, in execution order.
+    pub legs: Vec<RouteFeeLeg>,
+    /// Effective pool fee of the route in basis points, compounded across hops.
+    pub pool_fee_bps: u32,
+    /// Protocol treasury fee in basis points.
+    pub protocol_fee_bps: u32,
+    /// Protocol treasury fee in output units (0.25% of `expected_output`).
+    pub protocol_fee: i128,
+    /// Output lost to pool fees, in output units. Measured against the same
+    /// route priced with zero pool fees, so it includes the compounded effect of
+    /// every hop.
+    pub pool_fee_in_output: i128,
+    /// `pool_fee_in_output + protocol_fee`.
+    pub total_fee_in_output: i128,
+    /// Effective total fee of the route in basis points, compounded across the
+    /// pool hops and the protocol fee.
+    pub total_fee_bps: u32,
 }
 
 /// Route types for analytics
@@ -328,6 +387,7 @@ impl SwapRouter {
 
         // Calculate protocol fee (0.25% of output)
         let protocol_fee = Self::scale_bps(expected_output, PROTOCOL_TREASURY_FEE_BPS);
+        let pool_fee_bps = Self::pool_fee_bps_for_path(&env, &path.pools);
 
         SwapQuote {
             path,
@@ -336,8 +396,39 @@ impl SwapRouter {
             expected_output,
             price_impact_bps: 0, // Calculate based on reserves
             protocol_fee,
+            pool_fee_bps,
+            protocol_fee_bps: PROTOCOL_TREASURY_FEE_BPS,
+            total_fee_bps: Self::total_fee_bps(pool_fee_bps),
             route_type,
         }
+    }
+
+    /// Get the effective fees of the best route for a swap.
+    ///
+    /// This is the detailed companion to [`SwapRouter::get_quote`]: it reports
+    /// the fee charged on every hop plus the compounded route-level rate, so a
+    /// consumer can see what a route costs before quoting or executing it.
+    ///
+    /// Returns `NoPoolFound` when no pool can serve the pair, so keepers can
+    /// probe a route without panicking.
+    pub fn get_route_fees(
+        env: Env,
+        input_token: Address,
+        output_token: Address,
+        input_amount: i128,
+    ) -> Result<RouteFeeQuote, SwapError> {
+        if input_amount <= 0 || input_token == output_token {
+            return Err(SwapError::InvalidPath);
+        }
+
+        let (path, route_type) =
+            Self::find_best_path(&env, &input_token, &output_token, input_amount);
+        if path.pools.is_empty() {
+            return Err(SwapError::NoPoolFound);
+        }
+
+        Self::build_route_fee_quote(&env, &path, route_type, input_amount)
+            .ok_or(SwapError::NoPoolFound)
     }
 
     /// Get quote for direct swap only (no routing)
@@ -357,6 +448,7 @@ impl SwapRouter {
             expected_output,
             Self::get_default_slippage(env.clone()),
         );
+        let pool_fee_bps = pool.fee_bps;
         Some(SwapQuote {
             path: SwapPath {
                 tokens: vec![&env, input_token, output_token],
@@ -369,6 +461,9 @@ impl SwapRouter {
             expected_output,
             price_impact_bps: price_impact,
             protocol_fee: Self::scale_bps(expected_output, PROTOCOL_TREASURY_FEE_BPS),
+            pool_fee_bps,
+            protocol_fee_bps: PROTOCOL_TREASURY_FEE_BPS,
+            total_fee_bps: Self::total_fee_bps(pool_fee_bps),
             route_type: RouteType::Direct,
         })
     }
@@ -1123,6 +1218,106 @@ impl SwapRouter {
             + (amount % BPS_DIVISOR) * i128::from(bps) / BPS_DIVISOR
     }
 
+    /// Effective fee rate (in bps) charged by the pools on a route.
+    ///
+    /// Fees compound across hops, so three 30 bps pools cost more than 90 bps
+    /// of the amount that leaves the last one. A pool that cannot be loaded is
+    /// treated as a total loss, so a broken path never looks cheaper than it is.
+    fn pool_fee_bps_for_path(env: &Env, pools: &Vec<Address>) -> u32 {
+        let pool_map = Self::get_pools(env);
+        let mut kept: i128 = BPS_DIVISOR;
+
+        for i in 0..pools.len() {
+            let fee = match pool_map.get(pools.get(i).unwrap()) {
+                Some(pool) => i128::from(pool.fee_bps.min(BPS_DIVISOR as u32)),
+                None => BPS_DIVISOR,
+            };
+            kept = kept * (BPS_DIVISOR - fee) / BPS_DIVISOR;
+        }
+
+        (BPS_DIVISOR - kept) as u32
+    }
+
+    /// Effective total fee (in bps) of a route: the compounded pool fee followed
+    /// by the protocol treasury fee taken from the output.
+    fn total_fee_bps(pool_fee_bps: u32) -> u32 {
+        let kept = BPS_DIVISOR - i128::from(pool_fee_bps.min(BPS_DIVISOR as u32));
+        let kept_after_protocol =
+            kept * (BPS_DIVISOR - i128::from(PROTOCOL_TREASURY_FEE_BPS)) / BPS_DIVISOR;
+        (BPS_DIVISOR - kept_after_protocol) as u32
+    }
+
+    /// Output of the same route priced with zero pool fees, used to express the
+    /// pool fees in output units.
+    fn fee_free_output(env: &Env, path: &SwapPath, input_amount: i128) -> Option<i128> {
+        let pool_map = Self::get_pools(env);
+        let mut amount = input_amount;
+
+        for i in 0..path.pools.len() {
+            let mut pool = pool_map.get(path.pools.get(i).unwrap())?;
+            pool.fee_bps = 0;
+            amount = Self::calculate_direct_swap_output_for_pool(
+                &pool,
+                &path.tokens.get(i).unwrap(),
+                amount,
+            )?;
+        }
+
+        Some(amount)
+    }
+
+    /// Build the per-hop and compounded fee picture for a resolved route.
+    fn build_route_fee_quote(
+        env: &Env,
+        path: &SwapPath,
+        route_type: RouteType,
+        input_amount: i128,
+    ) -> Option<RouteFeeQuote> {
+        let pool_map = Self::get_pools(env);
+        let mut legs: Vec<RouteFeeLeg> = Vec::new(env);
+        let mut amount = input_amount;
+
+        for i in 0..path.pools.len() {
+            let pool = pool_map.get(path.pools.get(i).unwrap())?;
+            let token_in = path.tokens.get(i).unwrap();
+            let token_out = path.tokens.get(i + 1).unwrap();
+            let output = Self::calculate_direct_swap_output_for_pool(&pool, &token_in, amount)?;
+
+            legs.push_back(RouteFeeLeg {
+                pool: pool.pool_address.clone(),
+                token_in,
+                token_out,
+                pool_fee_bps: pool.fee_bps,
+                input_amount: amount,
+                pool_fee: Self::scale_bps(amount, pool.fee_bps.min(BPS_DIVISOR as u32)),
+                output_amount: output,
+            });
+            amount = output;
+        }
+
+        let expected_output = amount;
+        let pool_fee_bps = Self::pool_fee_bps_for_path(env, &path.pools);
+        let protocol_fee = Self::scale_bps(expected_output, PROTOCOL_TREASURY_FEE_BPS);
+        let pool_fee_in_output = Self::fee_free_output(env, path, input_amount)?
+            .saturating_sub(expected_output)
+            .max(0);
+
+        Some(RouteFeeQuote {
+            path: path.tokens.clone(),
+            pools: path.pools.clone(),
+            route_type,
+            input_amount,
+            expected_output,
+            legs,
+            pool_fee_bps,
+            protocol_fee_bps: PROTOCOL_TREASURY_FEE_BPS,
+            protocol_fee,
+            pool_fee_in_output,
+            total_fee_in_output: pool_fee_in_output.saturating_add(protocol_fee),
+            total_fee_bps: Self::total_fee_bps(pool_fee_bps),
+        })
+    }
+
     /// Execute pool swap
     fn execute_pool_swap(
         env: &Env,
@@ -1396,9 +1591,12 @@ mod tests {
 
     fn assert_panic_contains<F>(f: F, expected: &str)
     where
-        F: FnOnce() + std::panic::UnwindSafe,
+        F: FnOnce(),
     {
-        let payload = std::panic::catch_unwind(f).expect_err("expected panic");
+        // `AssertUnwindSafe` is required because the `Env` handle is interior
+        // mutable; the test only asserts that the call panics.
+        let payload =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected panic");
         let message = payload
             .downcast_ref::<String>()
             .map(String::as_str)
@@ -1415,32 +1613,35 @@ mod tests {
     #[test]
     fn test_uninitialized_admin_and_treasury_are_rejected_with_clear_errors() {
         let env = Env::default();
-        let admin = Address::generate(&env);
-        let user = Address::generate(&env);
-        let input_token = Address::generate(&env);
-        let output_token = Address::generate(&env);
-        let path = Vec::from_array(&env, [input_token.clone(), output_token.clone()]);
+        let contract = env.register(SwapRouter, ());
+        env.as_contract(&contract, || {
+            let admin = Address::generate(&env);
+            let user = Address::generate(&env);
+            let input_token = Address::generate(&env);
+            let output_token = Address::generate(&env);
+            let path = Vec::from_array(&env, [input_token.clone(), output_token.clone()]);
 
-        assert_panic_contains(
-            || SwapRouter::pause_oracle(env.clone(), admin.clone()),
-            "admin not configured",
-        );
+            assert_panic_contains(
+                || SwapRouter::pause_oracle(env.clone(), admin.clone()),
+                "admin not configured",
+            );
 
-        assert_panic_contains(
-            || {
-                SwapRouter::swap(
-                    env.clone(),
-                    user,
-                    input_token,
-                    output_token,
-                    1_000,
-                    900,
-                    path,
-                    None,
-                );
-            },
-            "treasury not configured",
-        );
+            assert_panic_contains(
+                || {
+                    SwapRouter::swap(
+                        env.clone(),
+                        user,
+                        input_token,
+                        output_token,
+                        1_000,
+                        900,
+                        path,
+                        None,
+                    );
+                },
+                "treasury not configured",
+            );
+        });
     }
 
     #[test]
@@ -1487,6 +1688,219 @@ mod tests {
                 SwapRouter::update_pool_reserves(env.clone(), pool_address.clone(), 1000, 2000)
             }));
             assert!(matches!(result, Ok(Ok(()))));
+        });
+    }
+
+    // ==================== Route fee visibility (#255) ====================
+
+    /// Deploy a router with one pool per provided `(token_a, token_b, fee_bps)`.
+    fn setup_router(
+        env: &Env,
+        xlm_token: &Address,
+        pools: &[(Address, Address, u32)],
+        reserves: i128,
+    ) -> Address {
+        let contract = env.register(SwapRouter, ());
+        let admin = Address::generate(env);
+        let treasury = Address::generate(env);
+
+        env.as_contract(&contract, || {
+            SwapRouter::initialize(
+                env.clone(),
+                admin.clone(),
+                treasury.clone(),
+                xlm_token.clone(),
+            );
+
+            for (token_a, token_b, fee_bps) in pools.iter() {
+                let pool_address = Address::generate(env);
+                SwapRouter::add_pool(
+                    env.clone(),
+                    admin.clone(),
+                    pool_address.clone(),
+                    token_a.clone(),
+                    token_b.clone(),
+                    *fee_bps,
+                    false,
+                );
+                SwapRouter::update_pool_reserves(env.clone(), pool_address, reserves, reserves)
+                    .unwrap();
+            }
+        });
+
+        contract
+    }
+
+    #[test]
+    fn test_quote_exposes_effective_route_fee() {
+        // A consumer reading a quote must see what the route costs, not only
+        // the protocol fee: the pool fee is the dominant cost on most swaps.
+        let env = Env::default();
+        let xlm_token = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+
+        let contract = setup_router(
+            &env,
+            &xlm_token,
+            &[(token_a.clone(), token_b.clone(), 30)],
+            1_000_000,
+        );
+
+        env.as_contract(&contract, || {
+            let quote =
+                SwapRouter::get_quote(env.clone(), token_a.clone(), token_b.clone(), 1_000, None);
+
+            assert_eq!(quote.pool_fee_bps, 30, "pool fee must be exposed");
+            assert_eq!(quote.protocol_fee_bps, PROTOCOL_TREASURY_FEE_BPS);
+            // 1 - (1 - 0.003) * (1 - 0.0025) = 55 bps compounded.
+            assert_eq!(quote.total_fee_bps, 55, "effective route fee is compounded");
+            assert_eq!(
+                quote.protocol_fee,
+                SwapRouter::scale_bps(quote.expected_output, PROTOCOL_TREASURY_FEE_BPS)
+            );
+        });
+
+        // A pool that charges nothing costs only the protocol fee.
+        let free_token_a = Address::generate(&env);
+        let free_token_b = Address::generate(&env);
+        let free_contract = setup_router(
+            &env,
+            &xlm_token,
+            &[(free_token_a.clone(), free_token_b.clone(), 0)],
+            1_000_000,
+        );
+        env.as_contract(&free_contract, || {
+            let free_quote =
+                SwapRouter::get_quote(env.clone(), free_token_a, free_token_b, 1_000, None);
+            assert_eq!(free_quote.pool_fee_bps, 0);
+            assert_eq!(free_quote.total_fee_bps, PROTOCOL_TREASURY_FEE_BPS);
+        });
+    }
+
+    #[test]
+    fn test_route_fees_query_breaks_down_each_hop() {
+        // The companion query must report the same costs the quote uses, in
+        // enough detail to audit a route hop by hop.
+        let env = Env::default();
+        let xlm_token = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+
+        let contract = setup_router(
+            &env,
+            &xlm_token,
+            &[(token_a.clone(), token_b.clone(), 30)],
+            1_000_000,
+        );
+
+        env.as_contract(&contract, || {
+            let fees =
+                SwapRouter::get_route_fees(env.clone(), token_a.clone(), token_b.clone(), 1_000)
+                    .unwrap();
+            let quote =
+                SwapRouter::get_quote(env.clone(), token_a.clone(), token_b.clone(), 1_000, None);
+
+            assert_eq!(fees.legs.len(), 1);
+            assert_eq!(fees.route_type, RouteType::Direct);
+            assert_eq!(fees.expected_output, quote.expected_output);
+            assert_eq!(fees.protocol_fee, quote.protocol_fee);
+            assert_eq!(fees.pool_fee_bps, quote.pool_fee_bps);
+            assert_eq!(fees.total_fee_bps, quote.total_fee_bps);
+
+            let leg = fees.legs.get(0).unwrap();
+            assert_eq!(leg.input_amount, 1_000);
+            assert_eq!(leg.pool_fee_bps, 30);
+            // 0.3% of the 1,000 entering the hop.
+            assert_eq!(leg.pool_fee, 3);
+            assert_eq!(leg.output_amount, quote.expected_output);
+
+            // The same route priced without pool fees would return 999, so the
+            // pool fee costs 3 in output units on top of the 2 protocol fee.
+            assert_eq!(fees.pool_fee_in_output, 3);
+            assert_eq!(fees.total_fee_in_output, 5);
+            assert_eq!(
+                fees.total_fee_in_output,
+                fees.pool_fee_in_output + fees.protocol_fee
+            );
+        });
+    }
+
+    #[test]
+    fn test_route_fees_compound_across_hops() {
+        // Multi-hop routes pay a fee on every leg, and the second leg's fee is
+        // charged on the output of the first: the effective rate must compound
+        // instead of summing the two configured rates.
+        let env = Env::default();
+        let xlm_token = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+
+        let contract = setup_router(
+            &env,
+            &xlm_token,
+            &[
+                (token_a.clone(), xlm_token.clone(), 30),
+                (xlm_token.clone(), token_b.clone(), 30),
+            ],
+            1_000_000,
+        );
+
+        env.as_contract(&contract, || {
+            let fees =
+                SwapRouter::get_route_fees(env.clone(), token_a.clone(), token_b.clone(), 1_000)
+                    .unwrap();
+            let quote =
+                SwapRouter::get_quote(env.clone(), token_a.clone(), token_b.clone(), 1_000, None);
+
+            assert_eq!(fees.route_type, RouteType::XLMHop);
+            assert_eq!(fees.legs.len(), 2);
+            // 1 - 0.997 * 0.997 = 59.91 bps, recorded as 60 by the
+            // basis-point arithmetic; summing the two configured rates would
+            // also give 60 here, so the compounding is checked on the totals.
+            assert_eq!(fees.pool_fee_bps, 60);
+            assert_eq!(fees.total_fee_bps, 85);
+
+            let first = fees.legs.get(0).unwrap();
+            let second = fees.legs.get(1).unwrap();
+            assert_eq!(first.output_amount, second.input_amount);
+            assert_eq!(second.output_amount, fees.expected_output);
+            assert_eq!(fees.expected_output, quote.expected_output);
+            assert_eq!(
+                fees.total_fee_in_output,
+                fees.pool_fee_in_output + fees.protocol_fee
+            );
+            assert!(
+                fees.pool_fee_in_output > first.pool_fee,
+                "the second hop also charges a pool fee"
+            );
+        });
+    }
+
+    #[test]
+    fn test_route_fees_without_pool_reports_no_route() {
+        let env = Env::default();
+        let xlm_token = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+
+        let contract = setup_router(
+            &env,
+            &xlm_token,
+            &[(token_a.clone(), token_b.clone(), 30)],
+            1_000_000,
+        );
+
+        env.as_contract(&contract, || {
+            let unknown = Address::generate(&env);
+            let result =
+                SwapRouter::get_route_fees(env.clone(), token_a.clone(), unknown.clone(), 1_000);
+            assert_eq!(result, Err(SwapError::NoPoolFound));
+
+            // Same input token on both sides is not a route.
+            let result =
+                SwapRouter::get_route_fees(env.clone(), token_a.clone(), token_a.clone(), 1_000);
+            assert_eq!(result, Err(SwapError::InvalidPath));
         });
     }
 }
