@@ -119,6 +119,34 @@ Assumption: off-chain keepers drive rebalance and harvest flows and rely on even
   - Code: `src/lib.rs` — `upgrade`, `migrate`, `src/upgrade.rs`.
   - Test: `testst/upgrade_tests.rs`.
 
+## 7. Keeper Signing Key Rotation
+
+Assumption: keeper signing keys can be rotated without a window where a compromised or retired key remains authorized, and without interrupting harvest or rebalance flows.
+
+Procedure (operators must follow in order):
+
+1. **Generate the new key offline** on a hardened host. Never reuse a key that has appeared in CI logs, shell history, or a shared machine.
+2. **Register the new key as pending** via the admin flow before any keeper uses it. The old key stays authorized until step 5.
+3. **Verify the new key on a testnet deployment** by submitting a harvest and a rebalance signed with it. Confirm the emitted events are picked up by the listener.
+4. **Deploy the new key to keeper infrastructure** in a single rollout, then confirm the keeper log shows successful submissions under the new key.
+5. **Revoke the old key** through the admin flow. Confirm subsequent submissions with the old key are rejected.
+6. **Record the rotation** (date, key identifier, operator, and reason) in the operations log. Never record the private key material.
+
+Boundary and failure behavior:
+
+- [ ] Rotation while paused: keeper submissions are blocked by the circuit breaker, so rotate only after `is_paused` returns `false`, or perform rotation while paused and resume afterward. Do not revoke the old key before the new key is verified.
+  - Code: `src/lib.rs` — `require_not_paused`, `is_paused`.
+- [ ] Failed new-key verification: keep the old key active, do not revoke it, and roll back the pending registration. Investigate before retrying.
+- [ ] Lost or compromised old key: pause the contract first, then revoke and rotate. Pausing is the only step that stops in-flight misuse before revocation completes.
+  - Code: `src/lib.rs` — `pause`.
+- [ ] Concurrent rotation: only one rotation may be in progress at a time. Overlapping rotations risk revoking the only valid key.
+- [ ] Rotation does not change admin ownership. Admin keys are rotated with `update_admin` under the separate admin procedure in section 2.
+  - Code: `src/lib.rs` — `update_admin`.
+- [ ] Event listeners must be updated to the new key identifier before revocation so keeper monitoring does not alert on the change.
+  - Code: `src/lib.rs` — admin configuration events (section 5).
+
+Tests: rotation-specific tests are not yet implemented; the paused-state and admin-authorization tests in sections 1 and 2 cover the blocking and authorization behavior this procedure depends on.
+
 ## High-Priority Items Verified by Tests
 
 The following tests are required to pass on every change:
@@ -142,3 +170,4 @@ Items marked `[ ]` above are not yet covered by tests. They are tracked here so 
 - Add a negative test for out-of-range fee basis points.
 - Add pause / unpause events and cover them in a test.
 - Add a test confirming keeper keys are rejected from every admin-only entrypoint.
+- Add rotation-procedure tests once the pending-key registration flow exists in the contract.

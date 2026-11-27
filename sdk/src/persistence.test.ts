@@ -6,6 +6,7 @@
  * - Migration / normalisation of stored payloads
  * - The in-memory store contract
  * - The file store: round-trip, atomic writes, missing file, corrupt file
+ * - Regression: checkpoint payload compatibility across releases (v0 and v1 fixtures)
  */
 
 import { promises as fs } from 'fs';
@@ -133,6 +134,35 @@ describe('normalizeCheckpoint', () => {
 
     expect(normalized.metadata).toBeUndefined();
   });
+
+  it('keeps reading checkpoints written by previous releases (compatibility fixtures)', () => {
+    // Fixture shaped like a checkpoint written by the v0 release.
+    const v0Payload = { version: 0, nextLedger: 300, lastProcessedLedger: 299, updatedAt: 111 };
+    // Fixture shaped like a checkpoint written by the current (v1) release.
+    const v1Payload = {
+      version: CHECKPOINT_VERSION,
+      nextLedger: 300,
+      lastProcessedLedger: 299,
+      updatedAt: 222,
+      metadata: { events: 4 },
+    };
+
+    const fromV0 = normalizeCheckpoint(v0Payload);
+    const fromV1 = normalizeCheckpoint(v1Payload);
+
+    expect(fromV0.version).toBe(CHECKPOINT_VERSION);
+    expect(fromV0.nextLedger).toBe(300);
+    expect(fromV0.lastProcessedLedger).toBe(299);
+    expect(fromV1.nextLedger).toBe(300);
+    expect(fromV1.metadata).toEqual({ events: 4 });
+  });
+
+  it('normalization is idempotent across repeated migrations', () => {
+    const once = normalizeCheckpoint({ version: 0, nextLedger: 9, lastProcessedLedger: 8, updatedAt: 3 });
+    const twice = normalizeCheckpoint(once);
+
+    expect(twice).toEqual(once);
+  });
 });
 
 describe('MemoryCheckpointStore', () => {
@@ -221,6 +251,19 @@ describe('FileCheckpointStore', () => {
     expect((await after.load())!.nextLedger).toBe(10);
   });
 
+  it('reads a checkpoint file written by a previous release', async () => {
+    const file = path.join(dir, 'keeper.json');
+    await fs.writeFile(
+      file,
+      JSON.stringify({ version: 0, nextLedger: 77, lastProcessedLedger: 76, updatedAt: 5 }),
+      'utf8',
+    );
+
+    const loaded = await new FileCheckpointStore(file).load();
+    expect(loaded!.version).toBe(CHECKPOINT_VERSION);
+    expect(loaded!.nextLedger).toBe(77);
+  });
+
   it('creates missing parent directories', async () => {
     const file = path.join(dir, 'nested', 'deep', 'keeper.json');
     const store = new FileCheckpointStore(file);
@@ -265,6 +308,23 @@ describe('FileCheckpointStore', () => {
 
     const store = new FileCheckpointStore(file);
     await expect(store.load()).rejects.toThrow(/malformed/);
+  });
+
+  it('refuses to read a checkpoint written by a newer release', async () => {
+    const file = path.join(dir, 'keeper.json');
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        version: CHECKPOINT_VERSION + 1,
+        nextLedger: 1,
+        lastProcessedLedger: 0,
+        updatedAt: 1,
+      }),
+      'utf8',
+    );
+
+    const store = new FileCheckpointStore(file);
+    await expect(store.load()).rejects.toThrow(/newer than the supported version/);
   });
 
   it('treats an empty file as "nothing stored yet"', async () => {

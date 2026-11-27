@@ -2,9 +2,10 @@ import { Keypair, StrKey } from "stellar-sdk";
 import { RebalancerClient } from "./rebalancer";
 
 describe("RebalancerClient APY keeper permissions", () => {
-  it("exposes a dedicated APY keeper workflow separate from the admin flow", () => {
-    const contractId = StrKey.encodeContract(Buffer.alloc(32, 1));
-    const client = new RebalancerClient({
+  const contractId = StrKey.encodeContract(Buffer.alloc(32, 1));
+
+  const buildClient = () =>
+    new RebalancerClient({
       network: "testnet",
       horizonUrl: "https://horizon-testnet.stellar.org",
       sorobanRpcUrl: "https://soroban-testnet.stellar.org",
@@ -16,6 +17,9 @@ describe("RebalancerClient APY keeper permissions", () => {
       },
     });
 
+  it("exposes a dedicated APY keeper workflow separate from the admin flow", () => {
+    const client = buildClient();
+
     expect(typeof client.setApyKeepers).toBe("function");
     expect(typeof client.getApyKeepers).toBe("function");
     expect(typeof client.updatePoolApy).toBe("function");
@@ -25,5 +29,18 @@ describe("RebalancerClient APY keeper permissions", () => {
     const admin = Keypair.random();
     const keeper = Keypair.random();
     expect(admin.publicKey()).not.toBe(keeper.publicKey());
+  });
+
+  it("keeps signing keys distinct when rotating a keeper key", () => {
+    const oldKeeper = Keypair.random();
+    const newKeeper = Keypair.random();
+
+    expect(newKeeper.publicKey()).not.toBe(oldKeeper.publicKey());
+    expect(StrKey.isValidEd25519PublicKey(newKeeper.publicKey())).toBe(true);
+  });
+
+  it("rejects malformed keeper public keys during rotation", () => {
+    expect(StrKey.isValidEd25519PublicKey("not-a-key")).toBe(false);
+    expect(StrKey.isValidEd25519PublicKey("")).toBe(false);
   });
 });

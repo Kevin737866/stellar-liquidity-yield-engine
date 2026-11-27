@@ -27,6 +27,14 @@ export interface RetryResult<T> {
   attempts: number;
 }
 
+/** Error thrown when retry configuration is outside its supported range. */
+export class RetryConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryConfigurationError';
+  }
+}
+
 /**
  * Default retry configuration for RPC calls.
  */
@@ -118,6 +126,24 @@ function calculateDelay(
 }
 
 /**
+ * Validate retry options to ensure they are within acceptable bounds.
+ */
+function validateRetryOptions(opts: Required<RetryOptions>): void {
+  if (!Number.isInteger(opts.maxRetries) || opts.maxRetries < 0) {
+    throw new RetryConfigurationError('maxRetries must be a non-negative integer');
+  }
+  if (!Number.isFinite(opts.initialDelayMs) || opts.initialDelayMs < 0) {
+    throw new RetryConfigurationError('initialDelayMs must be a finite non-negative number');
+  }
+  if (!Number.isFinite(opts.backoffMultiplier) || opts.backoffMultiplier < 1) {
+    throw new RetryConfigurationError('backoffMultiplier must be a finite number greater than or equal to 1');
+  }
+  if (!Number.isFinite(opts.maxDelayMs) || opts.maxDelayMs < opts.initialDelayMs) {
+    throw new RetryConfigurationError('maxDelayMs must be finite and greater than or equal to initialDelayMs');
+  }
+}
+
+/**
  * Retry an async operation with exponential backoff for transient errors.
  *
  * @param fn - The async function to retry
@@ -130,6 +156,7 @@ export async function withRetry<T>(
   options: RetryOptions = {}
 ): Promise<RetryResult<T>> {
   const opts = { ...DEFAULT_RETRY_OPTIONS, ...options };
+  validateRetryOptions(opts);
   let lastError: Error;
 
   for (let attempt = 1; attempt <= opts.maxRetries + 1; attempt++) {
