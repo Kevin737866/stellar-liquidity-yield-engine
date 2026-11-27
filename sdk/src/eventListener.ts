@@ -61,8 +61,83 @@ import {
  */
 export const DEFAULT_PAGE_SIZE = 200;
 
+/**
+ * Default maximum size, in UTF-8 bytes, of a single event's `topic` + `value`
+ * payload.
+ *
+ * Soroban RPC limits how much data one event can carry, so a payload much
+ * larger than this is not a legitimate contract event: it is either a
+ * corrupted response or a misconfigured node. Validating the size *before*
+ * decoding keeps an oversized payload from reaching handlers or an ABI
+ * decoder, which is where an unbounded payload would otherwise do its damage.
+ */
+export const DEFAULT_MAX_EVENT_PAYLOAD_BYTES = 64 * 1024;
+
+/**
+ * Largest ledger span a single `replay()` accepts.
+ *
+ * Matches the RPC's bounded event-retention window: a wider replay is almost
+ * always a mistake (a wrong `toLedger`, or an attempt to re-index history the
+ * node no longer holds) and would silently return a truncated result. Callers
+ * that genuinely need more are expected to issue several bounded replays.
+ */
+export const MAX_REPLAY_LEDGERS = 10_000;
+
 /** Checkpoint metadata key holding the RPC paging cursor mid-ledger. */
 export const EVENT_CURSOR_KEY = 'eventCursor';
+
+// ---------------------------------------------------------------------------
+// Payload size validation
+// ---------------------------------------------------------------------------
+
+/** Serialize a value without throwing on cycles or BigInts, which events use. */
+function safeJson(value: unknown): string {
+  const seen = new WeakSet<object>();
+  try {
+    return (
+      JSON.stringify(value, (_key, item) => {
+        if (typeof item === 'bigint') return item.toString();
+        if (typeof item === 'object' && item !== null) {
+          if (seen.has(item)) return '[Circular]';
+          seen.add(item);
+        }
+        return item;
+      }) ?? ''
+    );
+  } catch {
+    // A non-serializable payload still has to be measured; fall back to the
+    // string form so the guard remains fail-closed.
+    return String(value);
+  }
+}
+
+/** UTF-8 byte length of a string. */
+function utf8ByteLength(text: string): number {
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(text).length;
+  }
+  // `TextEncoder` is available in every supported runtime (Node 18+, all
+  // modern browsers); this fallback only exists for exotic embeddings.
+  let bytes = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) as number;
+    bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+}
+
+/**
+ * Measure the decoded payload of a raw event in UTF-8 bytes.
+ *
+ * The size is the JSON representation of `topic` and `value` — the same
+ * structures a decoder would walk — so JSON overhead (quotes, commas) is
+ * counted. That makes the measurement slightly conservative, which is the
+ * safe direction for a limit: an event just under the threshold cannot be
+ * rejected by surprise.
+ */
+export function eventPayloadSizeBytes(event: Pick<RawContractEvent, 'topic' | 'value'>): number {
+  return utf8ByteLength(safeJson(event.topic)) + utf8ByteLength(safeJson(event.value));
+}
 
 // ---------------------------------------------------------------------------
 // Soroban RPC surface
@@ -259,6 +334,17 @@ export interface ListenerConfig {
    */
   checkpointMetadata?: Record<string, string | number | boolean>;
 
+  /**
+   * Maximum size, in UTF-8 bytes, of a single event's `topic` + `value`
+   * payload. Events larger than this are dropped before any decoding or
+   * handler dispatch and counted in {@link ContractEventListener.getHealth}.
+   *
+   * Defaults to {@link DEFAULT_MAX_EVENT_PAYLOAD_BYTES} (64 KiB). Set `0` to
+   * reject any non-empty payload; the limit is inclusive, so a payload of
+   * exactly this many bytes is accepted.
+   */
+  maxEventPayloadBytes?: number;
+
   /** Clock, injectable for tests. Defaults to `Date.now`. */
   now?: () => number;
 }
@@ -393,6 +479,151 @@ export type PollResult =
     };
 
 // ---------------------------------------------------------------------------
+// Bounded replay
+// ---------------------------------------------------------------------------
+
+/** Why a bounded replay request was rejected. */
+export type ReplayErrorCode = 'invalid_range' | 'range_too_large' | 'aborted';
+
+/**
+ * Raised when a {@link ContractEventListener.replay} request cannot run.
+ *
+ * Replay failures are configuration/programming mistakes, so they reject the
+ * call rather than going through the poll error handler — a range that can
+ * never be served should not be retried by a poll loop.
+ */
+export class ReplayRangeError extends Error {
+  readonly code: ReplayErrorCode;
+
+  constructor(code: ReplayErrorCode, message: string) {
+    super(message);
+    this.name = 'ReplayRangeError';
+    this.code = code;
+  }
+}
+
+/** A bounded ledger range to replay through the registered handlers. */
+export interface ReplayOptions {
+  /** First ledger to replay (inclusive). */
+  fromLedger: number;
+  /** Last ledger to replay (inclusive). */
+  toLedger: number;
+  /** Events requested per page. Defaults to the listener's `pageSize`. */
+  pageSize?: number;
+  /**
+   * Contract addresses to deliver events from. Defaults to the listener's
+   * `contractAddresses`; pass an empty array to replay every contract.
+   */
+  contractAddresses?: string[];
+  /** Stop after this many events have been considered. Defaults to no cap. */
+  maxEvents?: number;
+  /** Abort the replay between pages. */
+  signal?: AbortSignal;
+}
+
+/** Outcome of a bounded replay. */
+export interface ReplayResult {
+  /** First ledger replayed (inclusive). */
+  fromLedger: number;
+  /** Last ledger replayed (inclusive). */
+  toLedger: number;
+  /** RPC pages fetched. */
+  pages: number;
+  /** Events that passed the address filter and were considered. */
+  eventsProcessed: number;
+  /** Events that reached at least one typed handler. */
+  eventsDispatched: number;
+  /** Events that were filtered, oversized, unknown, or had no handler. */
+  eventsSkipped: number;
+  /** Events dropped for exceeding `maxEventPayloadBytes`. */
+  eventsOversized: number;
+  /** Highest ledger consumed during the replay (`fromLedger - 1` when empty). */
+  lastLedger: number;
+  /**
+   * Whether the whole range was scanned. `false` when `maxEvents` cut the
+   * replay short.
+   */
+  completed: boolean;
+}
+
+/** Normalized, validated replay options used internally. */
+interface NormalizedReplayOptions {
+  fromLedger: number;
+  toLedger: number;
+  pageSize: number;
+  contractAddresses?: string[];
+  maxEvents?: number;
+  signal?: AbortSignal;
+}
+
+/** Per-page dispatch counts, shared by polling and replay. */
+interface DispatchSummary {
+  highestLedger: number;
+  processed: number;
+  dispatched: number;
+  skipped: number;
+  oversized: number;
+}
+
+// ---------------------------------------------------------------------------
+// Health status
+// ---------------------------------------------------------------------------
+
+/**
+ * Overall state of an event subscription.
+ *
+ * - `idle`: no poll has run yet.
+ * - `healthy`: the subscription is running and its most recent poll succeeded.
+ * - `degraded`: the subscription is running, but its most recent poll failed
+ *   (the listener keeps retrying; the next success clears the state).
+ * - `stopped`: polling was stopped after at least one poll.
+ */
+export type SubscriptionHealthStatus = 'idle' | 'healthy' | 'degraded' | 'stopped';
+
+/** A point-in-time snapshot of an event subscription's health. */
+export interface EventSubscriptionHealth {
+  /** Coarse status derived from the counters below. */
+  status: SubscriptionHealthStatus;
+  /** Whether `start()` is active. */
+  running: boolean;
+  /** Whether a checkpoint store is configured. */
+  persistent: boolean;
+  /** Ledger the next poll will start from. */
+  cursor: number;
+  /** Highest ledger fully consumed (`-1` when none). */
+  lastProcessedLedger: number;
+  /** RPC paging token carried between polls, if any. */
+  pagingCursor: string | null;
+  /** Wall-clock time of the most recent poll attempt (ms), if any. */
+  lastPollAt: number | null;
+  /** Wall-clock time of the most recent successful poll (ms), if any. */
+  lastSuccessAt: number | null;
+  /** Wall-clock time of the most recent failed poll (ms), if any. */
+  lastErrorAt: number | null;
+  /** Most recent poll error, or `null` when the last poll succeeded. */
+  lastError: { message: string; ledger: number } | null;
+  /** Failures since the last successful poll. */
+  consecutiveFailures: number;
+  /** Poll counters. */
+  polls: { attempted: number; succeeded: number; failed: number };
+  /** Event counters since the listener was constructed. */
+  events: {
+    /** Events that passed the address filter and were considered. */
+    processed: number;
+    /** Events that reached at least one typed handler. */
+    dispatched: number;
+    /** Events filtered as noise, oversized, unknown, or unhandled. */
+    skipped: number;
+    /** Events dropped for exceeding `maxEventPayloadBytes`. */
+    oversized: number;
+  };
+  /** Configured payload ceiling, in UTF-8 bytes. */
+  maxEventPayloadBytes: number;
+  /** Ledger restored from durable state, or `null` when none was restored. */
+  restoredFromLedger: number | null;
+}
+
+// ---------------------------------------------------------------------------
 // ContractEventListener
 // ---------------------------------------------------------------------------
 
@@ -479,6 +710,27 @@ export class ContractEventListener {
   /** Timer handle returned by `setInterval`, null when stopped. */
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
 
+  /** Payload ceiling applied before decoding each event. */
+  private readonly maxEventPayloadBytes: number;
+
+  /** Poll and event counters backing {@link getHealth}. */
+  private readonly stats = {
+    pollsAttempted: 0,
+    pollsSucceeded: 0,
+    pollsFailed: 0,
+    eventsProcessed: 0,
+    eventsDispatched: 0,
+    eventsSkipped: 0,
+    eventsOversized: 0,
+  };
+
+  /** Timestamps and failure state backing {@link getHealth}. */
+  private lastPollAt: number | null = null;
+  private lastSuccessAt: number | null = null;
+  private lastErrorAt: number | null = null;
+  private lastErrorInfo: { message: string; ledger: number } | null = null;
+  private consecutiveFailures = 0;
+
   /**
    * Structured logger used for skipped/aborted action diagnostics.
    *
@@ -506,7 +758,12 @@ export class ContractEventListener {
    *     -> A typed event was recognised but no handler was registered for
    *        it. Register `listener.on('deposit', ...)` to consume it.
    */
-  private logSkipped(reason: string, raw: RawContractEvent, eventName: KnownEventName | null): void {
+  private logSkipped(
+    reason: string,
+    raw: RawContractEvent,
+    eventName: KnownEventName | null,
+    detail?: Record<string, unknown>,
+  ): void {
     // eslint-disable-next-line no-console
     console.debug(JSON.stringify({
       component: 'ContractEventListener',
@@ -516,6 +773,7 @@ export class ContractEventListener {
       ledger: raw.ledger,
       cursor: this.cursor,
       eventName,
+      ...detail,
     }));
   }
 
@@ -525,6 +783,12 @@ export class ContractEventListener {
     this.cursor = config.startLedger;
     this.store = config.store;
     this.now = config.now ?? Date.now;
+
+    const maxPayloadBytes = config.maxEventPayloadBytes ?? DEFAULT_MAX_EVENT_PAYLOAD_BYTES;
+    if (!Number.isInteger(maxPayloadBytes) || maxPayloadBytes < 0) {
+      throw new Error('maxEventPayloadBytes must be a non-negative integer');
+    }
+    this.maxEventPayloadBytes = maxPayloadBytes;
 
     // Normalise addresses once for O(1) look-ups at event time.
     this.allowedAddresses = new Set(
@@ -707,6 +971,231 @@ export class ContractEventListener {
     return this.store !== undefined;
   }
 
+  // ---------------------------------------------------------------------------
+  // Health
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Snapshot of the subscription's health for operators and dashboards.
+   *
+   * Returns a plain, JSON-serializable object — safe to log, expose from a
+   * `/health` endpoint, or feed into a metrics exporter. Calling it does not
+   * touch the RPC.
+   */
+  getHealth(): EventSubscriptionHealth {
+    const status: SubscriptionHealthStatus =
+      this.stats.pollsAttempted === 0
+        ? 'idle'
+        : !this.isRunning
+          ? 'stopped'
+          : this.consecutiveFailures > 0
+            ? 'degraded'
+            : 'healthy';
+
+    return {
+      status,
+      running: this.isRunning,
+      persistent: this.isPersistent,
+      cursor: this.cursor,
+      lastProcessedLedger: this.lastProcessedLedger,
+      pagingCursor: this.pagingCursor,
+      lastPollAt: this.lastPollAt,
+      lastSuccessAt: this.lastSuccessAt,
+      lastErrorAt: this.lastErrorAt,
+      lastError: this.lastErrorInfo ? { ...this.lastErrorInfo } : null,
+      consecutiveFailures: this.consecutiveFailures,
+      polls: {
+        attempted: this.stats.pollsAttempted,
+        succeeded: this.stats.pollsSucceeded,
+        failed: this.stats.pollsFailed,
+      },
+      events: {
+        processed: this.stats.eventsProcessed,
+        dispatched: this.stats.eventsDispatched,
+        skipped: this.stats.eventsSkipped,
+        oversized: this.stats.eventsOversized,
+      },
+      maxEventPayloadBytes: this.maxEventPayloadBytes,
+      restoredFromLedger: this.resumedFromLedger,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bounded replay
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Replay a bounded ledger range through the registered handlers.
+   *
+   * Replay is for backfilling and verification — recovering a window after a
+   * keeper outage, re-running handlers against a known range, or checking that
+   * a deployment produces the events a consumer expects. It is deliberately
+   * separate from the live cursor: the listener's checkpoint and `poll()`
+   * position are **not** modified, so a replay can run beside a running keeper
+   * without dragging it backwards or forwards.
+   *
+   * Both `fromLedger` and `toLedger` are inclusive. Replay is serialized with
+   * polling — a replay waits for an in-flight poll, and a poll waits for the
+   * replay — so handlers never observe the two streams interleaved out of
+   * order and never run concurrently for the same listener.
+   *
+   * Boundary behaviour:
+   * - A ledger range of a single ledger (`fromLedger === toLedger`) is valid.
+   * - A reverse or non-integer range is rejected with `invalid_range`.
+   * - A span wider than {@link MAX_REPLAY_LEDGERS} is rejected with
+   *   `range_too_large` rather than silently truncated.
+   * - An aborted `signal` rejects with `aborted` between pages; events already
+   *   dispatched have been delivered.
+   *
+   * Oversized and unknown events inside the range follow the same rules as a
+   * live poll: they are skipped and counted, never handed to a decoder.
+   *
+   * @throws {ReplayRangeError} when the requested range is not replayable.
+   */
+  async replay(options: ReplayOptions): Promise<ReplayResult> {
+    const range = this.normalizeReplayOptions(options);
+
+    // Reuse the poll chain so replay and polling never overlap.
+    const run = this.pollChain.then(
+      () => this.runReplay(range),
+      () => this.runReplay(range),
+    );
+    this.pollChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** Validate replay options once, before entering the polling chain. */
+  private normalizeReplayOptions(options: ReplayOptions): NormalizedReplayOptions {
+    const { fromLedger, toLedger } = options;
+    if (!Number.isInteger(fromLedger) || !Number.isInteger(toLedger)) {
+      throw new ReplayRangeError('invalid_range', 'replay ledgers must be integers');
+    }
+    if (fromLedger < 0) {
+      throw new ReplayRangeError('invalid_range', 'fromLedger must be non-negative');
+    }
+    if (toLedger < fromLedger) {
+      throw new ReplayRangeError(
+        'invalid_range',
+        `toLedger (${toLedger}) must be at or after fromLedger (${fromLedger})`,
+      );
+    }
+    if (toLedger - fromLedger + 1 > MAX_REPLAY_LEDGERS) {
+      throw new ReplayRangeError(
+        'range_too_large',
+        `replay range spans ${toLedger - fromLedger + 1} ledgers; the maximum is ${MAX_REPLAY_LEDGERS}`,
+      );
+    }
+
+    const pageSize = options.pageSize ?? this.config.pageSize ?? DEFAULT_PAGE_SIZE;
+    if (!Number.isInteger(pageSize) || pageSize <= 0) {
+      throw new ReplayRangeError('invalid_range', 'pageSize must be a positive integer');
+    }
+
+    if (
+      options.maxEvents !== undefined &&
+      (!Number.isInteger(options.maxEvents) || options.maxEvents <= 0)
+    ) {
+      throw new ReplayRangeError('invalid_range', 'maxEvents must be a positive integer');
+    }
+
+    return {
+      fromLedger,
+      toLedger,
+      pageSize,
+      contractAddresses: options.contractAddresses,
+      maxEvents: options.maxEvents,
+      signal: options.signal,
+    };
+  }
+
+  /** Fetch and dispatch a bounded range without touching live cursor state. */
+  private async runReplay(range: NormalizedReplayOptions): Promise<ReplayResult> {
+    const addresses = range.contractAddresses ?? this.config.contractAddresses;
+    const allowed = new Set((addresses ?? []).map((address) => address.toLowerCase()));
+
+    let pagingCursor: string | null = null;
+    let startLedger = range.fromLedger;
+    let pages = 0;
+    let eventsProcessed = 0;
+    let eventsDispatched = 0;
+    let eventsSkipped = 0;
+    let eventsOversized = 0;
+    let lastLedger = range.fromLedger - 1;
+    let completed = false;
+    let previousLastId: string | undefined;
+    let previousLastLedger = -1;
+
+    while (true) {
+      if (range.signal?.aborted) {
+        throw new ReplayRangeError('aborted', 'replay aborted by signal');
+      }
+
+      const request: GetEventsRequest = {
+        ...(pagingCursor !== null ? { cursor: pagingCursor } : { startLedger }),
+        endLedger: range.toLedger,
+        filters: [this.buildFilter(allowed)],
+        limit: range.pageSize,
+      };
+
+      const response = await this.source.getEvents(request);
+      pages += 1;
+
+      const summary = this.dispatchEvents(response.events, allowed);
+      eventsProcessed += summary.processed;
+      eventsDispatched += summary.dispatched;
+      eventsSkipped += summary.skipped;
+      eventsOversized += summary.oversized;
+      lastLedger = Math.max(lastLedger, summary.highestLedger);
+
+      if (response.events.length < range.pageSize) {
+        completed = true;
+        break;
+      }
+
+      if (range.maxEvents !== undefined && eventsProcessed >= range.maxEvents) {
+        break;
+      }
+
+      const last = response.events[response.events.length - 1];
+
+      // A full page with no forward movement would repeat forever. This is an
+      // RPC anomaly, so fail loudly instead of spinning.
+      if (last?.id === previousLastId && last?.ledger === previousLastLedger) {
+        throw new Error('replay made no progress: RPC returned the same page twice');
+      }
+      previousLastId = last?.id;
+      previousLastLedger = last?.ledger ?? previousLastLedger;
+
+      if (last?.id) {
+        pagingCursor = last.id;
+      } else {
+        // No paging token: resume at the next ledger after the last one seen.
+        const nextStart = Math.max(last?.ledger ?? startLedger, startLedger) + 1;
+        if (nextStart > range.toLedger) {
+          completed = true;
+          break;
+        }
+        startLedger = nextStart;
+        pagingCursor = null;
+      }
+    }
+
+    return {
+      fromLedger: range.fromLedger,
+      toLedger: range.toLedger,
+      pages,
+      eventsProcessed,
+      eventsDispatched,
+      eventsSkipped,
+      eventsOversized,
+      lastLedger,
+      completed,
+    };
+  }
+
   // -------------------------------------------------------------------------
   // Core polling logic
   // -------------------------------------------------------------------------
@@ -756,6 +1245,9 @@ export class ContractEventListener {
    * fetch, dispatch and persist.
    */
   private async runPoll(): Promise<PollResult> {
+    this.stats.pollsAttempted += 1;
+    this.lastPollAt = this.now();
+
     try {
       await this.restoreIfNeeded();
       const request = this.buildRequest();
@@ -763,9 +1255,16 @@ export class ContractEventListener {
       const eventsProcessed = response.events.length;
       this.processResponse(response);
       await this.persistIfEnabled();
+
+      this.stats.pollsSucceeded += 1;
+      this.consecutiveFailures = 0;
+      this.lastSuccessAt = this.now();
+      this.lastErrorInfo = null;
+
       return { status: 'ok', eventsProcessed, nextLedger: this.cursor };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      this.recordFailure(error);
 
       if (isCursorExpiredError(error)) {
         const cursor = this.pagingCursor ?? this.cursor;
@@ -780,6 +1279,7 @@ export class ContractEventListener {
         // the ledger position, which may replay part of the last ledger but
         // never skips an event.
         this.pagingCursor = null;
+        this.lastErrorInfo = { message: expired.message, ledger: this.cursor };
         this.emitError(expired);
         return { status: 'cursor_expired', cursor, resumeFromLedger, error: expired };
       }
@@ -787,6 +1287,14 @@ export class ContractEventListener {
       this.emitError(error);
       return { status: 'error', ledger: this.cursor, error };
     }
+  }
+
+  /** Record a failed poll for {@link getHealth}. */
+  private recordFailure(error: Error): void {
+    this.stats.pollsFailed += 1;
+    this.consecutiveFailures += 1;
+    this.lastErrorAt = this.now();
+    this.lastErrorInfo = { message: error.message, ledger: this.cursor };
   }
 
   /**
@@ -837,38 +1345,88 @@ export class ContractEventListener {
     }
   }
 
-  private buildRequest(): GetEventsRequest {
+  /** Build the RPC filter shared by polling and replay. */
+  private buildFilter(allowed: Set<string> = this.allowedAddresses): GetEventsFilter {
     const filter: GetEventsFilter = {
       ...(this.config.rpcFilter ?? {}),
       type: (this.config.rpcFilter as GetEventsFilter | undefined)?.type ?? 'contract',
     };
 
     // Push address filtering down to the RPC layer when we have an allow-list.
-    if (this.allowedAddresses.size > 0) {
-      filter.contractIds = [...this.allowedAddresses];
+    if (allowed.size > 0) {
+      filter.contractIds = [...allowed];
     }
 
+    return filter;
+  }
+
+  private buildRequest(): GetEventsRequest {
     const position = this.pagingCursor !== null
       ? { cursor: this.pagingCursor }
       : { startLedger: this.cursor };
 
     return {
       ...position,
-      filters: [filter],
+      filters: [this.buildFilter()],
       limit: this.config.pageSize ?? DEFAULT_PAGE_SIZE,
     };
   }
 
   private processResponse(response: GetEventsResponse): void {
     const { events, latestLedger } = response;
+    const summary = this.dispatchEvents(events);
 
-    // Highest ledger covered by an event we actually consumed.
-    let highestEventLedger = -1;
+    this.stats.eventsProcessed += summary.processed;
+    this.stats.eventsDispatched += summary.dispatched;
+    this.stats.eventsSkipped += summary.skipped;
+    this.stats.eventsOversized += summary.oversized;
+
+    this.advanceCursor(events, summary.highestLedger, latestLedger);
+  }
+
+  /**
+   * Filter, size-check and dispatch a batch of raw events.
+   *
+   * The payload size check deliberately runs **before** `extractEventName` and
+   * before any handler sees the event: an oversized payload is dropped while
+   * it is still opaque bytes, so neither this listener nor an ABI decoder
+   * downstream ever has to trust it.
+   *
+   * The ledger position still advances past skipped events (their ledgers are
+   * folded into `highestLedger`) — otherwise a single oversized event would be
+   * re-fetched on every poll and stall the subscription forever.
+   */
+  private dispatchEvents(
+    events: RawContractEvent[],
+    allowed: Set<string> = this.allowedAddresses,
+  ): DispatchSummary {
+    let highestLedger = -1;
+    let processed = 0;
+    let dispatched = 0;
+    let skipped = 0;
+    let oversized = 0;
 
     for (const raw of events) {
+      if (raw.ledger > highestLedger) highestLedger = raw.ledger;
+
       // SDK-level guard: drop events not in the allow-list.
-      if (!this.isAllowed(raw.contractId)) {
+      if (!this.isAllowed(raw.contractId, allowed)) {
         this.logSkipped('address_filtered', raw, null);
+        skipped += 1;
+        continue;
+      }
+
+      processed += 1;
+
+      // Size guard: reject an oversized payload before decoding it.
+      const payloadBytes = eventPayloadSizeBytes(raw);
+      if (payloadBytes > this.maxEventPayloadBytes) {
+        oversized += 1;
+        skipped += 1;
+        this.logSkipped('payload_too_large', raw, this.extractEventName(raw), {
+          payloadBytes,
+          maxPayloadBytes: this.maxEventPayloadBytes,
+        });
         continue;
       }
 
@@ -887,18 +1445,20 @@ export class ContractEventListener {
       // Attempt typed dispatch.
       const name = this.extractEventName(raw);
       if (name !== null) {
-        const dispatched = this.dispatchTyped(name, raw);
-        if (!dispatched) this.logSkipped('no_handler', raw, name);
+        const delivered = this.dispatchTyped(name, raw);
+        if (delivered) {
+          dispatched += 1;
+        } else {
+          skipped += 1;
+          this.logSkipped('no_handler', raw, name);
+        }
       } else {
+        skipped += 1;
         this.logSkipped('unknown_topic', raw, null);
-      }
-
-      if (raw.ledger > highestEventLedger) {
-        highestEventLedger = raw.ledger;
       }
     }
 
-    this.advanceCursor(events, highestEventLedger, latestLedger);
+    return { highestLedger, processed, dispatched, skipped, oversized };
   }
 
   /**
@@ -951,9 +1511,12 @@ export class ContractEventListener {
    * - no allow-list is configured (pass-all mode), or
    * - the event's contract address is in the allow-list.
    */
-  private isAllowed(contractId: string): boolean {
-    if (this.allowedAddresses.size === 0) return true;
-    return this.allowedAddresses.has(contractId.toLowerCase());
+  private isAllowed(
+    contractId: string,
+    allowed: Set<string> = this.allowedAddresses,
+  ): boolean {
+    if (allowed.size === 0) return true;
+    return allowed.has(contractId.toLowerCase());
   }
 
   /**

@@ -1,3 +1,6 @@
+'use client';
+
+import { useRef, useState, type KeyboardEvent } from 'react';
 import {
   Activity,
   ArrowDownToLine,
@@ -57,6 +60,52 @@ const riskMetrics = [
 ];
 
 export function Dashboard() {
+  const [selectedVault, setSelectedVault] = useState(positions[0].pool);
+  const vaultRows = useRef<Array<HTMLTableRowElement | null>>([]);
+
+  /** Move keyboard focus to a vault row and select it. */
+  const selectVaultAt = (index: number) => {
+    const bounded = Math.max(0, Math.min(positions.length - 1, index));
+    vaultRows.current[bounded]?.focus();
+    setSelectedVault(positions[bounded].pool);
+  };
+
+  /**
+   * Vault rows behave like a single-select list: arrow keys move between
+   * vaults (selection follows focus), Home/End jump to the ends, and
+   * Enter/Space selects the focused vault. Tab still leaves the list entirely.
+   */
+  const handleVaultKeyDown = (
+    event: KeyboardEvent<HTMLTableRowElement>,
+    index: number,
+  ) => {
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        selectVaultAt(index + 1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        selectVaultAt(index - 1);
+        break;
+      case 'Home':
+        event.preventDefault();
+        selectVaultAt(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        selectVaultAt(positions.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        setSelectedVault(positions[index].pool);
+        break;
+      default:
+        break;
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       <header className="border-b border-slate-200 bg-white" role="banner">
@@ -173,9 +222,15 @@ export function Dashboard() {
             <h2 id="positions-heading" className="text-xl font-semibold text-slate-900">
               Positions
             </h2>
+            <p id="vault-keyboard-hint" className="mt-1 text-sm text-slate-600">
+              Use the arrow keys to move between vaults and Enter to select one.
+            </p>
             <Card className="mt-3">
               <CardContent className="p-0">
-                <table className="w-full text-left text-sm">
+                <table
+                  className="w-full text-left text-sm"
+                  aria-describedby="vault-keyboard-hint"
+                >
                   <caption className="sr-only">
                     Active liquidity positions with allocation, APY, status, and value.
                   </caption>
@@ -199,25 +254,46 @@ export function Dashboard() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {positions.map((position) => (
-                      <tr key={position.pool}>
-                        <th scope="row" className="px-4 py-3 font-medium text-slate-900">
-                          {position.pool}
-                        </th>
-                        <td className="px-4 py-3 text-slate-600">{position.allocation}%</td>
-                        <td className="px-4 py-3 text-slate-600">{position.apy.toFixed(1)}%</td>
-                        <td className="px-4 py-3">
-                          <Badge variant={statusVariant[position.status]}>
-                            {position.status === 'healthy' ? 'Healthy' : 'Watch'}
-                          </Badge>
-                        </td>
-                        <td className="px-4 py-3 text-right text-slate-900">{position.value}</td>
-                      </tr>
-                    ))}
+                    {positions.map((position, index) => {
+                      const isSelected = selectedVault === position.pool;
+                      return (
+                        <tr
+                          key={position.pool}
+                          ref={(element) => {
+                            vaultRows.current[index] = element;
+                          }}
+                          tabIndex={isSelected ? 0 : -1}
+                          aria-current={isSelected ? 'true' : undefined}
+                          onClick={() => setSelectedVault(position.pool)}
+                          onKeyDown={(event) => handleVaultKeyDown(event, index)}
+                          className={[
+                            'cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-900',
+                            isSelected
+                              ? 'bg-slate-100'
+                              : 'hover:bg-slate-50 focus-visible:bg-slate-50',
+                          ].join(' ')}
+                        >
+                          <th scope="row" className="px-4 py-3 font-medium text-slate-900">
+                            {position.pool}
+                          </th>
+                          <td className="px-4 py-3 text-slate-600">{position.allocation}%</td>
+                          <td className="px-4 py-3 text-slate-600">{position.apy.toFixed(1)}%</td>
+                          <td className="px-4 py-3">
+                            <Badge variant={statusVariant[position.status]}>
+                              {position.status === 'healthy' ? 'Healthy' : 'Watch'}
+                            </Badge>
+                          </td>
+                          <td className="px-4 py-3 text-right text-slate-900">{position.value}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </CardContent>
             </Card>
+            <p className="sr-only" role="status" aria-live="polite">
+              Selected vault: {selectedVault}
+            </p>
           </section>
 
           <section id="risk" aria-labelledby="risk-heading">
