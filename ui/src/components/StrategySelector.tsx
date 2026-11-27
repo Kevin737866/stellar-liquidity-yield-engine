@@ -187,7 +187,7 @@ export const StrategySelector: React.FC<StrategySelectorProps> = ({
                     />
                     <Label
                       htmlFor={`strategy-${strategy.strategyId}`}
-                      className={`cursor-pointer block p-4 border-2 rounded-lg transition-all ${
+                      className={`cursor-pointer block p-4 border-2 rounded-lg transition-all focus-within:outline-none focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2 ${
                         isSelected 
                           ? 'border-blue-500 bg-blue-50' 
                           : 'border-gray-200 hover:border-gray-300'

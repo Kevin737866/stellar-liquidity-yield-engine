@@ -324,7 +324,32 @@ npx ts-node examples/restart-during-outage.ts
 For on-call recovery steps, checkpoint inspection, and failure handling, see
 the [indexer checkpoint recovery runbook](docs/INDEXER_CHECKPOINT_RECOVERY.md).
 
+### Event Listener Operations
+
+The event listener also exposes operational APIs for running a keeper:
+
+- **Payload validation** — `maxEventPayloadBytes` (default 64 KiB) drops
+  oversized events before they are decoded or dispatched.
+- **Bounded replay** — `listener.replay({ fromLedger, toLedger })` re-delivers
+  a closed ledger range without moving the live cursor or checkpoint.
+- **Health status** — `listener.getHealth()` returns the subscription status,
+  cursor, recent errors, and poll/event counters for `/health` endpoints and
+  dashboards.
+
+```typescript
+const health = listener.getHealth();
+console.log(health.status, health.events.processed, health.lastError);
+```
+
+See [docs/EVENT_LISTENER_OPERATIONS.md](docs/EVENT_LISTENER_OPERATIONS.md) for
+the full behaviour and boundary rules.
+
 ## 🎛️ React Components
+
+Selection controls are keyboard operable: `Tab` enters a selection group,
+arrow keys move between options (selection follows focus), `Home`/`End` jump
+to the first/last option, and `Enter`/`Space` selects. This applies to the
+dashboard's vault rows, the strategy selector, and shared radio groups.
 
 ### YieldVaultCard
 Complete vault interface with deposit/withdraw functionality:

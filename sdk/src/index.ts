@@ -102,13 +102,22 @@ export type {
 export {
   ContractEventListener,
   DEFAULT_PAGE_SIZE,
+  DEFAULT_MAX_EVENT_PAYLOAD_BYTES,
+  MAX_REPLAY_LEDGERS,
   CursorExpiredError,
+  ReplayRangeError,
+  eventPayloadSizeBytes,
   isCursorExpiredError,
   classifyCursorExpiration,
 } from './eventListener';
 export type {
   PollResult,
   CursorExpirationReason,
+  ReplayErrorCode,
+  ReplayOptions,
+  ReplayResult,
+  EventSubscriptionHealth,
+  SubscriptionHealthStatus,
   ListenerConfig,
   EventSource,
   GetEventsFilter,
