@@ -208,7 +208,7 @@ const FeeShareClaim: React.FC<FeeShareClaimProps> = ({
             </p>
           </div>
         ) : (
-          <div className="border border-gray-200 rounded-lg overflow-hidden">
+          <div className="border border-gray-200 rounded-lg overflow-x-auto">
             <table className="w-full">
               <thead className="bg-gray-50">
                 <tr>
