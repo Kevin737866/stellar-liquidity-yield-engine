@@ -9,6 +9,11 @@
  * window that is still active. Callers rotating a keeper role should check `remainingMs()`
  * (or `canRunNow()`) first, and a rotation that completes while a backoff is pending should
  * call `reset()` only after the new credential has succeeded at least once via `recordSuccess()`.
+ *
+ * Key rotation note: backoff state is independent of signing keys. Rotating a keeper signing
+ * key does not require clearing backoff state; a keeper that is mid-backoff should simply
+ * continue to honor `nextAttemptAt` after the new key is loaded, and the first successful
+ * tick with the new key resets the counters via `recordSuccess()`.
  */
 
 export interface BackoffPolicy {

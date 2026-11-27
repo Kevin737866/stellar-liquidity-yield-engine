@@ -3,6 +3,7 @@ import { RebalancerClient } from "./rebalancer";
 
 describe("RebalancerClient APY keeper permissions", () => {
   const contractId = StrKey.encodeContract(Buffer.alloc(32, 1));
+
   const buildClient = () =>
     new RebalancerClient({
       network: "testnet",
@@ -39,11 +40,20 @@ describe("RebalancerClient APY keeper permissions", () => {
     expect(client.getApyKeepers).not.toBe(client.setApyKeepers);
   });
 
-  it("rejects invalid keeper rotation inputs before submitting a transaction", () => {
+  it("keeps signing keys distinct when rotating a keeper key", () => {
+    const oldKeeper = Keypair.random();
+    const newKeeper = Keypair.random();
+
+    expect(newKeeper.publicKey()).not.toBe(oldKeeper.publicKey());
+    expect(StrKey.isValidEd25519PublicKey(newKeeper.publicKey())).toBe(true);
+  });
+
+  it("rejects malformed keeper public keys during rotation", () => {
     const client = buildClient();
     const invalidKeeper = "not-a-valid-public-key";
 
     expect(StrKey.isValidEd25519PublicKey(invalidKeeper)).toBe(false);
+    expect(StrKey.isValidEd25519PublicKey("")).toBe(false);
     expect(typeof client.setApyKeepers).toBe("function");
   });
 });

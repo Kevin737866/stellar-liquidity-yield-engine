@@ -3,9 +3,11 @@
 ## Overview
 
 An off-chain keeper is only useful if it is *continuous*. It polls the RPC,
-decides what to do, and acts — and it must do so exactly once per on-chain
-event. A process restart, a deploy, or an extended network outage breaks that
-continuity unless the keeper's position survives the restart.
+decides what to do, and acts — and it must not miss on-chain events. A process
+restart, a deploy, or an extended network outage breaks that continuity unless
+the keeper's position survives the restart. Checkpoint recovery can replay an
+event if its handler's external side effect completed but its checkpoint was
+not saved, so handlers that cause side effects should be idempotent.
 
 This document describes the durable-state support added to the SDK: how a
 keeper checkpoints its position, how it restores it on start-up, and how the
@@ -20,6 +22,7 @@ The implementation lives in:
 | `sdk/src/rpcSync.ts` | Restores and persists the RPC lag monitor's processed-ledger marker. |
 | `sdk/src/bots/autoRebalancer.ts` | Persists the keeper's cooldown so a restart cannot repeat a rebalance. |
 | `sdk/src/recovery.test.ts` | Restart-during-outage scenarios. |
+| `sdk/src/cursorExpiration.test.ts` | Typed cursor-expiration results and resume behaviour. |
 | `examples/restart-during-outage.ts` | Runnable end-to-end demonstration. |
 
 ## The checkpoint
@@ -37,9 +40,9 @@ interface KeeperCheckpoint {
 }
 ```
 
-`nextLedger` is the *first ledger that has not been processed yet*. Resuming is
-therefore one rule — start at `nextLedger` — and it can neither skip an event
-nor replay one.
+`nextLedger` is the *first ledger that has not been processed yet*. Resuming
+from it avoids gaps or replay of previously checkpointed ledger ranges, as long
+as the RPC still serves the events and the checkpoint save succeeded.
 
 Checkpoints are written by `FileCheckpointStore` with a **write-then-rename**:
 the payload goes to `keeper.json.tmp` and is then renamed over `keeper.json`.
@@ -110,8 +113,50 @@ did not fit on the page. The listener now distinguishes:
   cursor only advances to the ledger after the highest event actually
   consumed.
 
-A keeper catching up after an outage therefore drains the backlog page by page
-without losing anything.
+A keeper catching up after an outage therefore drains the available backlog
+page by page without losing events to page truncation. This does not restore
+history pruned by the RPC provider.
+
+## Typed cursor expiration
+
+An RPC node keeps only a bounded window of event history. A paging cursor that
+points before that window is rejected, and retrying it will keep failing. That
+is a different failure from a network outage, so the listener exposes it as a
+typed result:
+
+```ts
+const result = await listener.pollWithResult();
+
+switch (result.status) {
+  case 'ok':
+    console.log(`processed ${result.eventsProcessed} events, next ledger ${result.nextLedger}`);
+    break;
+  case 'cursor_expired':
+    console.warn(
+      `cursor ${result.cursor} is ${result.error.reason}; resuming from ledger ${result.resumeFromLedger}`,
+    );
+    break;
+  case 'error':
+    console.error(`poll failed at ledger ${result.ledger}:`, result.error.message);
+    break;
+}
+```
+
+- `cursor_expired` carries a `CursorExpiredError` with the rejected `cursor`, a
+  `reason` (`expired`, `pruned`, or `invalid`), and the ledger the next poll
+  resumes from. The unusable paging token is dropped, so the following poll
+  falls back to the ledger position.
+- `error` covers every other failure, including network and checkpoint errors.
+- `poll()` keeps its original `Promise<void>` contract. Use
+  `pollWithResult()` when the caller must distinguish cursor expiration from a
+  retryable failure.
+- `isCursorExpiredError(error)` and `classifyCursorExpiration(error)` are
+  exported for callers that inspect an RPC error directly.
+
+Recovery may replay part of the last ledger, but it never skips an event.
+Because the RPC cannot expose a stable machine-readable code for this
+condition, detection is message-based and requires both a cursor mention and
+an expiration-like word.
 
 ## The RPC lag monitor
 
@@ -163,14 +208,17 @@ The scenario is covered end-to-end in `sdk/src/recovery.test.ts`:
 2. The process dies; the chain advances by dozens of ledgers.
 3. A **new** listener instance with a **new** store instance reads the same
    checkpoint file.
-4. It resumes at exactly the ledger after the last consumed one, catches up on
-   everything that happened during the outage, and delivers every event
-   exactly once.
+4. It resumes at the ledger after the last checkpointed position and catches
+   up on everything the RPC still serves from that point. A crash between an
+   event handler's side effect and checkpoint persistence can cause redelivery;
+   applications should make side effects idempotent.
 5. The lag monitor restores its marker and reports an accurate lag instead of
    a false critical one.
 
-The test asserts both directions: **no gaps** (every missed event is handled)
-and **no duplicates** (no pre-outage event is re-delivered). It also covers
+The successful-persistence test asserts both directions: **no gaps** (every
+missed event is handled) and **no duplicates** (no pre-outage event is
+re-delivered). A failure-boundary test also demonstrates redelivery when event
+handling succeeds but checkpoint persistence fails. The suite covers
 multi-page catch-up, an unreadable checkpoint, and a `startLedger` that is
 ahead of the checkpoint.
 
@@ -207,6 +255,8 @@ Full backlog drained         : true
   the last position with `cat state/keeper.json`.
 - **Ephemeral deployments.** Use `MemoryCheckpointStore` in tests and anywhere
   a restart is expected to start from scratch.
+- **Recovery procedure.** See [INDEXER_CHECKPOINT_RECOVERY.md](./INDEXER_CHECKPOINT_RECOVERY.md)
+  for the on-call runbook and failure decision table.
 
 
 ## Durable backoff after consecutive failures
