@@ -55,6 +55,8 @@ pub enum OracleError {
     FeederAlreadyAuthorised = 6,
     /// The feeder address is not in the authorised set.
     FeederNotFound = 7,
+    /// An oracle price must be greater than zero.
+    InvalidPrice = 8,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +323,8 @@ impl OracleRegistry {
     /// Publish a new price observation for a feed.
     ///
     /// The caller must be in the feed's `authorised_feeders` list (Issue #292).
+    /// `price` must be greater than zero; non-positive values are rejected as
+    /// malformed oracle observations.
     /// Observations are appended to the rolling window; when it reaches
     /// `MAX_OBSERVATIONS` the oldest entry is dropped (Issue #288).
     pub fn publish_price(env: Env, feeder: Address, pool_address: Address, price: i128) {
@@ -340,6 +344,9 @@ impl OracleRegistry {
         }
         if !authorised {
             panic_with_error!(&env, OracleError::NotAuthorisedFeeder);
+        }
+        if price <= 0 {
+            panic_with_error!(&env, OracleError::InvalidPrice);
         }
 
         let obs = PriceObservation {
@@ -448,6 +455,40 @@ mod tests {
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
     use soroban_sdk::Env;
 
+    struct OraclePriceFixture {
+        name: &'static str,
+        price: i128,
+        expected_error: Option<OracleError>,
+    }
+
+    const ORACLE_PRICE_FIXTURES: [OraclePriceFixture; 5] = [
+        OraclePriceFixture {
+            name: "minimum positive price",
+            price: 1,
+            expected_error: None,
+        },
+        OraclePriceFixture {
+            name: "maximum representable price",
+            price: i128::MAX,
+            expected_error: None,
+        },
+        OraclePriceFixture {
+            name: "zero price",
+            price: 0,
+            expected_error: Some(OracleError::InvalidPrice),
+        },
+        OraclePriceFixture {
+            name: "negative price",
+            price: -1,
+            expected_error: Some(OracleError::InvalidPrice),
+        },
+        OraclePriceFixture {
+            name: "minimum representable price",
+            price: i128::MIN,
+            expected_error: Some(OracleError::InvalidPrice),
+        },
+    ];
+
     fn set_timestamp(env: &Env, ts: u64) {
         env.ledger().set(LedgerInfo {
             timestamp: ts,
@@ -467,6 +508,58 @@ mod tests {
         let client = OracleRegistryClient::new(env, &contract_id);
         client.initialize(&admin);
         (admin, client)
+    }
+
+    #[test]
+    fn test_oracle_price_payload_fixtures() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, client) = deploy(&env);
+        let feeder = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let feeders = soroban_sdk::vec![&env, feeder.clone()];
+        client.register_feed(
+            &admin,
+            &pool,
+            &feeders,
+            &DEFAULT_FRESHNESS_SECS,
+            &pool,
+            &false,
+        );
+        set_timestamp(&env, 1000);
+
+        for fixture in ORACLE_PRICE_FIXTURES {
+            match fixture.expected_error {
+                Some(expected_error) => {
+                    let observations_before = client.get_observations(&pool).len();
+                    let err = client
+                        .try_publish_price(&feeder, &pool, &fixture.price)
+                        .unwrap_err()
+                        .unwrap();
+                    assert_eq!(
+                        err,
+                        soroban_sdk::Error::from_contract_error(expected_error as u32),
+                        "unexpected result for {}",
+                        fixture.name
+                    );
+                    assert_eq!(
+                        client.get_observations(&pool).len(),
+                        observations_before,
+                        "malformed fixture {} must not be stored",
+                        fixture.name
+                    );
+                }
+                None => {
+                    client.publish_price(&feeder, &pool, &fixture.price);
+                    assert_eq!(
+                        client.get_price(&pool),
+                        fixture.price,
+                        "unexpected result for {}",
+                        fixture.name
+                    );
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -645,9 +738,9 @@ mod tests {
         for i in 0..(MAX_OBSERVATIONS + 2) {
             set_timestamp(&env, 1_000 + i as u64 * 5);
             if i % 2 == 0 {
-                client.publish_price(&feeder_a, &pool, &(i as i128 * 10));
+                client.publish_price(&feeder_a, &pool, &((i as i128 + 1) * 10));
             } else {
-                client.publish_price(&feeder_b, &pool, &(i as i128 * 10));
+                client.publish_price(&feeder_b, &pool, &((i as i128 + 1) * 10));
             }
         }
 

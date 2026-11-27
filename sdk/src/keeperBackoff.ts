@@ -4,6 +4,11 @@
  * After repeated consecutive failures a keeper skips its ticks until `nextAttemptAt`, so a
  * flapping keeper stops hammering the RPC during an outage. The state is persisted through a
  * store, so a restart during the outage does not reset the delay.
+ *
+ * Key rotation note: backoff state is independent of signing keys. Rotating a keeper signing
+ * key does not require clearing backoff state; a keeper that is mid-backoff should simply
+ * continue to honor `nextAttemptAt` after the new key is loaded, and the first successful
+ * tick with the new key resets the counters via `recordSuccess()`.
  */
 
 export interface BackoffPolicy {

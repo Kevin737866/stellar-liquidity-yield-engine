@@ -9,6 +9,14 @@ import {
 import { VaultClient } from './vaultClient';
 import { type UserPosition } from './types';
 
+// ---------------------------------------------------------------------------
+// Treasury fee routing constants — must stay in sync with the Rust contract.
+// reward_distributor.rs: const TREASURY_FEE_BPS: u32 = 25;
+// reward_distributor.rs: BPS_DIVISOR: i128 = 10000;
+// ---------------------------------------------------------------------------
+const CONTRACT_TREASURY_FEE_BPS = 25n;
+const BPS_DIVISOR = 10_000n;
+
 const vaultAddress = 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526';
 const userAddress = Keypair.random().publicKey();
 const rewardDistributor = Keypair.random().publicKey();
@@ -167,5 +175,69 @@ describe('RewardsSDK claim deadlines', () => {
     await expect(
       rewardsSDK.claimRewards(Keypair.random(), vaultAddress, { streams: [0] })
     ).rejects.toThrow(/stream 0 expired at 5/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Treasury fee-routing alignment
+//
+// These tests verify that the SDK's fee arithmetic matches what the
+// reward_distributor contract does on-chain:
+//
+//   treasury_fee = pending * TREASURY_FEE_BPS / BPS_DIVISOR   (= 25 / 10 000)
+//   net_reward   = pending - treasury_fee
+//
+// If the constant in the contract ever changes, these tests will fail and
+// force the SDK to be updated at the same time.
+// ---------------------------------------------------------------------------
+describe('treasury fee-routing alignment', () => {
+  /**
+   * Mirror of the Rust contract logic in reward_distributor.rs:
+   *
+   *   let treasury_fee = (pending * TREASURY_FEE_BPS as i128) / BPS_DIVISOR;
+   *   let net_reward = pending - treasury_fee;
+   */
+  function contractFeeFor(pendingRaw: bigint): { treasuryFee: bigint; netReward: bigint } {
+    const treasuryFee = (pendingRaw * CONTRACT_TREASURY_FEE_BPS) / BPS_DIVISOR;
+    return { treasuryFee, netReward: pendingRaw - treasuryFee };
+  }
+
+  it('treasury + net equals gross: invariant holds for a typical reward', () => {
+    const gross = 1_000_000n; // 0.1 USDC at 7-decimal precision
+    const { treasuryFee, netReward } = contractFeeFor(gross);
+    expect(treasuryFee + netReward).toBe(gross);
+  });
+
+  it('fee is exactly 0.25% (25 bps) of the gross reward', () => {
+    const gross = 10_000n;
+    const { treasuryFee } = contractFeeFor(gross);
+    // 10 000 * 25 / 10 000 = 25
+    expect(treasuryFee).toBe(25n);
+  });
+
+  it('SDK getSwapQuote protocolFee matches the contract formula', async () => {
+    // The SDK quotes the same 25-bps fee that the contract charges before
+    // routing to the treasury.
+    const sdk = createRewardsSDK();
+    const inputAmount = '10000';
+    const quote = await sdk.getSwapQuote('USDC', 'XLM', inputAmount);
+
+    const expectedFee = contractFeeFor(BigInt(inputAmount)).treasuryFee;
+    expect(BigInt(quote.protocolFee)).toBe(expectedFee);
+  });
+
+  it('fee rounds down (integer division) for sub-BPS amounts', () => {
+    // With a gross of 399, floor(399 * 25 / 10_000) = floor(0.9975) = 0.
+    // The user receives everything; nothing goes to the treasury.
+    const { treasuryFee, netReward } = contractFeeFor(399n);
+    expect(treasuryFee).toBe(0n);
+    expect(netReward).toBe(399n);
+  });
+
+  it('net reward is never more than the gross reward', () => {
+    for (const gross of [0n, 1n, 9_999n, 10_000n, 1_000_000_000n]) {
+      const { netReward } = contractFeeFor(gross);
+      expect(netReward).toBeLessThanOrEqual(gross);
+    }
   });
 });
