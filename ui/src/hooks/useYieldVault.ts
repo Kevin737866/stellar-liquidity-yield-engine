@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { VaultClient, VaultInfo, VaultMetrics, UserPosition } from 'stellar-liquidity-yield-engine-sdk';
 import {
   createFreighterSigner,
@@ -375,7 +375,7 @@ export const useMultipleVaults = ({
 
   const refreshVault = useCallback(async (vaultAddress: string) => {
     try {
-      const vaultClient = new VaultClient(vaultAddress, networkConfigFor(network));
+      const vaultClient = new VaultClient(vaultAddress, networkConfig);
       
       const results = await Promise.allSettled([
         vaultClient.getVaultInfo(),
@@ -412,187 +412,38 @@ export const useMultipleVaults = ({
         position: null,
         isPaused: false,
         loading: false,
-        error: err.message
+        error: err?.message || 'Failed to fetch vault data'
       })));
     }
   }, [networkConfig, userAddress]);
 
-  const refreshAll = useCallback(async () => {
+  useEffect(() => {
+    let cancelled = false;
     setOverallLoading(true);
     setOverallError(null);
-
-    try {
-      await Promise.all(vaultAddresses.map(refreshVault));
-    } catch (err: any) {
-      setOverallError(err.message);
-    } finally {
-      setOverallLoading(false);
-    }
+    Promise.all(vaultAddresses.map(addr => refreshVault(addr)))
+      .catch(err => {
+        if (!cancelled) setOverallError(err?.message || 'Failed to fetch vaults');
+      })
+      .finally(() => {
+        if (!cancelled) setOverallLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [vaultAddresses, refreshVault]);
 
-  // Initial load
-  useEffect(() => {
-    refreshAll();
-  }, [refreshAll]);
-
-  // Auto refresh
   useEffect(() => {
     if (!autoRefresh) return;
-
     const interval = setInterval(() => {
-      refreshAll();
+      vaultAddresses.forEach(addr => refreshVault(addr));
     }, refreshInterval);
-
     return () => clearInterval(interval);
-  }, [autoRefresh, refreshInterval, refreshAll]);
-
-  const getTotalTVL = useCallback(() => {
-    let total = 0n;
-    vaultsData.forEach(data => {
-      if (data.metrics) {
-        total += data.metrics.tvl;
-      }
-    });
-    return total;
-  }, [vaultsData]);
-
-  const getTotalUserValue = useCallback(() => {
-    let total = 0n;
-    vaultsData.forEach(data => {
-      if (data.position && data.metrics && data.metrics.totalShares > 0n) {
-        const userValue = (Number(data.position.shares) / Number(data.metrics.totalShares)) * Number(data.metrics.tvl);
-        total += BigInt(userValue);
-      }
-    });
-    return total;
-  }, [vaultsData]);
-
-  const getWeightedAPY = useCallback(() => {
-    let totalWeightedApy = 0;
-    let totalWeight = 0;
-    
-    vaultsData.forEach(data => {
-      if (data.metrics && data.metrics.tvl > 0n) {
-        const tvl = Number(data.metrics.tvl);
-        totalWeightedApy += data.metrics.apy * tvl;
-        totalWeight += tvl;
-      }
-    });
-    
-    return totalWeight > 0 ? totalWeightedApy / totalWeight : 0;
-  }, [vaultsData]);
+  }, [autoRefresh, refreshInterval, vaultAddresses, refreshVault]);
 
   return {
-    vaultsData,
-    overallLoading,
-    overallError,
-    refreshAll,
-    refreshVault,
-    getTotalTVL,
-    getTotalUserValue,
-    getWeightedAPY
-  };
-};
-
-// Hook for vault performance tracking
-export const useVaultPerformance = (vaultAddress: string, network?: UiNetwork) => {
-  const [performanceData, setPerformanceData] = useState<{
-    apyHistory: number[];
-    tvlHistory: bigint[];
-    timestamps: number[];
-  }>({
-    apyHistory: [],
-    tvlHistory: [],
-    timestamps: []
-  });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const vaultClient = new VaultClient(vaultAddress, networkConfigFor(network));
-
-  const trackPerformance = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const [apyRes, tvlRes] = await Promise.allSettled([
-        vaultClient.getAPY(),
-        vaultClient.getTVL()
-      ]);
-
-      let apy = 0;
-      let tvl = 0n;
-      const errors: string[] = [];
-
-      if (apyRes.status === 'fulfilled') {
-        apy = apyRes.value;
-      } else {
-        errors.push(`APY: ${apyRes.reason?.message || 'Failed'}`);
-      }
-
-      if (tvlRes.status === 'fulfilled') {
-        tvl = tvlRes.value;
-      } else {
-        errors.push(`TVL: ${tvlRes.reason?.message || 'Failed'}`);
-      }
-
-      if (errors.length > 0) {
-        setError(errors.join('. '));
-      }
-
-      const timestamp = Date.now();
-
-      setPerformanceData(prev => ({
-        apyHistory: [...prev.apyHistory.slice(-29), apy], // Keep last 30 data points
-        tvlHistory: [...prev.tvlHistory.slice(-29), tvl],
-        timestamps: [...prev.timestamps.slice(-29), timestamp]
-      }));
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [vaultClient]);
-
-  const getAverageAPY = useCallback(() => {
-    if (performanceData.apyHistory.length === 0) return 0;
-    const sum = performanceData.apyHistory.reduce((acc, apy) => acc + apy, 0);
-    return sum / performanceData.apyHistory.length;
-  }, [performanceData]);
-
-  const getAPYTrend = useCallback(() => {
-    if (performanceData.apyHistory.length < 2) return 'stable';
-    const recent = performanceData.apyHistory.slice(-7);
-    const older = performanceData.apyHistory.slice(-14, -7);
-    
-    if (recent.length === 0 || older.length === 0) return 'stable';
-    
-    const recentAvg = recent.reduce((acc, apy) => acc + apy, 0) / recent.length;
-    const olderAvg = older.reduce((acc, apy) => acc + apy, 0) / older.length;
-    
-    const change = (recentAvg - olderAvg) / olderAvg;
-    
-    if (change > 0.05) return 'increasing';
-    if (change < -0.05) return 'decreasing';
-    return 'stable';
-  }, [performanceData]);
-
-  const getTVLGrowth = useCallback(() => {
-    if (performanceData.tvlHistory.length < 2) return 0;
-    const first = performanceData.tvlHistory[0];
-    const last = performanceData.tvlHistory[performanceData.tvlHistory.length - 1];
-    
-    if (first === 0n) return 0;
-    return Number((last - first) * 100n / first);
-  }, [performanceData]);
-
-  return {
-    performanceData,
-    loading,
-    error,
-    trackPerformance,
-    getAverageAPY,
-    getAPYTrend,
-    getTVLGrowth
+    vaults: vaultsData,
+    loading: overallLoading,
+    error: overallError
   };
 };

@@ -456,10 +456,18 @@ export interface HarvestEfficiencyMetrics {
   avgGasPerHarvest: number;
 }
 
-/**
- * Pause reason categories for vault and rebalance engine pause events.
- * These help monitors and dashboards understand why a system was paused.
- */
+// Pause reasons emitted with pause/unpause events.
 export type PauseReason =
-  | 'security' // Security concern detected (exploit, suspicious activity)
-  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large
+  | "emergency"
+  | "slippage_protection"
+  | "maintenance"
+  | "governance"
+  | "liquidity_issue"
+  | "security"
+  | "circuit_breaker"
+  | "manual";
+
+// Re-export event types consumed by eventListener and pauseEvents.
+export type VaultEvent = { type: string; [key: string]: any };
+export type RebalanceEvent = { type: string; [key: string]: any };
+export type RewardEvent = { type: string; [key: string]: any };
