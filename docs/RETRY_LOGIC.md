@@ -12,6 +12,8 @@ This implementation adds retry logic for transient RPC errors to reduce spurious
 - **Configurable limits**: Maximum retries, initial delay, backoff multiplier, and max delay are all configurable
 - **Selective retry**: Can enable/disable retry for read vs write operations independently
 - **Comprehensive error detection**: Recognizes transient errors by code, HTTP status, and message patterns
+- **Token transfer error handling**: Token transfer failures returned as RPC/contract errors are classified explicitly. Transient transfer failures (network, timeout, rate limit) are retried; contract-level transfer rejections (insufficient balance, unauthorized, frozen account) fail immediately without retry
+- **Syntax/duplicate-declaration safety**: The SDK rebalancer module (`sdk/src/rebalancer.ts`) must not declare the same function twice. Duplicate function implementations (TypeScript error TS2393) are a build-breaking defect; the duplicate declaration should be removed rather than rewriting the surrounding file
 
 ## Usage
 
@@ -114,6 +116,28 @@ The retry logic automatically detects transient errors using:
 
 Non-transient errors (e.g., "invalid signature", "insufficient funds") are not retried and fail immediately.
 
+### Token Transfer Errors
+
+Token transfers can return errors from the token contract (e.g., `insufficient balance`, `unauthorized`, `account frozen`) or transient infrastructure errors while submitting the transfer. The retry layer handles these as follows:
+
+| Scenario | Behavior |
+|----------|----------|
+| Transfer succeeds on first attempt | Returned immediately, no retry |
+| Transient RPC error during transfer submission | Retried per the configured options |
+| Transfer rejected by token contract (insufficient balance, unauthorized, frozen) | Not retried; error surfaced immediately |
+| Retries exhausted on a transient transfer error | Last error propagated to the caller |
+| `retryWrites: false` and a transfer submission fails transiently | Not retried; error surfaced immediately |
+
+**Boundary cases:**
+- `maxRetries: 0` performs exactly one attempt and surfaces any transfer error unchanged.
+- A transfer that times out after the transaction was possibly applied is retried only when `retryWrites` is enabled. Enable `retryWrites` only for transfers you have verified are safe to resubmit (for example, using unique transaction sequence numbers or idempotent contract logic).
+
+**Failure behavior:** Transient errors that persist past `maxRetries` surface the final error, and the `onRetry` callback is invoked once per retry attempt, never for the final failure.
+
+### Testing Token Transfer Error Behavior
+
+Coverage for transfer error handling lives alongside the general retry tests in `sdk/src/utils/retry.test.ts` and `sdk/src/utils/retryRpc.test.ts`. Cases include: successful transfer on first attempt, transient failure followed by success, contract rejection not retried, retry exhaustion, `maxRetries: 0` boundary, and `retryWrites: false` suppressing retries on transfer submission.
+
 ## Integration with Existing Clients
 
 To integrate retry logic into existing SDK clients:
@@ -164,6 +188,7 @@ The tests cover:
 - Retry callback invocation
 - Custom retry options
 - RPC server method wrapping
+- Token transfer errors: transient transfer failures retried, contract rejections not retried, retry exhaustion, `maxRetries: 0` boundary, and `retryWrites: false` behavior
 
 ## Default Configuration
 

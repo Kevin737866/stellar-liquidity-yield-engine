@@ -3,6 +3,12 @@
  *
  * Transient errors (network timeouts, rate limits, temporary server errors)
  * should be retried with exponential backoff to reduce spurious failures.
+ *
+ * Token transfer errors are generally NOT retried automatically when they are
+ * deterministic contract-level failures (e.g. insufficient balance, reverted
+ * transfer). Only errors classified as transient are retried; contract
+ * reverts and insufficient-funds style errors surface immediately so callers
+ * can handle them explicitly.
  */
 
 export interface RetryOptions {
@@ -85,9 +91,30 @@ const TRANSIENT_ERROR_PATTERNS = [
 ];
 
 /**
+ * Error messages that indicate deterministic token transfer failures.
+ * These are never retried, even if they match a transient pattern,
+ * because retrying cannot change the outcome.
+ */
+const NON_RETRYABLE_TRANSFER_PATTERNS = [
+  /insufficient (balance|funds|allowance)/i,
+  /transfer (amount exceeds|failed permanently)/i,
+  /execution reverted/i,
+  /transfer reverted/i,
+  /invalid (recipient|sender|token)/i,
+  /zero address/i,
+];
+
+/**
  * Determine if an error is transient and should trigger a retry.
  */
-function isTransientError(error: Error): boolean {
+export function isTransientError(error: Error): boolean {
+  const message = (error.message ?? '').toLowerCase();
+
+  // Deterministic transfer failures are never retryable, regardless of other signals
+  if (NON_RETRYABLE_TRANSFER_PATTERNS.some(pattern => pattern.test(message))) {
+    return false;
+  }
+
   // Check error code
   if ('code' in error && TRANSIENT_ERROR_CODES.includes((error as any).code)) {
     return true;
@@ -99,7 +126,6 @@ function isTransientError(error: Error): boolean {
   }
 
   // Check error message
-  const message = error.message.toLowerCase();
   return TRANSIENT_ERROR_PATTERNS.some(pattern => pattern.test(message));
 }
 
@@ -146,10 +172,14 @@ function validateRetryOptions(opts: Required<RetryOptions>): void {
 /**
  * Retry an async operation with exponential backoff for transient errors.
  *
+ * Token transfer errors that are deterministic (insufficient balance, reverts,
+ * invalid addresses) are rethrown immediately without retry. Errors that are
+ * transient (network, timeout, rate limit) are retried up to maxRetries times.
+ *
  * @param fn - The async function to retry
  * @param options - Retry configuration
  * @returns The result of the successful operation
- * @throws The last error if all retries are exhausted
+ * @throws The last error if all retries are exhausted or the error is non-transient
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
