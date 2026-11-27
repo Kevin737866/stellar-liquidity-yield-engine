@@ -450,11 +450,15 @@ mod tests {
             timestamp: env.ledger().timestamp(),
         };
         assert!(
-            f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err(),
+            f.engine
+                .try_execute_rebalance(&f.admin, &bad_proposal)
+                .is_err(),
             "an unfunded rebalance must fail and trip the breaker"
         );
         assert!(
-            f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err(),
+            f.engine
+                .try_execute_rebalance(&f.admin, &bad_proposal)
+                .is_err(),
             "the tripped breaker must refuse further executions"
         );
 
@@ -486,7 +490,10 @@ mod tests {
             estimated_gas_cost: 10,
             timestamp: env.ledger().timestamp(),
         };
-        assert!(f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err());
+        assert!(f
+            .engine
+            .try_execute_rebalance(&f.admin, &bad_proposal)
+            .is_err());
 
         let intruder = Address::generate(&env);
         assert!(
