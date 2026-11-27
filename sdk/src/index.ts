@@ -20,8 +20,8 @@ import {
   type OptionalNetworkConfig,
   type SupportedNetwork,
 } from './networkConfig';
-export * from './keeperBackoff';
 export * from './types';
+export { validatePauseReasonCatalog } from './keeperBackoff';
 export { VaultClient } from './vaultClient';
 export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';

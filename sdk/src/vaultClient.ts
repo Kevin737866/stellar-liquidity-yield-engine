@@ -22,10 +22,11 @@ import {
   VaultError,
   NetworkConfig,
   VaultClientOptions,
-  PauseReason,
   VaultEvent
 } from './types';
 import { waitForTransaction } from './utils/transaction';
+
+export type PauseReason = string;
 
 export class VaultClient extends EventEmitter {
   private contract: Contract;
