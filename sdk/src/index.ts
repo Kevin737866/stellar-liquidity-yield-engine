@@ -102,6 +102,7 @@ export type {
 export {
   ContractEventListener,
   DEFAULT_PAGE_SIZE,
+  EVENT_CURSOR_KEY,
   CursorExpiredError,
   isCursorExpiredError,
   classifyCursorExpiration,
@@ -123,6 +124,7 @@ export type {
   EventHandlerMap,
   EventHandler,
   RawEventHandler,
+  CheckpointHandler,
   ListenerErrorEvent,
 } from './eventListener';
 

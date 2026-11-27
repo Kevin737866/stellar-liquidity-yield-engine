@@ -180,6 +180,9 @@ export type EventHandler<K extends KnownEventName> = (event: EventHandlerMap[K])
 /** Handler called for every raw event that passes the address filter. */
 export type RawEventHandler = (event: UnknownContractEvent) => void;
 
+/** Handler called with the latest ledger checkpoint after each successful poll. */
+export type CheckpointHandler = (checkpoint: KeeperCheckpoint) => void;
+
 // ---------------------------------------------------------------------------
 // Listener configuration
 // ---------------------------------------------------------------------------
@@ -372,6 +375,8 @@ export type PollResult =
       eventsProcessed: number;
       /** Ledger the next poll will start from. */
       nextLedger: number;
+      /** Snapshot of the listener's ledger checkpoint after this poll. */
+      checkpoint: KeeperCheckpoint;
     }
   | {
       /** The saved cursor was rejected; the listener dropped it. */
@@ -461,6 +466,9 @@ export class ContractEventListener {
   /** The checkpoint restored on start, if any. */
   private restoredCheckpoint: KeeperCheckpoint | null = null;
 
+  /** The most recently produced ledger checkpoint, if any. */
+  private latestCheckpoint: KeeperCheckpoint | null = null;
+
   /** Whether the durable position was already restored for this process. */
   private restoreAttempted = false;
 
@@ -472,6 +480,9 @@ export class ContractEventListener {
 
   /** Catch-all handler for events whose name is unknown. */
   private rawHandlers: Set<RawEventHandler> = new Set();
+
+  /** Checkpoint observers notified after each successful poll. */
+  private checkpointHandlers: Set<CheckpointHandler> = new Set();
 
   /** Error handlers. */
   private errorHandlers: Set<(e: ListenerErrorEvent) => void> = new Set();
@@ -575,6 +586,22 @@ export class ContractEventListener {
   }
 
   /**
+   * Register a handler that receives the latest ledger checkpoint after each
+   * successful poll, regardless of whether a {@link CheckpointStore} is
+   * configured.
+   */
+  onCheckpoint(handler: CheckpointHandler): this {
+    this.checkpointHandlers.add(handler);
+    return this;
+  }
+
+  /** Remove a previously registered checkpoint handler. */
+  offCheckpoint(handler: CheckpointHandler): this {
+    this.checkpointHandlers.delete(handler);
+    return this;
+  }
+
+  /**
    * Register an error handler. Multiple handlers are all called.
    * If no handler is registered, errors fall through to `console.error`.
    */
@@ -666,7 +693,24 @@ export class ContractEventListener {
         : null;
     this.restoredCheckpoint = checkpoint;
     this.resumedFromLedger = this.cursor;
+    const restoredMetadata = this.buildCheckpointMetadata(checkpoint.metadata);
+    this.latestCheckpoint = createCheckpoint(
+      this.cursor,
+      checkpoint.updatedAt,
+      restoredMetadata,
+    );
     return true;
+  }
+
+  /**
+   * Build a fresh ledger checkpoint snapshot representing the listener's
+   * current position, whether or not a {@link CheckpointStore} is configured.
+   *
+   * @throws {CheckpointError} when the current cursor or clock value is invalid.
+   */
+  getCheckpoint(): KeeperCheckpoint {
+    const metadata = this.buildCheckpointMetadata();
+    return createCheckpoint(this.cursor, this.now(), metadata);
   }
 
   /**
@@ -678,12 +722,18 @@ export class ContractEventListener {
   async persist(): Promise<KeeperCheckpoint | null> {
     if (!this.store) return null;
 
-    const metadata = this.pagingCursor !== null
-      ? { ...this.config.checkpointMetadata, [EVENT_CURSOR_KEY]: this.pagingCursor }
-      : this.config.checkpointMetadata;
-    const checkpoint = createCheckpoint(this.cursor, this.now(), metadata);
+    const checkpoint = this.getCheckpoint();
     await this.store.save(checkpoint);
-    return checkpoint;
+    this.latestCheckpoint = this.cloneCheckpoint(checkpoint);
+    return this.cloneCheckpoint(checkpoint);
+  }
+
+  /**
+   * The most recently produced ledger checkpoint (from a poll, {@link persist},
+   * or {@link restore}), or `null` before any checkpoint has been recorded.
+   */
+  get lastCheckpoint(): KeeperCheckpoint | null {
+    return this.latestCheckpoint ? this.cloneCheckpoint(this.latestCheckpoint) : null;
   }
 
   /**
@@ -762,8 +812,16 @@ export class ContractEventListener {
       const response = await this.source.getEvents(request);
       const eventsProcessed = response.events.length;
       this.processResponse(response);
-      await this.persistIfEnabled();
-      return { status: 'ok', eventsProcessed, nextLedger: this.cursor };
+      const checkpoint = this.getCheckpoint();
+      await this.persistIfEnabled(checkpoint);
+      this.latestCheckpoint = this.cloneCheckpoint(checkpoint);
+      this.emitCheckpoint(checkpoint);
+      return {
+        status: 'ok',
+        eventsProcessed,
+        nextLedger: this.cursor,
+        checkpoint: this.cloneCheckpoint(checkpoint),
+      };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
 
@@ -809,16 +867,49 @@ export class ContractEventListener {
     }
   }
 
-  private async persistIfEnabled(): Promise<void> {
+  private async persistIfEnabled(checkpoint: KeeperCheckpoint): Promise<void> {
     if (!this.store) return;
     if (this.config.persistOnPoll === false) return;
 
     try {
-      await this.persist();
+      await this.store.save(checkpoint);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       this.emitError(error);
     }
+  }
+
+  private buildCheckpointMetadata(
+    baseMetadata?: Record<string, string | number | boolean>,
+  ): Record<string, string | number | boolean> | undefined {
+    const merged: Record<string, string | number | boolean> = {
+      ...(baseMetadata ?? {}),
+      ...(this.config.checkpointMetadata ?? {}),
+    };
+    if (this.pagingCursor !== null) {
+      merged[EVENT_CURSOR_KEY] = this.pagingCursor;
+    } else {
+      delete merged[EVENT_CURSOR_KEY];
+    }
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  private cloneCheckpoint(checkpoint: KeeperCheckpoint): KeeperCheckpoint {
+    return {
+      ...checkpoint,
+      ...(checkpoint.metadata ? { metadata: { ...checkpoint.metadata } } : {}),
+    };
+  }
+
+  private emitCheckpoint(checkpoint: KeeperCheckpoint): void {
+    this.checkpointHandlers.forEach((h) => {
+      try {
+        h(this.cloneCheckpoint(checkpoint));
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.emitError(error);
+      }
+    });
   }
 
   private emitError(error: Error): void {

@@ -14,6 +14,7 @@
 
 import {
   ContractEventListener,
+  EVENT_CURSOR_KEY,
   type EventSource,
   type GetEventsRequest,
   type GetEventsResponse,
@@ -21,7 +22,13 @@ import {
   type RawContractEvent,
   type ListenerErrorEvent,
 } from './eventListener';
-import { MemoryCheckpointStore } from './persistence';
+import {
+  CHECKPOINT_VERSION,
+  CheckpointError,
+  MemoryCheckpointStore,
+  createCheckpoint,
+  type KeeperCheckpoint,
+} from './persistence';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -760,5 +767,219 @@ describe('cursor advancement with a full page', () => {
     await listener.poll();
 
     expect(listener.currentLedger).toBe(501);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Exposing ledger checkpoints
+// ---------------------------------------------------------------------------
+
+describe('exposed ledger checkpoints', () => {
+  const VAULT_A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
+
+  it('exposes getCheckpoint() and lastCheckpoint without a CheckpointStore', async () => {
+    let clock = 1_000;
+    const listener = new ContractEventListener(stubSource([], 150), {
+      startLedger: 0,
+      now: () => clock,
+      checkpointMetadata: { keeper: 'indexer-1' },
+    });
+
+    expect(listener.lastCheckpoint).toBeNull();
+    expect(listener.getCheckpoint()).toEqual({
+      version: CHECKPOINT_VERSION,
+      nextLedger: 0,
+      lastProcessedLedger: -1,
+      updatedAt: 1_000,
+      metadata: { keeper: 'indexer-1' },
+    });
+
+    clock = 2_000;
+    const result = await listener.pollWithResult();
+
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.checkpoint).toEqual({
+        version: CHECKPOINT_VERSION,
+        nextLedger: 151,
+        lastProcessedLedger: 150,
+        updatedAt: 2_000,
+        metadata: { keeper: 'indexer-1' },
+      });
+    }
+    expect(listener.lastCheckpoint).toEqual({
+      version: CHECKPOINT_VERSION,
+      nextLedger: 151,
+      lastProcessedLedger: 150,
+      updatedAt: 2_000,
+      metadata: { keeper: 'indexer-1' },
+    });
+  });
+
+  it('emits checkpoints to onCheckpoint handlers and supports offCheckpoint', async () => {
+    let clock = 10_000;
+    let latestLedger = 110;
+    const source: EventSource = {
+      async getEvents(): Promise<GetEventsResponse> {
+        return { events: [], latestLedger };
+      },
+    };
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      now: () => clock,
+    });
+
+    const received: KeeperCheckpoint[] = [];
+    const handler = (cp: KeeperCheckpoint) => received.push(cp);
+    listener.onCheckpoint(handler);
+
+    await listener.poll();
+    expect(received).toHaveLength(1);
+    expect(received[0].nextLedger).toBe(111);
+    expect(received[0].lastProcessedLedger).toBe(110);
+
+    listener.offCheckpoint(handler);
+    clock = 20_000;
+    latestLedger = 120;
+    await listener.poll();
+
+    expect(received).toHaveLength(1);
+    expect(listener.lastCheckpoint?.nextLedger).toBe(121);
+  });
+
+  it('includes eventCursor in checkpoints during full-page pagination and clears it once drained', async () => {
+    let call = 0;
+    const source: EventSource = {
+      async getEvents(): Promise<GetEventsResponse> {
+        call += 1;
+        if (call === 1) {
+          return {
+            events: [
+              makeRaw(VAULT_A, ['deposit'], 100),
+              makeRaw(VAULT_A, ['deposit'], 101),
+            ],
+            latestLedger: 200,
+          };
+        }
+        return { events: [], latestLedger: 200 };
+      },
+    };
+
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      pageSize: 2,
+      now: () => 5_000,
+    });
+
+    const first = await listener.pollWithResult();
+    expect(first.status).toBe('ok');
+    if (first.status === 'ok') {
+      expect(first.checkpoint.nextLedger).toBe(102);
+      expect(first.checkpoint.metadata?.[EVENT_CURSOR_KEY]).toBe(`${VAULT_A}-101`);
+    }
+
+    const second = await listener.pollWithResult();
+    expect(second.status).toBe('ok');
+    if (second.status === 'ok') {
+      expect(second.checkpoint.nextLedger).toBe(201);
+      expect(second.checkpoint.metadata).toBeUndefined();
+    }
+  });
+
+  it('populates lastCheckpoint after restore() and persist()', async () => {
+    const store = new MemoryCheckpointStore();
+    await store.save(createCheckpoint(250, 9_000, { region: 'eu' }));
+
+    const listener = new ContractEventListener(stubSource([], 260), {
+      startLedger: 100,
+      store,
+      now: () => 10_000,
+    });
+
+    await listener.restore();
+    expect(listener.lastCheckpoint).toEqual({
+      version: CHECKPOINT_VERSION,
+      nextLedger: 250,
+      lastProcessedLedger: 249,
+      updatedAt: 9_000,
+      metadata: { region: 'eu' },
+    });
+
+    const persisted = await listener.persist();
+    expect(persisted?.updatedAt).toBe(10_000);
+    expect(listener.lastCheckpoint?.updatedAt).toBe(10_000);
+  });
+
+  it('does not emit checkpoints or advance lastCheckpoint on RPC error or cursor_expired', async () => {
+    let mode: 'error' | 'expired' = 'error';
+    const source: EventSource = {
+      async getEvents(): Promise<GetEventsResponse> {
+        if (mode === 'error') {
+          throw new Error('RPC timeout');
+        }
+        throw new Error('cursor is expired');
+      },
+    };
+    const listener = new ContractEventListener(source, { startLedger: 100 });
+    const checkpoints: KeeperCheckpoint[] = [];
+    const errors: ListenerErrorEvent[] = [];
+    listener.onCheckpoint((cp) => checkpoints.push(cp));
+    listener.onError((e) => errors.push(e));
+
+    const r1 = await listener.pollWithResult();
+    expect(r1.status).toBe('error');
+    expect(checkpoints).toHaveLength(0);
+    expect(listener.lastCheckpoint).toBeNull();
+
+    mode = 'expired';
+    const r2 = await listener.pollWithResult();
+    expect(r2.status).toBe('cursor_expired');
+    expect(checkpoints).toHaveLength(0);
+    expect(listener.lastCheckpoint).toBeNull();
+    expect(errors).toHaveLength(2);
+  });
+
+  it('isolates throwing checkpoint handlers and reports them via onError', async () => {
+    const listener = new ContractEventListener(stubSource([], 120), {
+      startLedger: 100,
+      now: () => 1_000,
+    });
+    const seen: number[] = [];
+    const errors: string[] = [];
+
+    listener.onCheckpoint(() => {
+      throw new Error('checkpoint sink down');
+    });
+    listener.onCheckpoint((cp) => seen.push(cp.nextLedger));
+    listener.onError((e) => errors.push(e.error.message));
+
+    const result = await listener.pollWithResult();
+    expect(result.status).toBe('ok');
+    expect(seen).toEqual([121]);
+    expect(errors).toEqual(['checkpoint sink down']);
+  });
+
+  it('returns defensive copies so mutating a checkpoint does not affect listener state', async () => {
+    const listener = new ContractEventListener(stubSource([], 120), {
+      startLedger: 100,
+      checkpointMetadata: { tag: 'v1' },
+      now: () => 1_000,
+    });
+
+    await listener.poll();
+    const cp = listener.lastCheckpoint!;
+    cp.nextLedger = 999_999;
+    if (cp.metadata) cp.metadata.tag = 'mutated';
+
+    expect(listener.lastCheckpoint?.nextLedger).toBe(121);
+    expect(listener.lastCheckpoint?.metadata?.tag).toBe('v1');
+  });
+
+  it('throws CheckpointError from getCheckpoint() when startLedger is invalid', () => {
+    const listener = new ContractEventListener(stubSource([], 120), {
+      startLedger: -5,
+    });
+
+    expect(() => listener.getCheckpoint()).toThrow(CheckpointError);
   });
 });
