@@ -103,6 +103,45 @@ describe('formatAmount', () => {
   });
 });
 
+describe('boundary amounts (zero, minimum, maximum)', () => {
+  const I64_MAX = 9223372036854775807n;
+  const I128_MAX = 170141183460469231731687303715884105727n;
+  const I128_MIN = -170141183460469231731687303715884105728n;
+
+  it('handles zero across decimals and input types', () => {
+    expect(parseStroops('0')).toBe(0n);
+    expect(parseStroops('0.0000000')).toBe(0n);
+    expect(parseStroops(0)).toBe(0n);
+    expect(() => parseStroops('-0')).toThrow(/non-negative decimal number/);
+
+    expect(formatAmount(0n, 7)).toBe('0');
+    expect(formatAmount(0n, 18)).toBe('0');
+    expect(formatAmount(0n, 0)).toBe('0');
+    expect(formatVotingPower(0n)).toBe('0.0000000');
+  });
+
+  it('handles minimum 1-unit amounts and sub-unit truncation', () => {
+    expect(parseStroops('0.0000001', 7)).toBe(1n);
+    expect(parseStroops('0.000000000000000001', 18)).toBe(1n);
+    expect(parseStroops('1', 0)).toBe(1n);
+    expect(parseStroops('0.00000009', 7)).toBe(0n);
+
+    expect(formatAmount(1n, 7)).toBe('0.0000001');
+    expect(formatAmount(1n, 0)).toBe('1');
+  });
+
+  it('round-trips i64::MAX and i128::MAX without precision loss', () => {
+    for (const max of [I64_MAX, I128_MAX]) {
+      for (const decimals of [0, 7, 18]) {
+        const formatted = formatAmount(max, decimals);
+        expect(parseStroops(formatted, decimals)).toBe(max);
+      }
+    }
+
+    expect(formatAmount(I128_MIN, 7)).toBe('-17014118346046923173168730371588.4105728');
+  });
+});
+
 describe('isContractConfigured', () => {
   it('rejects empty and placeholder IDs', () => {
     expect(isContractConfigured('')).toBe(false);

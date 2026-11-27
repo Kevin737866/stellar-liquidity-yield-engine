@@ -3,9 +3,11 @@
 ## Overview
 
 An off-chain keeper is only useful if it is *continuous*. It polls the RPC,
-decides what to do, and acts — and it must do so exactly once per on-chain
-event. A process restart, a deploy, or an extended network outage breaks that
-continuity unless the keeper's position survives the restart.
+decides what to do, and acts — and it must not miss on-chain events. A process
+restart, a deploy, or an extended network outage breaks that continuity unless
+the keeper's position survives the restart. Checkpoint recovery can replay an
+event if its handler's external side effect completed but its checkpoint was
+not saved, so handlers that cause side effects should be idempotent.
 
 This document describes the durable-state support added to the SDK: how a
 keeper checkpoints its position, how it restores it on start-up, and how the
@@ -38,9 +40,9 @@ interface KeeperCheckpoint {
 }
 ```
 
-`nextLedger` is the *first ledger that has not been processed yet*. Resuming is
-therefore one rule — start at `nextLedger` — and it can neither skip an event
-nor replay one.
+`nextLedger` is the *first ledger that has not been processed yet*. Resuming
+from it avoids gaps or replay of previously checkpointed ledger ranges, as long
+as the RPC still serves the events and the checkpoint save succeeded.
 
 Checkpoints are written by `FileCheckpointStore` with a **write-then-rename**:
 the payload goes to `keeper.json.tmp` and is then renamed over `keeper.json`.
@@ -111,8 +113,9 @@ did not fit on the page. The listener now distinguishes:
   cursor only advances to the ledger after the highest event actually
   consumed.
 
-A keeper catching up after an outage therefore drains the backlog page by page
-without losing anything.
+A keeper catching up after an outage therefore drains the available backlog
+page by page without losing events to page truncation. This does not restore
+history pruned by the RPC provider.
 
 ## Typed cursor expiration
 
@@ -205,14 +208,17 @@ The scenario is covered end-to-end in `sdk/src/recovery.test.ts`:
 2. The process dies; the chain advances by dozens of ledgers.
 3. A **new** listener instance with a **new** store instance reads the same
    checkpoint file.
-4. It resumes at exactly the ledger after the last consumed one, catches up on
-   everything that happened during the outage, and delivers every event
-   exactly once.
+4. It resumes at the ledger after the last checkpointed position and catches
+   up on everything the RPC still serves from that point. A crash between an
+   event handler's side effect and checkpoint persistence can cause redelivery;
+   applications should make side effects idempotent.
 5. The lag monitor restores its marker and reports an accurate lag instead of
    a false critical one.
 
-The test asserts both directions: **no gaps** (every missed event is handled)
-and **no duplicates** (no pre-outage event is re-delivered). It also covers
+The successful-persistence test asserts both directions: **no gaps** (every
+missed event is handled) and **no duplicates** (no pre-outage event is
+re-delivered). A failure-boundary test also demonstrates redelivery when event
+handling succeeds but checkpoint persistence fails. The suite covers
 multi-page catch-up, an unreadable checkpoint, and a `startLedger` that is
 ahead of the checkpoint.
 
@@ -249,6 +255,8 @@ Full backlog drained         : true
   the last position with `cat state/keeper.json`.
 - **Ephemeral deployments.** Use `MemoryCheckpointStore` in tests and anywhere
   a restart is expected to start from scratch.
+- **Recovery procedure.** See [INDEXER_CHECKPOINT_RECOVERY.md](./INDEXER_CHECKPOINT_RECOVERY.md)
+  for the on-call runbook and failure decision table.
 
 
 ## Durable backoff after consecutive failures

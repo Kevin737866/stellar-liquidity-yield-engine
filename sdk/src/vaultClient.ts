@@ -3,7 +3,6 @@ import {
   Account,
   Contract,
   Keypair,
-  SorobanRpc,
   Transaction,
   TransactionBuilder,
   Networks,

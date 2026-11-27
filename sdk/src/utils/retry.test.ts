@@ -146,18 +146,17 @@ describe('withRetry', () => {
 
     await withRetry(fn, {
       maxRetries: 4,
-      initialDelayMs: 1000,
+      initialDelayMs: 10,
       backoffMultiplier: 10,
-      maxDelayMs: 2000,
+      maxDelayMs: 20,
       jitter: false,
       onRetry: (attempt, error, delayMs) => {
         delays.push(delayMs);
       },
     });
 
-    // All delays should be capped at 2000ms
     delays.forEach(delay => {
-      expect(delay).toBeLessThanOrEqual(2000);
+      expect(delay).toBeLessThanOrEqual(20);
     });
   });
 
@@ -185,8 +184,8 @@ describe('withRetry', () => {
 
   it('calls onRetry callback for each retry', async () => {
     const fn = jest.fn()
-      .mockRejectedValueOnce(new Error('error 1'))
-      .mockRejectedValueOnce(new Error('error 2'))
+      .mockRejectedValueOnce(new Error('network error 1'))
+      .mockRejectedValueOnce(new Error('network error 2'))
       .mockResolvedValue('success');
 
     const retryCallbacks: any[] = [];
@@ -200,9 +199,9 @@ describe('withRetry', () => {
 
     expect(retryCallbacks).toHaveLength(2);
     expect(retryCallbacks[0].attempt).toBe(1);
-    expect(retryCallbacks[0].error).toBe('error 1');
+    expect(retryCallbacks[0].error).toBe('network error 1');
     expect(retryCallbacks[1].attempt).toBe(2);
-    expect(retryCallbacks[1].error).toBe('error 2');
+    expect(retryCallbacks[1].error).toBe('network error 2');
   });
 
   it('respects custom maxRetries', async () => {
@@ -221,6 +220,37 @@ describe('withRetry', () => {
     const { result } = await withRetry(fn);
 
     expect(result).toBe('success');
+  });
+});
+
+describe('retry configuration boundaries', () => {
+  it('rejects negative maxRetries without executing the operation', async () => {
+    const fn = jest.fn().mockResolvedValue('success');
+    await expect(withRetry(fn, { maxRetries: -1 })).rejects.toThrow(
+      'maxRetries must be a non-negative integer'
+    );
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('rejects fractional maxRetries values', async () => {
+    await expect(withRetry(async () => 'success', { maxRetries: 1.5 })).rejects.toThrow(
+      'maxRetries must be a non-negative integer'
+    );
+  });
+
+  it('accepts zero retries and performs exactly one attempt', async () => {
+    const fn = jest.fn().mockRejectedValue(new Error('network timeout'));
+    await expect(withRetry(fn, { maxRetries: 0 })).rejects.toThrow('network timeout');
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects invalid backoff and delay boundaries', async () => {
+    await expect(withRetry(async () => 'success', { initialDelayMs: -1 })).rejects.toThrow('initialDelayMs');
+    await expect(withRetry(async () => 'success', { backoffMultiplier: 0 })).rejects.toThrow('backoffMultiplier');
+    await expect(withRetry(async () => 'success', {
+      initialDelayMs: 100,
+      maxDelayMs: 50,
+    })).rejects.toThrow('maxDelayMs');
   });
 });
 

@@ -464,3 +464,29 @@ export interface ILSnapshot {
   /** Impermanent loss in basis points */
   ilBps: number;
 }
+
+/**
+ * Aggregate harvest efficiency metrics computed by
+ * `YieldCalculator.calculateHarvestEfficiency()`.
+ */
+export interface HarvestEfficiencyMetrics {
+  /** Sum of all rewards harvested across all events */
+  totalRewards: bigint;
+  /** Sum of all gas used across all harvest events */
+  totalGas: number;
+  /**
+   * Ratio of rewards to gas cost. Higher is better.
+   * Computed as: Number(totalRewards) / totalGas (or 0 when totalGas === 0)
+   */
+  efficiencyRatio: number;
+  /** Average gas consumed per individual harvest */
+  avgGasPerHarvest: number;
+}
+
+/**
+ * Pause reason categories for vault and rebalance engine pause events.
+ * These help monitors and dashboards understand why a system was paused.
+ */
+export type PauseReason =
+  | 'security' // Security concern detected (exploit, suspicious activity)
+  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large
