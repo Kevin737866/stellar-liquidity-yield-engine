@@ -123,6 +123,20 @@ export interface SkippedActionLog {
   timestamp: number;
 }
 
+/** Does `expression` allow the minute-of-hour derived from `epochMinute`? */
+function matchesCronMinute(expression: string, epochMinute: number): boolean {
+  const minute = ((epochMinute % 60) + 60) % 60;
+  const trimmed = expression.trim();
+  if (trimmed === '*' || trimmed === '') return true;
+
+  return trimmed.split(',').some((part) => {
+    const [start, end] = part.split('-').map((value) => Number(value));
+    if (!Number.isInteger(start)) return false;
+    if (end === undefined) return minute === start;
+    return Number.isInteger(end) && minute >= start && minute <= end;
+  });
+}
+
 export class AutoRebalancer {
   private config: RebalancerConfig;
   private scanner: ArbitrageScanner;
@@ -130,16 +144,19 @@ export class AutoRebalancer {
   private executionHistory: RebalanceResult[] = [];
   private lastExecutionTime: number = 0;
   private lastConsumedMinute: number = -1;
+  private stateRestored: boolean = false;
   private lagMonitor?: RpcLagMonitor;
   private lastLag?: RpcLagReport;
   private skippedActions: SkippedActionLog[] = [];
 
   constructor(config: RebalancerConfig, options: AutoRebalancerOptions = {}) {
     this.config = config;
-    this.scanner = new ArbitrageScanner('https://horizon.stellar.org', {
-      roundTripCostEstimator: config.roundTripCostEstimator,
-    });
-    this.executor = new ArbitrageExecutor();
+    this.scanner =
+      options.scanner ??
+      new ArbitrageScanner('https://horizon.stellar.org', {
+        roundTripCostEstimator: config.roundTripCostEstimator,
+      });
+    this.executor = options.executor ?? new ArbitrageExecutor();
     if (config.rpcHeadSource) {
       this.lagMonitor = new RpcLagMonitor(config.rpcHeadSource, config.lagOptions);
     }
@@ -284,7 +301,7 @@ export class AutoRebalancer {
       // Warn before acting if the RPC node's head has fallen noticeably behind
       // the last ledger this keeper processed.
       const lag = await this.checkRpcLag();
-      if (lag && lag.severity !== 'pk') {
+      if (lag && lag.severity !== 'ok') {
         this.logSkipped('rpc_lag', `RPC lag detected: ${lag.message}`, { lag });
         results.push({
           timestamp: Date.now(),
@@ -489,11 +506,29 @@ export class AutoRebalancer {
 
   /** Returns true when the cooldown window has elapsed. */
   isReadyForRebalance(): boolean {
-    if (this.lastExecutionTime === 0) {
-      return true;
-    }
     const cooldownMs = this.config.cooldownHours * 60 * 60 * 1000;
-    return Date.now() - this.lastExecutionTime >= cooldownMs;
+    const cooldownSatisfied =
+      this.lastExecutionTime === 0 ||
+      Date.now() - this.lastExecutionTime >= cooldownMs;
+    if (!cooldownSatisfied) {
+      return false;
+    }
+
+    // An optional cron expression restricts runs to matching wall-clock
+    // minutes, e.g. `*` (any minute) or `30` (minute 30 of every hour).
+    const cron = this.config.cronExpression;
+    const currentMinute = Math.floor(Date.now() / 60_000);
+    if (cron !== undefined && !matchesCronMinute(cron, currentMinute)) {
+      return false;
+    }
+
+    // Consume the current minute so a timer firing repeatedly within the same
+    // minute cannot open the slot twice.
+    if (this.lastConsumedMinute === currentMinute) {
+      return false;
+    }
+    this.lastConsumedMinute = currentMinute;
+    return true;
   }
 
   /** Send configured webhook notifications for a successful execution. */

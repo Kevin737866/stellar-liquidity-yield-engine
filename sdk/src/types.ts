@@ -462,6 +462,10 @@ export interface HarvestEfficiencyMetrics {
  * Pause reason categories for vault and rebalance engine pause events.
  * These help monitors and dashboards understand why a system was paused.
  */
+/**
+ * Pause reason categories for vault and rebalance engine pause events.
+ * These help monitors and dashboards understand why a system was paused.
+ */
 export type PauseReason =
   | 'security' // Security concern detected (exploit, suspicious activity)
   | 'circuit_breaker' // Circuit breaker triggered (high volatility, large slippage)
@@ -487,7 +491,7 @@ export interface VaultEvent {
 }
 
 export interface RebalanceEvent {
-  type: "proposal" | "execution" | "failure";
+  type: "proposal" | "execution" | "failure" | "pause" | "unpause";
   strategy: number;
   fromPool?: Address;
   toPool?: Address;

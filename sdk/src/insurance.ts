@@ -1,4 +1,4 @@
-import { SorobanRpc, TransactionBuilder, Networks, scValToNative } from "@stellar/stellar-sdk";
+import { SorobanRpc, TransactionBuilder, Networks, scValToNative } from "stellar-sdk";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

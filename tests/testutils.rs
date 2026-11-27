@@ -5,7 +5,7 @@ use stellar_liquidity_yield_engine::{RebalanceEngineClient, YieldVault, YieldVau
 
 //// Rebalance engine helpers
 
-pub fn setup_rebalance_engine(env: &Env) -> (RebalanceEngineClient, Address) {
+pub fn setup_rebalance_engine<'a>(env: &'a Env) -> (RebalanceEngineClient<'a>, Address) {
     let admin = Address::generate(env);
     let contract_id = env.register_contract(None, stellar_liquidity_yield_engine::RebalanceEngine);
     let client = RebalanceEngineClient::new(env, &contract_id);
@@ -13,7 +13,11 @@ pub fn setup_rebalance_engine(env: &Env) -> (RebalanceEngineClient, Address) {
     (client, admin)
 }
 
-pub fn create_strategy(env: &Env, client: &RebalanceEngineClient, admin: &Address) -> u32 {
+pub fn create_strategy<'a>(
+    env: &'a Env,
+    client: &RebalanceEngineClient<'a>,
+    admin: &Address,
+) -> u32 {
     let token_a = Address::generate(env);
     let token_b = Address::generate(env);
     let mut allocations = SorobanVec::new(env);
@@ -42,12 +46,12 @@ pub fn create_strategy(env: &Env, client: &RebalanceEngineClient, admin: &Addres
 
 //// Bundle of dependencies and actors created by the vault fixture.
 //// Keeps the setup in one place so test modules can focus on behavior.
-pub struct VaultFixture {
-    pub vault: YieldVaultClient,
-    pub token_a: TokenClient,
-    pub token_b: TokenClient,
-    pub token_a_admin: StellarAssetClient,
-    pub token_b_admin: StellarAssetClient,
+pub struct VaultFixture<'a> {
+    pub vault: YieldVaultClient<'a>,
+    pub token_a: TokenClient<'a>,
+    pub token_b: TokenClient<'a>,
+    pub token_a_admin: StellarAssetClient<'a>,
+    pub token_b_admin: StellarAssetClient<'a>,
     pub user: Address,
     pub admin: Address,
     pub treasury: Address,
@@ -55,7 +59,7 @@ pub struct VaultFixture {
 
 //// Deploy and initialize a YieldVault with two real tokens.
 //// Uses the same default parameters as the integration tests.
-pub fn setup_yield_vault(env: &Env) -> VaultFixture {
+pub fn setup_yield_vault<'a>(env: &'a Env) -> VaultFixture<'a> {
     let admin = Address::generate(env);
     let user = Address::generate(env);
     let treasury = Address::generate(env);

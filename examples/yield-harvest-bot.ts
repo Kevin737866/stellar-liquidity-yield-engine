@@ -1,7 +1,6 @@
-import { Keypair } from 'stellar-sdk';
+import { Address, Keypair } from 'stellar-sdk';
 import {
   VaultClient,
-  RewardDistributorClient,
   TESTNET_CONFIG,
   NetworkConfig,
   VaultMetrics,
@@ -85,7 +84,6 @@ class YieldHarvestBot {
   private networkConfig: NetworkConfig;
   private state: BotState;
   private vaultClients: Map<string, VaultClient>;
-  private rewardClients: Map<string, RewardDistributorClient>;
   private checkTimer: NodeJS.Timeout | null = null;
   private reportTimer: NodeJS.Timeout | null = null;
 
@@ -109,13 +107,10 @@ class YieldHarvestBot {
     };
 
     this.vaultClients = new Map();
-    this.rewardClients = new Map();
     
     // Initialize clients
     this.config.vaultAddresses.forEach(address => {
-      this.vaultClients.set(address, new VaultClient(address, networkConfig));
-      // In production, you'd have separate reward distributor addresses
-      this.rewardClients.set(address, new RewardDistributorClient(networkConfig));
+      this.vaultClients.set(address, new VaultClient(new Address(address), networkConfig));
     });
   }
 
