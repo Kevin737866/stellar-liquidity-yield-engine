@@ -133,10 +133,10 @@ export function logSkippedContractCall(
 }
 
 export async function waitForTransaction(
-  server: SorobanRpc,
+  server: SorobanRpc.Server,
   hash: string,
   options: WaitForTransactionOptions = {},
-): Promise<unknown> {
+): Promise<SorobanRpc.Api.GetTransactionResponse> {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const intervalMs = options.intervalMs ?? 1_000;
   const deadline = Date.now() + timeoutMs;

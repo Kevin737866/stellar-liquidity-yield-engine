@@ -106,4 +106,62 @@ describe('VERSION', () => {
     expect(VERSION).toBe(packageJson.version);
     expect(VERSION).toBe('0.1.0');
   });
+
+  it('is a semver-formatted string so consumers can compare releases', () => {
+    expect(VERSION).toMatch(/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/);
+  });
+
+  it('exposes the same version on repeated imports (stable across calls)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const again = require('./index').VERSION;
+    expect(again).toBe(VERSION);
+  });
+});
+
+describe('SDK API compatibility across releases', () => {
+  it('keeps the createGovernanceClient signature backward-compatible (no args)', () => {
+    expect(createGovernanceClient.length).toBe(0);
+    expect(() => createGovernanceClient()).not.toThrow();
+  });
+
+  it('accepts the legacy string network argument alongside options', () => {
+    expect(() => createGovernanceClient('testnet')).not.toThrow();
+    expect(() => createGovernanceClient('mainnet', {})).not.toThrow();
+  });
+
+  it('preserves the public GovernanceSDK method surface', () => {
+    const client = createGovernanceClient();
+    for (const method of [
+      'getNetworkPassphrase',
+      'getKeypair',
+      'setKeypair',
+      'getContracts',
+    ]) {
+      expect(typeof (client as any)[method]).toBe('function');
+    }
+  });
+
+  it('falls back to defaults for an empty options object (boundary)', () => {
+    const client = createGovernanceClient('testnet', {});
+
+    expect(client.getNetworkPassphrase()).toBe(Networks.TESTNET);
+    expect(client.getKeypair()).toBeUndefined();
+    expect(client.getContracts()).toEqual(DEFAULT_GOVERNANCE_CONTRACTS);
+  });
+
+  it('does not share contract overrides between separate clients (isolation)', () => {
+    const a = createGovernanceClient('testnet', {
+      contracts: { governance: 'CA' },
+    });
+    const b = createGovernanceClient('testnet');
+
+    expect(a.getContracts().governance).toBe('CA');
+    expect(b.getContracts().governance).toBe(
+      DEFAULT_GOVERNANCE_CONTRACTS.governance
+    );
+  });
+
+  it('rejects an unknown network name with a clear error (failure)', () => {
+    expect(() => createGovernanceClient('localnet' as any)).toThrow();
+  });
 });

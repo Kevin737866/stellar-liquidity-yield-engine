@@ -77,7 +77,6 @@ mod tests {
         (client, admin)
     }
 
-
     fn create_test_strategy(env: &Env, client: &RebalanceEngineClient, admin: &Address) -> u32 {
         let token_a = Address::generate(env);
         let token_b = Address::generate(env);

@@ -16,7 +16,7 @@
 //! them.
 
 use soroban_sdk::{
-    testutils::Address as _, token::TokenClient, Address, Env, Symbol, Vec as SorobanVec,
+    testutils::Address as _, token::TokenClient, Address, Env, String, Symbol, Vec as SorobanVec,
 };
 use stellar_liquidity_yield_engine::{
     RebalanceEngine, RebalanceEngineClient, RebalanceProposal, YieldVault, YieldVaultClient,
@@ -112,7 +112,8 @@ mod tests {
         let metrics_before = f.vault.get_metrics();
 
         // The emergency pause lands while the harvest cycle is in flight.
-        f.vault.emergency_pause(&signers);
+        f.vault
+            .emergency_pause(&signers, &String::from_str(&env, "test emergency pause"));
 
         // The fund-moving step is refused.
         assert!(
@@ -160,7 +161,8 @@ mod tests {
         );
 
         // The pause lands immediately afterwards.
-        f.vault.emergency_pause(&signers);
+        f.vault
+            .emergency_pause(&signers, &String::from_str(&env, "test emergency pause"));
 
         assert!(
             f.vault.try_harvest(&f.user).is_err(),
@@ -195,10 +197,12 @@ mod tests {
         let f = funded_vault(&env);
         let signers = configure_multisig(&env, &f);
 
-        f.vault.emergency_pause(&signers);
+        f.vault
+            .emergency_pause(&signers, &String::from_str(&env, "test emergency pause"));
         assert!(f.vault.try_harvest(&f.user).is_err());
 
-        f.vault.emergency_unpause(&signers);
+        f.vault
+            .emergency_unpause(&signers, &String::from_str(&env, "test emergency unpause"));
 
         f.vault.harvest(&f.user);
         let metrics = f.vault.get_metrics();
@@ -223,7 +227,9 @@ mod tests {
         short.push_back(signers.get(1).unwrap());
 
         assert!(
-            f.vault.try_emergency_pause(&short).is_err(),
+            f.vault
+                .try_emergency_pause(&short, &String::from_str(&env, "test short signer set"))
+                .is_err(),
             "emergency pause with insufficient signers must be rejected"
         );
 
@@ -450,11 +456,15 @@ mod tests {
             timestamp: env.ledger().timestamp(),
         };
         assert!(
-            f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err(),
+            f.engine
+                .try_execute_rebalance(&f.admin, &bad_proposal)
+                .is_err(),
             "an unfunded rebalance must fail and trip the breaker"
         );
         assert!(
-            f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err(),
+            f.engine
+                .try_execute_rebalance(&f.admin, &bad_proposal)
+                .is_err(),
             "the tripped breaker must refuse further executions"
         );
 
@@ -486,7 +496,10 @@ mod tests {
             estimated_gas_cost: 10,
             timestamp: env.ledger().timestamp(),
         };
-        assert!(f.engine.try_execute_rebalance(&f.admin, &bad_proposal).is_err());
+        assert!(f
+            .engine
+            .try_execute_rebalance(&f.admin, &bad_proposal)
+            .is_err());
 
         let intruder = Address::generate(&env);
         assert!(

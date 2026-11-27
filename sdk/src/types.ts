@@ -469,47 +469,4 @@ export interface HarvestEfficiencyMetrics {
  */
 export type PauseReason =
   | 'security' // Security concern detected (exploit, suspicious activity)
-  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large slippage)
-  | 'slippage_protection' // Price deviation exceeded threshold
-  | 'maintenance' // Scheduled maintenance or upgrade
-  | 'governance' // Governance decision or protocol vote
-  | 'liquidity_issue' // Insufficient liquidity in pool
-  | 'emergency' // Emergency situation requiring immediate pause
-  | 'manual'; // Manual administrative pause
-
-// Event Types
-export interface VaultEvent {
-  type: "deposit" | "withdraw" | "harvest" | "pause" | "unpause";
-  vault: Address;
-  user?: Address;
-  amount?: bigint;
-  timestamp: number;
-  data?: any;
-  /** Reason for pause/unpause events */
-  reason?: PauseReason;
-  /** Additional context about the pause reason */
-  reasonDetails?: string;
-}
-
-export interface RebalanceEvent {
-  type: "proposal" | "execution" | "failure";
-  strategy: number;
-  fromPool?: Address;
-  toPool?: Address;
-  amount?: bigint;
-  timestamp: number;
-  data?: any;
-  /** Reason for pause/unpause events */
-  reason?: PauseReason;
-  /** Additional context about the pause reason */
-  reasonDetails?: string;
-}
-
-export interface RewardEvent {
-  type: "distribution" | "claim" | "expiry";
-  vault: Address;
-  user?: Address;
-  amount?: bigint;
-  timestamp: number;
-  data?: any;
-}
+  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large
