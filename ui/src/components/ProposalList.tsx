@@ -25,6 +25,8 @@ interface ProposalListProps {
 
 type FilterTab = 'all' | 'active' | 'pending' | 'executed' | 'defeated';
 
+const PROPOSAL_PAGE_SIZE = 10;
+
 const ProposalList: React.FC<ProposalListProps> = ({
   proposals,
   totalSupply,
@@ -37,6 +39,11 @@ const ProposalList: React.FC<ProposalListProps> = ({
   const [sortBy, setSortBy] = useState<'time' | 'votes' | 'id'>('time');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [searchQuery, setSearchQuery] = useState('');
+  const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    setPage(1);
+  }, [activeTab, sortBy, sortOrder, searchQuery]);
 
   // Filter proposals by tab
   const filteredProposals = useMemo(() => {
@@ -93,6 +100,17 @@ const ProposalList: React.FC<ProposalListProps> = ({
 
     return filtered;
   }, [proposals, activeTab, searchQuery, sortBy, sortOrder]);
+
+  const totalPages = Math.ceil(filteredProposals.length / PROPOSAL_PAGE_SIZE);
+  const currentPage = totalPages === 0 ? 1 : Math.min(page, totalPages);
+  const visibleProposals = useMemo(
+    () =>
+      filteredProposals.slice(
+        (currentPage - 1) * PROPOSAL_PAGE_SIZE,
+        currentPage * PROPOSAL_PAGE_SIZE
+      ),
+    [filteredProposals, currentPage]
+  );
 
   // Count proposals by state
   const proposalCounts = useMemo(() => ({
@@ -285,7 +303,7 @@ const ProposalList: React.FC<ProposalListProps> = ({
 
       {/* Proposal List */}
       <div className="space-y-4">
-        {!loading && !error && filteredProposals.map(proposal => {
+        {!loading && !error && visibleProposals.map(proposal => {
           const { for: forPercent, against: againstPercent } = getVotePercentages(proposal);
           const userVoted = hasUserVoted(proposal);
           const userVotedFor = didUserVoteFor(proposal);
@@ -409,10 +427,27 @@ const ProposalList: React.FC<ProposalListProps> = ({
 
       {/* Pagination */}
       {!loading && !error && filteredProposals.length > 0 && (
-        <div className="mt-6 flex justify-center">
+        <div className="mt-6 flex items-center justify-center gap-4">
+          <button
+            type="button"
+            onClick={() => setPage(previous => Math.max(1, previous - 1))}
+            disabled={currentPage === 1}
+            className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 disabled:opacity-40"
+          >
+            Previous
+          </button>
           <p className="text-sm text-gray-500">
-            Showing {filteredProposals.length} of {proposals.length} proposals
+            Page {currentPage} of {totalPages} · showing {visibleProposals.length} of{' '}
+            {filteredProposals.length} matching proposals
           </p>
+          <button
+            type="button"
+            onClick={() => setPage(next => Math.min(totalPages, next + 1))}
+            disabled={currentPage === totalPages}
+            className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 disabled:opacity-40"
+          >
+            Next
+          </button>
         </div>
       )}
     </div>

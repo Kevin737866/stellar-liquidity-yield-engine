@@ -99,6 +99,71 @@ export interface GovernanceProposal {
   passed: boolean;
 }
 
+/** Default number of proposals returned per history page. */
+export const GOVERNANCE_PAGE_SIZE = 25;
+
+/** Largest page size accepted by {@link paginateProposals}. */
+export const GOVERNANCE_MAX_PAGE_SIZE = 100;
+
+/**
+ * One bounded slice of the governance proposal history.
+ *
+ * Pages are 1-based. `totalPages` is 0 for an empty history and out-of-range
+ * pages are clamped to the last page so callers never render a blank page.
+ */
+export interface ProposalPage {
+  items: GovernanceProposal[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrevious: boolean;
+}
+
+function assertProposalPagination(page: number, pageSize: number): void {
+  if (!Number.isSafeInteger(page) || page < 1) {
+    throw new RangeError('Proposal page must be an integer greater than or equal to 1');
+  }
+  if (
+    !Number.isSafeInteger(pageSize) ||
+    pageSize < 1 ||
+    pageSize > GOVERNANCE_MAX_PAGE_SIZE
+  ) {
+    throw new RangeError(
+      `Proposal page size must be an integer between 1 and ${GOVERNANCE_MAX_PAGE_SIZE}`
+    );
+  }
+}
+
+/**
+ * Slice a proposal history into pages without mutating the input array.
+ * Validation is exported through {@link GovernanceSDK.getProposalPage} too, so
+ * UI callers get the same boundary behavior against a live deployment.
+ */
+export function paginateProposals(
+  proposals: GovernanceProposal[],
+  page: number = 1,
+  pageSize: number = GOVERNANCE_PAGE_SIZE
+): ProposalPage {
+  assertProposalPagination(page, pageSize);
+
+  const total = proposals.length;
+  const totalPages = Math.ceil(total / pageSize);
+  const currentPage = totalPages === 0 ? 1 : Math.min(page, totalPages);
+  const start = (currentPage - 1) * pageSize;
+
+  return {
+    items: proposals.slice(start, start + pageSize),
+    page: currentPage,
+    pageSize,
+    total,
+    totalPages,
+    hasNext: currentPage < totalPages,
+    hasPrevious: currentPage > 1,
+  };
+}
+
 /**
  * Call data for proposal execution
  */
@@ -201,6 +266,37 @@ export class GovernanceSDK {
     };
   }
 
+  /**
+   * Rotate a single protocol contract address at runtime (e.g. after a
+   * governance-approved upgrade). Only the named role is changed; all other
+   * roles keep their current values. The new ID must be a configured value.
+   *
+   * @throws if `contractId` is not a configured (non-placeholder) address.
+   */
+  rotateContract(role: keyof GovernanceContracts, contractId: string): void {
+    if (!isContractConfigured(contractId)) {
+      throw new Error(
+        `rotateContract: refusing to set "${role}" to an unconfigured contract ID`
+      );
+    }
+    switch (role) {
+      case 'governance':
+        this.governanceContractId = contractId;
+        break;
+      case 'votingEscrow':
+        this.votingEscrowContractId = contractId;
+        break;
+      case 'staking':
+        this.stakingContractId = contractId;
+        break;
+      case 'feeDistributor':
+        this.feeDistributorContractId = contractId;
+        break;
+      default:
+        throw new Error(`rotateContract: unknown contract role "${String(role)}"`);
+    }
+  }
+
   // Validating accessors. Every call site reads the contract through these so
   // an unconfigured deployment fails with an actionable message instead of
   // constructing a `Contract` from a placeholder ID.
@@ -240,6 +336,39 @@ export class GovernanceSDK {
    */
   setKeypair(keypair: Keypair): void {
     this.keypair = keypair;
+  }
+
+  /**
+   * Safely rotate the signer used by this client.
+   *
+   * Validates the new keypair before swapping it in, so a failed rotation
+   * never leaves the client without a usable signer. Returns the previous
+   * signer (if any) so callers can confirm or roll back the rotation.
+   *
+   * Failure behaviour:
+   * - `null` / `undefined` new keypair: throws, current signer is kept.
+   * - Keypair that cannot produce a public key: throws, current signer is kept.
+   * - Rotating to the same public key as the current signer: no-op, returns
+   *   the current signer unchanged.
+   */
+  rotateKeypair(next: Keypair): Keypair | undefined {
+    if (!next) {
+      throw new Error('rotateKeypair: a new keypair is required');
+    }
+    let nextKey: string;
+    try {
+      nextKey = next.publicKey();
+    } catch (error) {
+      throw new Error(
+        `rotateKeypair: supplied keypair is unusable: ${(error as Error).message}`
+      );
+    }
+    const previous = this.keypair;
+    if (previous && previous.publicKey() === nextKey) {
+      return previous;
+    }
+    this.keypair = next;
+    return previous;
   }
 
   /**
@@ -949,6 +1078,27 @@ export class GovernanceSDK {
     }
 
     return proposals;
+  }
+
+  /**
+   * Get one page of governance proposal history.
+   *
+   * The page is sliced from the IDs returned by {@link getAllProposals}, so it
+   * works against deployments that do not expose a paginated contract
+   * entrypoint. `page` is 1-based; invalid bounds fail before any RPC call.
+   */
+  async getProposalPage(
+    page: number = 1,
+    pageSize: number = GOVERNANCE_PAGE_SIZE,
+    maxProposals: number = 1000
+  ): Promise<ProposalPage> {
+    assertProposalPagination(page, pageSize);
+    if (!Number.isSafeInteger(maxProposals) || maxProposals < 1) {
+      throw new RangeError('maxProposals must be a positive integer');
+    }
+
+    const proposals = await this.getAllProposals(maxProposals);
+    return paginateProposals(proposals, page, pageSize);
   }
 
   /**

@@ -1,7 +1,25 @@
 // Main exports for the Stellar Liquidity Yield Engine SDK
 
-import { Keypair, Networks } from 'stellar-sdk';
+import { Address, Keypair } from 'stellar-sdk';
 import { GovernanceSDK, type GovernanceContracts } from './governance';
+import { VaultClient } from './vaultClient';
+import { RebalancerClient } from './rebalancer';
+import {
+  DEFAULT_NETWORK,
+  DEFAULT_NETWORK_ENDPOINTS,
+  MAINNET_CONFIG,
+  NetworkConfigError,
+  TESTNET_CONFIG,
+  contractsFromEnv,
+  getNetworkPassphrase,
+  requiredEnvContract,
+  resolveNetworkConfig,
+  selectNetworkConfig,
+  type NetworkConfigErrorCode,
+  type NetworkEndpointDefaults,
+  type OptionalNetworkConfig,
+  type SupportedNetwork,
+} from './networkConfig';
 export * from './keeperBackoff';
 export * from './types';
 export { VaultClient } from './vaultClient';
@@ -9,6 +27,22 @@ export { RebalancerClient } from './rebalancer';
 export { YieldCalculator } from './yieldCalculator';
 export * from './insurance';
 export * from './utils';
+export {
+  DEFAULT_NETWORK,
+  DEFAULT_NETWORK_ENDPOINTS,
+  MAINNET_CONFIG,
+  NetworkConfigError,
+  TESTNET_CONFIG,
+  contractsFromEnv,
+  getNetworkPassphrase,
+  requiredEnvContract,
+  resolveNetworkConfig,
+  selectNetworkConfig,
+  type NetworkConfigErrorCode,
+  type NetworkEndpointDefaults,
+  type OptionalNetworkConfig,
+  type SupportedNetwork,
+};
 
 // Re-export commonly used types and classes for convenience
 export {
@@ -122,6 +156,25 @@ export type {
   RecoverySeverity,
   RecoveryStep,
 } from './upgradeRecovery';
+// Compatibility checks for contract storage migrations: run a captured storage
+// fixture through a migration ladder before shipping the wasm. The operator
+// procedure is docs/STORAGE_MIGRATION_COMPATIBILITY.md.
+export {
+  MigrationCompatibilityError,
+  assertMigrationCompatible,
+  checkMigrationCompatibility,
+  formatMigrationCompatibilityReport,
+  validateMigrationLadder,
+} from './storageMigrationCompat';
+export type {
+  MigrationCompatibilityIssue,
+  MigrationCompatibilityOptions,
+  MigrationCompatibilityResult,
+  MigrationIssueCode,
+  MigrationStep,
+  StorageFixture,
+  StoredEntry,
+} from './storageMigrationCompat';
 
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
@@ -129,7 +182,11 @@ export type {
 export {
   GovernanceSDK,
   ProposalState,
+  GOVERNANCE_PAGE_SIZE,
+  GOVERNANCE_MAX_PAGE_SIZE,
+  paginateProposals,
   type GovernanceProposal,
+  type ProposalPage,
   type CallData,
   type LockInfo,
   type FeeDistribution,
@@ -149,6 +206,23 @@ export {
   getTimeUntilExpiry,
   GOVERNANCE_CONSTANTS
 } from './governance';
+
+// Migration checklist for protocol configuration changes. The operator
+// procedure is docs/CONFIG_MIGRATION_CHECKLIST.md.
+export {
+  PROTOCOL_CONFIG_BOUNDS,
+  buildConfigMigrationChecklist,
+  validateProtocolConfig,
+} from './configMigration';
+export type {
+  ConfigBound,
+  ConfigChangeScope,
+  ConfigMigrationChecklist,
+  ConfigValueChange,
+  ProtocolConfig,
+  ProtocolConfigChangeRequest,
+  ProtocolConfigField,
+} from './configMigration';
 
 // Required contract IDs are read from the environment rather than hardcoded,
 // since a hardcoded placeholder address is not a usable/deployed contract.
@@ -197,13 +271,18 @@ export const MAINNET_CONFIG = {
 };
 
 // Utility functions
-export function createVaultClient(vaultAddress: string, network: 'testnet' | 'mainnet' = 'testnet') {
-  const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
-  return new VaultClient(vaultAddress, config);
+export function createVaultClient(
+  vaultAddress: string | Address,
+  network: SupportedNetwork | OptionalNetworkConfig = DEFAULT_NETWORK,
+) {
+  const config = selectNetworkConfig(network);
+  return new VaultClient(vaultAddress as Address, config);
 }
 
-export function createRebalancerClient(network: 'testnet' | 'mainnet' = 'testnet') {
-  const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
+export function createRebalancerClient(
+  network: SupportedNetwork | OptionalNetworkConfig = DEFAULT_NETWORK,
+) {
+  const config = selectNetworkConfig(network);
   return new RebalancerClient(config);
 }
 
@@ -222,14 +301,21 @@ export interface CreateGovernanceClientOptions {
    * callers must pass these explicitly.
    */
   contracts?: Partial<GovernanceContracts>;
+  /**
+   * Optional Soroban RPC endpoint override. When omitted, the public default
+   * (or environment override) for the selected network is used.
+   */
+  sorobanRpcUrl?: string;
 }
 
 export function createGovernanceClient(
-  network: 'testnet' | 'mainnet' = 'testnet',
+  network: SupportedNetwork = DEFAULT_NETWORK,
   options: CreateGovernanceClientOptions = {},
 ): GovernanceSDK {
-  const config = network === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
-  const networkPassphrase = network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
+  const networkPassphrase = getNetworkPassphrase(network);
+  const config = options.sorobanRpcUrl !== undefined
+    ? resolveNetworkConfig({ network, sorobanRpcUrl: options.sorobanRpcUrl })
+    : selectNetworkConfig(network);
   return new GovernanceSDK(
     config.sorobanRpcUrl,
     networkPassphrase,
@@ -237,6 +323,10 @@ export function createGovernanceClient(
     options.contracts
   );
 }
+
+// SDK API compatibility: exported surface is covered by regression tests
+// (see sdk/tests/apiCompatibility.test.ts) so that removing or renaming a
+// public export is caught before a release ships.
 
 // Version - single source of truth from package.json
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -261,3 +351,22 @@ export {
   isContractEvent,
 } from './eventOrigin';
 export type { EventOrigin, LedgerEvent } from './eventOrigin';
+
+// Staged validation for contract upgrades: seven gates from preflight to
+// closeout, so promotion is refused until the wasm is installed, simulated,
+// exercised on a separate contract and approved. The operator procedure is
+// docs/STAGED_UPGRADE_VALIDATION.md.
+export {
+  StagedUpgradeValidationError,
+  WASM_HASH_PATTERN,
+  assertStagedUpgradeReady,
+  formatStagedUpgradePlan,
+  planStagedUpgrade,
+} from './stagedUpgrade';
+export type {
+  StagedUpgradeEvidence,
+  StagedUpgradePlan,
+  StagedUpgradeStage,
+  StagedUpgradeStageId,
+  StagedUpgradeStageStatus,
+} from './stagedUpgrade';

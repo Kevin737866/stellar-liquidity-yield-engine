@@ -1,7 +1,6 @@
 #![allow(unused_imports)]
 // End-to-end tests for slippage protection across vault, router, and reward distributor
 // Tests verify the shared and differentiated slippage semantics documented in docs/SLIPPAGE_POLICY.md
-
 #![cfg(test)]
 
 use soroban_sdk::{
