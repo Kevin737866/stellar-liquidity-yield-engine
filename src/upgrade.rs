@@ -44,6 +44,17 @@ pub fn storage_version(env: &Env) -> u32 {
     env.storage().instance().get(&version_key(env)).unwrap_or(0)
 }
 
+/// Whether this contract has an admin recorded by its initializer.
+///
+/// The admin key is shared by every upgrade-managed contract and predates
+/// storage version tracking, so this also reports correctly for older
+/// initialized deployments.
+pub fn is_initialized(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .has(&Symbol::new(env, "admin"))
+}
+
 /// Record the storage schema version of the data currently in storage.
 pub fn set_storage_version(env: &Env, version: u32) {
     env.storage().instance().set(&version_key(env), &version);

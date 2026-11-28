@@ -1,9 +1,11 @@
 //! Upgrade-path tests for every contract in the crate (Issue #120).
 //!
-//! Each contract exposes the same three entrypoints:
+//! Each contract exposes the same upgrade and initialization-status entrypoints:
 //!
 //! * `upgrade(admin, new_wasm_hash)` — swaps the contract's code via
 //!   `Env::deployer().update_current_contract_wasm`, keeping address and storage.
+//! * `is_initialized()` — safely reports whether initialization has recorded an
+//!   admin, returning `false` before initialization.
 //! * `get_storage_version()` — the schema version recorded in storage.
 //! * `migrate(admin)` — adopts this build's schema version, returning the one it
 //!   replaced.
@@ -190,6 +192,54 @@ fn test_every_contract_records_its_storage_version_on_initialize() {
 }
 
 #[test]
+fn test_initialization_status_is_safe_before_and_after_initialize() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let engine_id = env.register(StellarLiquidityYieldEngine, ());
+    let engine = StellarLiquidityYieldEngineClient::new(&env, &engine_id);
+    let vault_id = env.register(YieldVault, ());
+    let vault = YieldVaultClient::new(&env, &vault_id);
+    let distributor_id = env.register(MultiRewardDistributor, ());
+    let distributor = MultiRewardDistributorClient::new(&env, &distributor_id);
+    let rebalance_id = env.register(RebalanceEngine, ());
+    let rebalance = RebalanceEngineClient::new(&env, &rebalance_id);
+    let registry_id = env.register(StrategyRegistry, ());
+    let registry = StrategyRegistryClient::new(&env, &registry_id);
+    let insurance_id = env.register(ILInsurance, ());
+    let insurance = ILInsuranceClient::new(&env, &insurance_id);
+    let actuary_id = env.register(Actuary, ());
+    let actuary = ActuaryClient::new(&env, &actuary_id);
+
+    assert!(!engine.is_initialized());
+    assert!(!vault.is_initialized());
+    assert!(!distributor.is_initialized());
+    assert!(!rebalance.is_initialized());
+    assert!(!registry.is_initialized());
+    assert!(!insurance.is_initialized());
+    assert!(!actuary.is_initialized());
+
+    let (engine, ..) = with_engine(&env);
+    let (vault, ..) = with_vault(&env);
+    let (distributor, ..) = with_distributor(&env);
+    let (rebalance, ..) = with_rebalance_engine(&env);
+    let (registry, ..) = with_registry(&env);
+    let (insurance, ..) = with_insurance(&env);
+    let (actuary, ..) = with_actuary(&env);
+
+    assert!(engine.is_initialized());
+    assert!(vault.is_initialized());
+    assert!(distributor.is_initialized());
+    assert!(rebalance.is_initialized());
+    assert!(registry.is_initialized());
+    assert!(insurance.is_initialized());
+    assert!(actuary.is_initialized());
+
+    let missing_contract = StellarLiquidityYieldEngineClient::new(&env, &Address::generate(&env));
+    assert!(missing_contract.try_is_initialized().is_err());
+}
+
+#[test]
 fn test_migrate_reports_replaced_version_and_is_idempotent() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
@@ -199,6 +249,7 @@ fn test_migrate_reports_replaced_version_and_is_idempotent() {
     // stored data exists, the version key does not.
     remove_storage_version(&env, &contract_id);
     assert_eq!(client.get_storage_version(), 0);
+    assert!(client.is_initialized());
 
     assert_eq!(client.migrate(&admin), 0, "returns the version it replaced");
     assert_eq!(client.get_storage_version(), EXPECTED_VERSION);
