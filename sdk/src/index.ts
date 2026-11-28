@@ -131,6 +131,22 @@ export {
 } from './persistence';
 export type { CheckpointStore, KeeperCheckpoint } from './persistence';
 
+// Recovery planning after a failed contract upgrade. The operator runbook is
+// docs/RUNBOOK_FAILED_UPGRADE.md; this is its machine-checkable triage step.
+export {
+  UpgradeRecoveryInputError,
+  planUpgradeRecovery,
+  formatUpgradeRecoveryPlan,
+} from './upgradeRecovery';
+export type {
+  UpgradeFailurePhase,
+  LiveContractCode,
+  UpgradeRecoveryObservation,
+  UpgradeRecoveryOutcome,
+  UpgradeRecoveryPlan,
+  RecoverySeverity,
+  RecoveryStep,
+} from './upgradeRecovery';
 // Compatibility checks for contract storage migrations: run a captured storage
 // fixture through a migration ladder before shipping the wasm. The operator
 // procedure is docs/STORAGE_MIGRATION_COMPATIBILITY.md.

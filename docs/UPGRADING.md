@@ -254,6 +254,41 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## If an upgrade fails
+
+Recovery is a triage problem before it is a transaction problem: a failed
+`upgrade` invocation reverts atomically, so the first question is whether the
+code changed at all and whether the recorded schema version matches it.
+[docs/RUNBOOK_FAILED_UPGRADE.md](RUNBOOK_FAILED_UPGRADE.md) is the operator
+procedure — freeze and capture, triage, retry / roll back / finish forward /
+re-deploy / escalate, verification, keeper resume, close-out — and lists the
+boundary and failure cases (unknown wasm hash, non-admin rejection, schema
+version ahead of the build, partial migration, lost admin key).
+
+The same triage is encoded in the SDK, so an on-call script can print the plan
+and its blockers instead of reconstructing them by hand:
+
+```ts
+import {
+  formatUpgradeRecoveryPlan,
+  planUpgradeRecovery,
+} from 'stellar-liquidity-yield-engine-sdk';
+
+const plan = planUpgradeRecovery({
+  phase: 'post_upgrade_verification',
+  liveCode: 'new', // what answers at the address now
+  expectedStorageVersion: 2,
+  storageVersion: 1, // from get_storage_version
+  previousWasmHash: PREVIOUS_WASM_HASH,
+  paused: true,
+});
+
+console.log(formatUpgradeRecoveryPlan(plan));
+```
+
+`plan.safeToRetry` is true only when the failed attempt provably changed
+nothing; `plan.blockers` lists what must be resolved before the plan can run.
+Covered by `sdk/src/upgradeRecovery.test.ts`.
 ## Safe role rotation
 
 Admin and keeper roles are the only keys that can change code (`upgrade`),

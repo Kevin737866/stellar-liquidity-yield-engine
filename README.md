@@ -367,6 +367,10 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 - **In-place Upgrades**: Every contract exposes admin-only `upgrade(admin, new_wasm_hash)`,
   `migrate(admin)` and `get_storage_version()` so deployed state can be fixed
   without changing the contract address — see [docs/UPGRADING.md](docs/UPGRADING.md)
+- **Failed-Upgrade Recovery**: A triage runbook for an upgrade that did not
+  land, landed on the wrong schema, or needs a rollback — see
+  [docs/RUNBOOK_FAILED_UPGRADE.md](docs/RUNBOOK_FAILED_UPGRADE.md) and
+  `planUpgradeRecovery()` in the SDK
 - **Storage-Migration Compatibility**: `checkMigrationCompatibility()` runs a
   captured storage fixture through a migration ladder and blocks the upgrade on
   gaps, dropped keys, downgrades and non-idempotent work before the wasm ships —
