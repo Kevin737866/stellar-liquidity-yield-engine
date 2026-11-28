@@ -58,7 +58,7 @@ macro_rules! require {
 // Each contract is behind its own feature: a wasm binary can export only one
 // contract's entrypoints, because Soroban exports them under their plain
 // function names. See the `[features]` section of `Cargo.toml`.
-mod upgrade;
+pub mod upgrade;
 
 // The vault module is also compiled for a rebalance-engine build, which needs
 // `VaultInfo` for its vault client but must not export the vault's entrypoints.
@@ -184,6 +184,32 @@ impl StellarLiquidityYieldEngine {
     pub fn migrate(env: Env, admin: Address) -> u32 {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::mark_migrated(&env, &admin)
+    }
+
+    /// Record the checksum and provenance of the release artifact this
+    /// contract runs (admin only). See [crate::upgrade::ReleaseRecord].
+    pub fn record_release(
+        env: Env,
+        admin: Address,
+        wasm_hash: soroban_sdk::BytesN<32>,
+        artifact_checksum: soroban_sdk::BytesN<32>,
+        release_version: soroban_sdk::String,
+        source_commit: soroban_sdk::String,
+    ) -> crate::upgrade::ReleaseRecord {
+        Self::require_admin(&env, admin.clone());
+        crate::upgrade::record_release(
+            &env,
+            &admin,
+            wasm_hash,
+            artifact_checksum,
+            release_version,
+            source_commit,
+        )
+    }
+
+    /// The release record written by `record_release`, if one exists.
+    pub fn get_release_record(env: Env) -> Option<crate::upgrade::ReleaseRecord> {
+        crate::upgrade::release_record(&env)
     }
 
     /// Check if contract is paused

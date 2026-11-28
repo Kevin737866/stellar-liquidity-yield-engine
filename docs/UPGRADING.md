@@ -14,13 +14,15 @@ an admin-only `upgrade` entrypoint, so deployed state can be fixed in place.
 
 All seven contracts (`StellarLiquidityYieldEngine`, `YieldVault`,
 `RebalanceEngine`, `MultiRewardDistributor`, `StrategyRegistry`, `ILInsurance`,
-`Actuary`) expose the same three:
+`Actuary`) expose the same set:
 
 | Entrypoint | Auth | Purpose |
 | --- | --- | --- |
 | `upgrade(admin, new_wasm_hash)` | stored admin | Replace the contract's code. Takes effect on the **next** invocation. |
 | `migrate(admin)` | stored admin | Adopt this build's storage schema version. Returns the version it replaced. Idempotent. |
 | `get_storage_version()` | none | The schema version recorded in the contract's storage. |
+| `record_release(admin, wasm_hash, artifact_checksum, release_version, source_commit)` | stored admin | Record the checksum and provenance of the release artifact. Replaces the previous record. |
+| `get_release_record()` | none | The last recorded release record, or `None`. |
 
 `upgrade` publishes a `contract_upgraded` event carrying `(admin, wasm_hash)`;
 `migrate` publishes `contract_migrated` with `(admin, from, to)`. An off-chain
@@ -59,6 +61,64 @@ the source schema versions supported by that contract, the migration performed,
 whether a redeploy is required, and whether rollback remains safe. Until a
 source-to-target path is explicitly documented and tested, treat it as
 unsupported for in-place upgrades.
+
+## Release artifact checksum and provenance
+
+`upgrade` proves *which hash* is live; it says nothing about *which build* that
+hash came from. `record_release` closes that gap. It stores a
+[`ReleaseRecord`](../src/upgrade.rs) with:
+
+| Field | Meaning |
+| --- | --- |
+| `wasm_hash` | The host hash the code was installed under — the value `upload_contract_wasm` returned and `upgrade` was called with. |
+| `artifact_checksum` | SHA-256 checksum of the published artifact file. |
+| `release_version` | Human-readable release version, for example `v0.1.0`. |
+| `source_commit` | Git commit the artifact was built from. |
+| `storage_version` | `upgrade::STORAGE_VERSION` of the recording build. |
+| `ledger`, `recorded_at` | Ledger sequence and timestamp of the record. |
+| `recorded_by` | The admin that recorded it. |
+
+The admin records it after building (or after installing) the artifact:
+
+```bash
+# 1. Checksum the exact file that will be (or was) deployed.
+sha256sum "$NEW_WASM"
+# -> e.g. 9f2c...  target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
+
+# 2. Record the checksum and the build it came from (admin only).
+soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- \
+  record_release \
+  --admin "$(soroban keys address deployer)" \
+  --wasm_hash "$NEW_WASM_HASH" \
+  --artifact_checksum "$ARTIFACT_CHECKSUM" \
+  --release_version "v0.1.0" \
+  --source_commit "$(git rev-parse HEAD)"
+
+# 3. Anyone can read the record back.
+soroban contract invoke --id "$CONTRACT_ID" --network testnet -- get_release_record
+```
+
+`NEW_WASM_HASH` and `ARTIFACT_CHECKSUM` are both 32-byte values. For an
+unmodified Soroban artifact the host hash is the SHA-256 of the wasm, so the two
+arguments carry the same digest; passing both lets a verifier confirm that the
+file an operator published is the code that is live.
+
+Boundary and failure behaviour (all rejected with a typed
+`upgrade::ReleaseError`):
+
+- an empty `release_version` (`EmptyReleaseVersion`);
+- an empty `source_commit` (`EmptySourceCommit`);
+- an all-zero `artifact_checksum` (`ZeroArtifactChecksum`);
+- an all-zero `wasm_hash` (`ZeroWasmHash`).
+
+Recording a second release replaces the stored record — the read path is a
+single entry — and publishes a `release_recorded` event carrying
+`(admin, wasm_hash, artifact_checksum, release_version)`. Watch that event, or
+keep the release manifest in version control, if you need the full history.
+
+The record is provenance, not an enforcement gate: `upgrade` does not require a
+record to exist, so an urgent fix is never blocked on bookkeeping. Verify the
+record against your published artifact after the upgrade.
 
 ## Flow A — in-place upgrade (storage-compatible change)
 
@@ -320,7 +380,15 @@ a no-op, and a failed rotation leaves the existing admin in place. Run
   rejected) and persistent-storage expiration boundaries: an entry is readable
   on its last live ledger, archived on the next one, and `extend_ttl` moves that
   boundary without losing the value.
-- Run `cargo test --test upgrade_tests`.
+- `tests/release_provenance_tests.rs` covers the release record on all seven
+  contracts: the stored fields, the empty state, admin-only recording, the four
+  rejected boundary inputs, replacement on re-recording, and the
+  `release_recorded` event.
+- `tests/max_limits_integration_tests.rs` exercises the configured maxima (reward
+  streams, withdrawal pacing, slippage, oracle APY, allocation weight, actuary
+  pricing) and the rejection of one unit past each.
+- Run `cargo test --test upgrade_tests --test release_provenance_tests
+  --test max_limits_integration_tests`.
 - Cross-release SDK API compatibility is guarded by regression tests that pin the
   entrypoint surface (`upgrade`, `migrate`, `get_storage_version`) and the
   `contract_upgraded` / `contract_migrated` event shapes. A new release that
@@ -328,6 +396,7 @@ a no-op, and a failed rotation leaves the existing admin in place. Run
   that breaks an existing deployed integration fails CI instead of slipping
   through silently. Normal behavior, boundary cases (version `0` from legacy
   deployments, repeated `migrate` calls) and failure cases (non-admin callers,
-  unknown wasm hashes) are each covered explicitly.
+  unknown wasm hashes) are each explicitly covered.
+
 - The test builds the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
