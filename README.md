@@ -509,6 +509,12 @@ objects):
     and constructing `RebalancerClient` without a `rebalanceEngine` contract ID
     throws `RebalanceError` (`MISSING_CONTRACT_ID`).
 
+Protocol parameter changes (fees, rebalance threshold, insurance reserve)
+follow [docs/CONFIG_MIGRATION_CHECKLIST.md](docs/CONFIG_MIGRATION_CHECKLIST.md)
+and `buildConfigMigrationChecklist()` in the SDK. A change that alters a stored
+shape also needs the version bump and migration described in
+[docs/UPGRADING.md](docs/UPGRADING.md).
+
 ### Contract Deployment
 
 There is no `scripts/` directory in this repo — deploy with the `soroban`
