@@ -357,6 +357,12 @@ export class RewardsSDK {
         // Get pending rewards to validate
         const pending = await this.getPendingRewards(user, vault);
 
+        // NOTE: the reward_distributor contract deducts TREASURY_FEE_BPS (25 bps,
+        // 0.25%) from each stream's pending amount before transferring rewards to
+        // the user, then routes that fee directly to the configured treasury
+        // address.  The amounts recorded in `claimAmounts` below are the gross
+        // pending values; the net the user actually receives is
+        //   net = gross * (10_000 - 25) / 10_000
         const claimAmounts = new Map<string, string>();
         const allStreams = await this.getAllStreams();
         for (const idx of streams) {
@@ -720,8 +726,13 @@ export class RewardsSDK {
         maxSlippageBps: number = MAX_SLIPPAGE_BPS
     ): Promise<SwapQuote> {
         validateMaxSlippageBps(maxSlippageBps);
-        // In production, call swap router contract
-        const protocolFee = BigIntString.mul(inputAmount, '25'); // 0.25%
+        // In production, call swap router contract.
+        //
+        // Protocol fee: TREASURY_FEE_BPS = 25 bps (0.25%), matching the
+        // reward_distributor contract constant.  The contract computes:
+        //   treasury_fee = pending * 25 / 10_000
+        // so we divide by 10_000 here to stay aligned.
+        const protocolFee = (BigInt(inputAmount) * 25n / 10_000n).toString(); // 0.25% → treasury
 
         return {
             inputToken,

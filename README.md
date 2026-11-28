@@ -296,8 +296,11 @@ await bot.forceHarvest('VAULT_ADDRESS');
 
 ### Surviving Restarts and Outages
 Keepers can checkpoint their position so a restart resumes exactly where the
-previous process stopped — no replay, no gaps. Pass a `CheckpointStore` to the
-event listener, the RPC lag monitor, and/or the auto-rebalancer:
+previous process stopped without gaps when the checkpoint is saved
+successfully. A crash after a handler's external side effect but before the
+checkpoint save can replay that event, so handlers should be idempotent. Pass
+a `CheckpointStore` to the event listener, the RPC lag monitor, and/or the
+auto-rebalancer:
 
 ```typescript
 import { ContractEventListener, FileCheckpointStore } from 'stellar-liquidity-yield-engine-sdk';
@@ -317,6 +320,9 @@ model and `examples/restart-during-outage.ts` for a runnable demonstration:
 ```bash
 npx ts-node examples/restart-during-outage.ts
 ```
+
+For on-call recovery steps, checkpoint inspection, and failure handling, see
+the [indexer checkpoint recovery runbook](docs/INDEXER_CHECKPOINT_RECOVERY.md).
 
 ## 🎛️ React Components
 
@@ -365,6 +371,10 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
   captured storage fixture through a migration ladder and blocks the upgrade on
   gaps, dropped keys, downgrades and non-idempotent work before the wasm ships —
   see [docs/STORAGE_MIGRATION_COMPATIBILITY.md](docs/STORAGE_MIGRATION_COMPATIBILITY.md)
+- **Staged Upgrade Validation**: `planStagedUpgrade()` gates a promotion on
+  installed wasm, simulation, a verified staging copy, approvals and a written
+  rollback plan, and refuses to advance until each stage is complete — see
+  [docs/STAGED_UPGRADE_VALIDATION.md](docs/STAGED_UPGRADE_VALIDATION.md)
 - **Emergency Pause**: Admin can pause all operations
 - **Access Control**: Role-based permissions
 - **Input Validation**: Comprehensive parameter checks
@@ -414,6 +424,23 @@ Real-time monitoring of:
 - **RPC**: `https://soroban.stellar.org`
 - **Horizon**: `https://horizon.stellar.org`
 - **Network Passphrase**: `Public Global Stellar Network ; September 2015`
+
+### Supported Wallet Providers
+
+The SDK and UI interact with user wallets only through the signing interface
+exposed by the connected provider. Permissions are granted per request; the
+SDK never stores private keys.
+
+| Provider | Networks | Permissions Requested | Notes |
+|----------|----------|------------------------|-------|
+| Freighter | Testnet, Mainnet | Read account address, sign transactions | Browser extension; user approves each signature |
+| Albedo | Testnet, Mainnet | Read account address, sign transactions | Web-based signer; no extension required |
+| Keypair (`Keypair` from Stellar SDK) | Testnet, Mainnet | Sign transactions locally | Server-side bots only; the key must be supplied via environment configuration |
+
+Behavior by case:
+- **Normal**: the provider returns a public address and signs requested transactions after user approval.
+- **Boundary**: a wallet on a network different from the configured `STELLAR_NETWORK` is rejected before any transaction is built.
+- **Failure**: if a provider is missing, denies a permission, or returns a malformed signature, the operation fails with an explicit error and no transaction is submitted.
 
 ## 🔧 Configuration
 
@@ -553,10 +580,20 @@ before running step 4 above).
 For reproducible randomized swap path and quote tests, including seed replay
 and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
 
+For model-based `YieldVault` share accounting sequence tests (comparing
+`deposit`, `withdraw`, and `harvest` sequences against a reference state
+machine), run:
+```bash
+cargo test --test vault_share_model_tests
+```
+
 ### Unit Tests
 ```bash
 # Run contract tests (run from the repository root)
 cargo test
+
+# Run token amount boundary tests (zero, minimum, maximum)
+cargo test --test token_amount_boundary_tests
 
 # Run SDK tests
 cd sdk/
@@ -633,6 +670,10 @@ class YieldCalculator {
   static calculateMaxDrawdown(values: number[]): MaxDrawdownData
 }
 ```
+
+## SDK Error and Retry API
+
+For domain error types, retry options, transient-error detection, RPC wrapper behavior, and write-retry safety guidance, see [SDK Error and Retry API Reference](docs/SDK_ERROR_RETRY_API.md).
 
 ## 🤝 Contributing
 

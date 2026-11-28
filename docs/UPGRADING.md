@@ -29,8 +29,36 @@ behind an address changed without the address changing.
 
 `initialize` records `upgrade::STORAGE_VERSION` (`src/upgrade.rs`), so a freshly
 deployed contract starts at the version of the code that deployed it. A
-contract deployed before this existed reads `0`, which is exactly what
-`migrate` is for.
+contract deployed before this existed also reads `0`. Therefore, `0` alone does
+not tell an operator whether a deployment is uninitialized or is an initialized
+legacy deployment; establish deployment history before choosing a migration.
+
+## Supported paths between releases
+
+The crate currently uses storage schema version `1` for the upgrade-managed
+contracts. This number describes stored data, not the package version or wasm
+release. Equal version numbers are necessary but not sufficient for
+compatibility: check the stored shapes and migration behavior of the specific
+contract being upgraded.
+
+| Source storage | Target storage | Supported path |
+| --- | --- | --- |
+| `1` | `1` | In-place upgrade when the new code preserves the existing stored shapes. Do not call `migrate`; a logic-only upgrade needs no schema transaction. |
+| `0` | `1` | In-place only when the target code already understands the source layout. The current migration only records version `1`; it does not convert stored values. |
+| `N` | `M`, where `M > N` | In-place only if the target release implements and tests a forward migration from that specific source layout. If it does not, this path is unsupported; redeploy and move state deliberately instead. |
+| `M` | `N`, where `N < M` | Not supported by default. A downgrade needs an explicitly tested reverse-compatible wasm and reversible data migration. |
+
+`migrate` currently records the target build's `STORAGE_VERSION` and emits
+`contract_migrated`; it does not validate the source version or select a
+version-specific migration. Operators must compare the contract's reported
+version with the target release's documented source-version support before
+calling it. Do not use `migrate` to mark an incompatible layout as compatible.
+
+For each release that changes `STORAGE_VERSION`, its release notes should state
+the source schema versions supported by that contract, the migration performed,
+whether a redeploy is required, and whether rollback remains safe. Until a
+source-to-target path is explicitly documented and tested, treat it as
+unsupported for in-place upgrades.
 
 ## Flow A — in-place upgrade (storage-compatible change)
 
@@ -57,11 +85,22 @@ soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet 
   --admin "$(soroban keys address deployer)" \
   --new_wasm_hash "$NEW_WASM_HASH"
 
-# 4. Confirm the new code is live and, if it bumped the schema version, migrate.
+# 3. Confirm the schema version now stored on the contract.
 soroban contract invoke --id "$CONTRACT_ID" --network testnet -- get_storage_version
+```
+
+Run `migrate` only if the target release documents a migration from the
+reported source version:
+
+```bash
 soroban contract invoke --id "$CONTRACT_ID" --source deployer --network testnet -- \
   migrate --admin "$(soroban keys address deployer)"
 ```
+
+For a `1` to `1` storage-compatible upgrade, stop after checking the version;
+calling `migrate` anyway writes the same version and emits an unnecessary
+`contract_migrated` event. For a `0` to `1` legacy deployment, run it only after
+confirming that the target understands the existing stored layout.
 
 The upgrade is atomic: if the hash was never uploaded, or the admin check
 fails, the call reverts and the old code stays live (covered by
@@ -107,6 +146,18 @@ check_rollback_ready || { echo "Rollback readiness check failed; do not upgrade"
 After a rollback, verify the `contract_upgraded` event carries `OLD_WASM_HASH`
 and that `get_storage_version()` still matches the value recorded above.
 
+### Validating the stages first
+
+A production promotion goes through seven gates: preflight, install, simulate,
+staging on a separate contract, promote, verify and closeout. Build the plan
+from the evidence gathered so far with
+`planStagedUpgrade()` (`sdk/src/stagedUpgrade.ts`) and refuse to submit
+`upgrade` until `plan.canPromote` is true and `plan.nextStage === 'promote'`.
+It blocks a promotion with a missing rollback hash, a schema downgrade, a
+migration whose version does not move, an unverified staging copy, or too few
+approvals — the full procedure is
+[docs/STAGED_UPGRADE_VALIDATION.md](STAGED_UPGRADE_VALIDATION.md).
+
 ### Rolling back
 
 Point `upgrade` at `OLD_WASM_HASH` from the readiness check. The rollback is
@@ -139,6 +190,44 @@ admin key) or when a change cannot be expressed as a migration.
 Budget for step 3 before choosing Flow B — for the vault it means replaying every
 holder's `UserPosition`.
 
+## Staged rollout for new strategy versions
+
+New strategy versions should not go live for every pool at once. The staged
+rollout procedure moves a new version through explicit stages so the keeper and
+governance operators can observe behaviour and halt the rollout at any point.
+
+The rollout is driven by the governance operations surface. Keeper backoff for
+failed canary rebalances follows the `sdk/src/keeperBackoff.ts` helper, so the
+failure threshold below is evaluated against the same retry accounting the keeper
+uses.
+
+1. **Register** the new version with the `StrategyRegistry` as inactive, so it
+   cannot be selected by the engine.
+2. **Canary**: enable the new version for a small, configured subset of pools
+   (the first stage). Keepers only route rebalances to canary pools.
+3. **Expand**: after a monitoring window with no failed rebalances and no
+   adverse yield deviation, widen the rollout to the next set of pools.
+4. **Complete**: enable the version everywhere and retire the previous one.
+
+Boundary behaviour:
+- A rollout stage of 0% or of an empty pool set is rejected; the version stays
+  inactive.
+- Advancing a stage is only allowed when the previous stage is complete; skipping
+  stages is rejected by the governance entrypoint.
+- Setting a rollout to 100% is equivalent to a full enable and is allowed only
+  after the canary stage has been recorded.
+
+Failure behaviour:
+- If the keeper reports failures for the canary pools beyond the configured
+  threshold, the rollout is automatically halted and the previous version is
+  kept active for all pools.
+- A halted rollout can only be resumed or rolled back by the governance admin.
+  Every stage transition emits an event so operators can audit the rollout.
+
+New configuration: the canary pool set and the failure threshold are supplied
+to the governance entrypoint when the rollout is started and should be recorded
+in the operations runbook before the rollout begins.
+
 ## Version policy
 
 `STORAGE_VERSION` in `src/upgrade.rs` describes the **stored layout**, not the
@@ -160,6 +249,54 @@ An example of a change that needs both a bump and migration work: adding
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
 
+## Safe role rotation
+
+Admin and keeper roles are the only keys that can change code (`upgrade`),
+migrate storage (`migrate`), and move funds or configuration. Rotating them is
+an operational step that must not leave a contract without a reachable admin.
+
+### Normal rotation
+
+1. Generate the new key and fund it on the target network.
+2. Use the current admin to rotate the admin role to the new address (the
+   `set_admin`/`transfer_admin` entrypoint on the affected contract). The
+   change takes effect immediately and emits an admin-changed event.
+3. Verify with a read-only call from the new key before retiring the old key.
+4. Rotate keeper roles the same way (`set_keeper` on `RebalanceEngine` and
+   related contracts). Keepers are operationally separated from the admin, so
+   a keeper rotation never requires admin authority to be shared.
+5. Only after both roles are verified on the new keys, revoke the old keys.
+
+### Boundary cases
+
+- **Rotating to the same address** is a no-op and should be treated as a
+  successful but unchanged operation; it must not emit a misleading event.
+- **Rotating to the zero/invalid address** must be rejected. A contract with no
+  admin cannot be upgraded or recovered.
+- **Rotating a keeper while it has in-flight rebalances** is safe: the old
+  keeper's pending calls revert once the role is revoked, and the operator
+  should re-submit them from the new keeper.
+- **Multiple contracts** share an operator key in practice. Rotate them in a
+  fixed order (registry, distributor, vault, engine) and record each contract's
+  new admin before moving on, so a partial rotation is visible.
+
+### Failure behaviour
+
+- If the rotation transaction reverts (wrong caller, bad address), the role
+  stays with the previous holder. Nothing is half-applied; retry from step 2.
+- If the new key is lost before step 5, the old key must still be held. Do not
+  revoke the old key until the new key has demonstrably signed a transaction.
+- If the old key is compromised mid-rotation, prefer `upgrade` to a fixed build
+  that stores the new admin, or re-deploy (Flow B), rather than racing the
+  attacker for the admin entrypoint.
+
+### Tests
+
+Rotation coverage lives alongside the upgrade tests: a rotated admin can call
+`upgrade`/`migrate`, the previous admin cannot, rotating to the same address is
+a no-op, and a failed rotation leaves the existing admin in place. Run
+`cargo test --test upgrade_tests` to exercise these paths.
+
 ## Testing an upgrade
 
 - `tests/upgrade_tests.rs` covers all seven contracts: version recorded at
@@ -179,5 +316,13 @@ migrate the stored `streams` vector rather than decode it as-is.
   on its last live ledger, archived on the next one, and `extend_ttl` moves that
   boundary without losing the value.
 - Run `cargo test --test upgrade_tests`.
+- Cross-release SDK API compatibility is guarded by regression tests that pin the
+  entrypoint surface (`upgrade`, `migrate`, `get_storage_version`) and the
+  `contract_upgraded` / `contract_migrated` event shapes. A new release that
+  renames or removes one of these must update the tests deliberately; a change
+  that breaks an existing deployed integration fails CI instead of slipping
+  through silently. Normal behavior, boundary cases (version `0` from legacy
+  deployments, repeated `migrate` calls) and failure cases (non-admin callers,
+  unknown wasm hashes) are each covered explicitly.
 - The test builds the "replacement" wasm bytes in-process
   (`empty_contract_wasm`), so it needs no build artefact and runs in CI.
