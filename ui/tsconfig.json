@@ -25,9 +25,11 @@
     "src/app/**/*.ts",
     "src/app/**/*.tsx",
     "src/components/Dashboard.tsx",
+    "src/components/TransactionConfirmationDetails.tsx",
     "src/components/TransactionHistory.tsx",
     "src/components/ui/**/*.tsx",
     "src/lib/sampleTransactions.ts",
+    "src/lib/transactionConfirmation.ts",
     "src/lib/transactionFilters.ts",
     ".next/types/**/*.ts"
   ],

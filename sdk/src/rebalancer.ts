@@ -23,8 +23,23 @@ import {
   TransactionSigner,
   RebalanceError,
   NetworkConfig,
+  PauseReason,
+  RebalanceEvent,
 } from "./types";
 import { waitForTransaction } from "./utils/transaction";
+import {
+  addressArg,
+  confirmedReturnValue,
+  i128Arg,
+  simulationReturnValue,
+  structArg,
+  submissionError,
+  symbolArg,
+  toAddress,
+  u32Arg,
+  u64Arg,
+  vecArg,
+} from "./utils/soroban";
 
 export class RebalancerClient extends EventEmitter {
   private contract: Contract;
@@ -68,12 +83,12 @@ export class RebalancerClient extends EventEmitter {
         .addOperation(
           this.contract.call(
             "create_strategy",
-            adminKeyPair.publicKey(),
-            name,
-            riskLevel.toString(),
-            minApyThreshold.toString(),
-            maxIlRisk.toString(),
-            rebalanceFrequency.toString(),
+            addressArg(adminKeyPair.publicKey()),
+            symbolArg(name),
+            u32Arg(riskLevel),
+            u32Arg(minApyThreshold),
+            u32Arg(maxIlRisk),
+            u64Arg(rebalanceFrequency),
             this.formatAllocations(allocations),
           ),
         )
@@ -83,9 +98,9 @@ export class RebalancerClient extends EventEmitter {
       const signedTx = adminKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
 
-      if (result.status === "SUCCESS") {
+      if (result.status !== "ERROR") {
         const txResult = await waitForTransaction(this.server, result.hash);
-        const strategyId = Number(txResult.result!.returnValue);
+        const strategyId = Number(confirmedReturnValue(txResult));
 
         return {
           hash: result.hash,
@@ -98,7 +113,7 @@ export class RebalancerClient extends EventEmitter {
           hash: result.hash,
           success: false,
           gasUsed: 0,
-          error: result.errorResult,
+          error: submissionError(result),
           strategyId: 0,
         };
       }
@@ -134,13 +149,13 @@ export class RebalancerClient extends EventEmitter {
         .addOperation(
           this.contract.call(
             "update_strategy",
-            adminKeyPair.publicKey(),
-            strategyId.toString(),
-            name,
-            riskLevel.toString(),
-            minApyThreshold.toString(),
-            maxIlRisk.toString(),
-            rebalanceFrequency.toString(),
+            addressArg(adminKeyPair.publicKey()),
+            u32Arg(strategyId),
+            symbolArg(name),
+            u32Arg(riskLevel),
+            u32Arg(minApyThreshold),
+            u32Arg(maxIlRisk),
+            u64Arg(rebalanceFrequency),
             this.formatAllocations(allocations),
           ),
         )
@@ -152,9 +167,9 @@ export class RebalancerClient extends EventEmitter {
 
       return {
         hash: result.hash,
-        success: result.status === "SUCCESS",
+        success: result.status !== "ERROR",
         gasUsed: 0,
-        error: result.status === "ERROR" ? result.errorResult : undefined,
+        error: submissionError(result),
       };
     } catch (error: any) {
       throw new RebalanceError(
@@ -184,17 +199,17 @@ export class RebalancerClient extends EventEmitter {
           .addOperation(
             this.contract.call(
               "analyze_rebalance_opportunities",
-              strategyId.toString(),
+              u32Arg(strategyId),
             ),
           )
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to analyze rebalance opportunities");
       }
 
-      return this.parseRebalanceProposals(result.result.returnValue);
+      return this.parseRebalanceProposals(simulationReturnValue(result));
     } catch (error: any) {
       throw new RebalanceError(
         `Analysis failed: ${error.message}`,
@@ -240,8 +255,7 @@ export class RebalancerClient extends EventEmitter {
         .addOperation(
           this.contract.call(
             "execute_rebalance",
-            // Matches the string-argument style used throughout this client.
-            publicKey as any,
+            addressArg(publicKey),
             this.formatRebalanceProposal(proposal),
           ),
         )
@@ -261,9 +275,9 @@ export class RebalancerClient extends EventEmitter {
 
       const result = await this.server.sendTransaction(signedTx);
 
-      if (result.status === "SUCCESS") {
+      if (result.status !== "ERROR") {
         const txResult = await waitForTransaction(this.server, result.hash);
-        const executed = Boolean(txResult.result!.returnValue);
+        const executed = Boolean(confirmedReturnValue(txResult));
 
         return {
           hash: result.hash,
@@ -276,7 +290,7 @@ export class RebalancerClient extends EventEmitter {
           hash: result.hash,
           success: false,
           gasUsed: 0,
-          error: result.errorResult,
+          error: submissionError(result),
           executed: false,
         };
       }
@@ -307,11 +321,11 @@ export class RebalancerClient extends EventEmitter {
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get strategies");
       }
 
-      return this.parseStrategies(result.result.returnValue);
+      return this.parseStrategies(simulationReturnValue(result));
     } catch (error: any) {
       throw new RebalanceError(
         `Failed to get strategies: ${error.message}`,
@@ -336,16 +350,16 @@ export class RebalancerClient extends EventEmitter {
           },
         )
           .addOperation(
-            this.contract.call("get_strategy", strategyId.toString()),
+            this.contract.call("get_strategy", u32Arg(strategyId)),
           )
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get strategy");
       }
 
-      return this.parseStrategy(result.result.returnValue);
+      return this.parseStrategy(simulationReturnValue(result));
     } catch (error: any) {
       throw new RebalanceError(
         `Failed to get strategy: ${error.message}`,
@@ -369,16 +383,16 @@ export class RebalancerClient extends EventEmitter {
             networkPassphrase: this.getNetworkPassphrase(),
           },
         )
-          .addOperation(this.contract.call("get_history", limit.toString()))
+          .addOperation(            this.contract.call("get_history", u32Arg(limit)))
           .setTimeout(30)
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get history");
       }
 
-      return this.parseHistory(result.result.returnValue);
+      return this.parseHistory(simulationReturnValue(result));
     } catch (error: any) {
       throw new RebalanceError(
         `Failed to get history: ${error.message}`,
@@ -421,11 +435,11 @@ export class RebalancerClient extends EventEmitter {
           .build(),
       );
 
-      if (result.result?.status !== 'SUCCESS') {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error('Failed to get history page');
       }
 
-      return this.parseHistory(result.result.returnValue);
+      return this.parseHistory(simulationReturnValue(result));
     } catch (error: any) {
       if (error instanceof RebalanceError && error.code === 'INVALID_PAGINATION') throw error;
       throw new RebalanceError(
@@ -453,11 +467,11 @@ export class RebalancerClient extends EventEmitter {
           .build(),
       );
 
-      if (result.result?.status !== 'SUCCESS') {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error('Failed to get history count');
       }
 
-      const count = Number(scValToNative(result.result.returnValue));
+      const count = Number(scValToNative(simulationReturnValue(result)));
       if (!Number.isSafeInteger(count) || count < 0) {
         throw new Error('Contract returned an invalid history count');
       }
@@ -488,52 +502,22 @@ export class RebalancerClient extends EventEmitter {
           .addOperation(
             this.contract.call(
               "get_current_allocations",
-              strategyId.toString(),
+              u32Arg(strategyId),
             ),
           )
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get current allocations");
       }
 
-      return this.parseAllocations(result.result.returnValue);
+      return this.parseAllocations(simulationReturnValue(result));
     } catch (error: any) {
       throw new RebalanceError(
         `Failed to get allocations: ${error.message}`,
         "GET_ALLOCATIONS_ERROR",
       );
-    }
-  }
-
-  /**
-   * Check if a pool's APY observation is still fresh (within the configured maximum age).
-   *
-   * Returns true when the pool has an observation that is still within the
-   * configured maximum age, false otherwise.
-   */
-  async isApyFresh(poolId: Address): Promise<boolean> {
-    try {
-      const result = await this.server.simulateTransaction(
-        new TransactionBuilder(
-          await this.server.getAccount('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
-          {
-            fee: BASE_FEE,
-            networkPassphrase: this.getNetworkPassphrase()
-          }
-        )
-          .addOperation(this.contract.call('is_apy_fresh', poolId.toString()))
-          .build()
-      );
-
-      if (result.result?.status !== 'SUCCESS') {
-        throw new Error('Failed to check APY freshness');
-      }
-
-      return Boolean(scValToNative(result.result.returnValue));
-    } catch (error: any) {
-      throw new RebalanceError(`Freshness check failed: ${error.message}`, 'FRESHNESS_CHECK_ERROR');
     }
   }
 
@@ -559,19 +543,19 @@ export class RebalancerClient extends EventEmitter {
           .addOperation(
             this.contract.call(
               "calculate_impermanent_loss",
-              poolId,
-              priceRatio.toString(),
-              initialPriceRatio.toString(),
+              addressArg(poolId),
+              i128Arg(priceRatio),
+              i128Arg(initialPriceRatio),
             ),
           )
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to calculate impermanent loss");
       }
 
-      return Number(result.result.returnValue);
+      return Number(simulationReturnValue(result));
     } catch (error: any) {
       throw new RebalanceError(
         `IL calculation failed: ${error.message}`,
@@ -639,6 +623,8 @@ export class RebalancerClient extends EventEmitter {
   async pause(
     adminKeyPair: any,
     options?: TransactionOptions,
+    reason?: PauseReason,
+    reasonDetails?: string,
   ): Promise<TransactionResult> {
     try {
       const account = await this.server.getAccount(adminKeyPair.publicKey());
@@ -647,18 +633,20 @@ export class RebalancerClient extends EventEmitter {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
         networkPassphrase: this.getNetworkPassphrase(),
       })
-        .addOperation(this.contract.call("pause", adminKeyPair.publicKey()))
+        .addOperation(
+          this.contract.call("pause", addressArg(adminKeyPair.publicKey())),
+        )
         .setTimeout(options?.timeout || 30)
         .build();
 
       const signedTx = adminKeyPair.sign(tx);
       const result = await this.server.sendTransaction(signedTx);
 
-      return {
+      const transactionResult: TransactionResult = {
         hash: result.hash,
-        success: result.status === "SUCCESS",
+        success: result.status !== "ERROR",
         gasUsed: 0,
-        error: result.status === "ERROR" ? result.errorResult : undefined,
+        error: submissionError(result),
       };
 
       // Emit pause event with reason if successful
@@ -686,7 +674,9 @@ export class RebalancerClient extends EventEmitter {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
         networkPassphrase: this.getNetworkPassphrase(),
       })
-        .addOperation(this.contract.call("unpause", adminKeyPair.publicKey()))
+        .addOperation(
+          this.contract.call("unpause", addressArg(adminKeyPair.publicKey())),
+        )
         .setTimeout(options?.timeout || 30)
         .build();
 
@@ -695,9 +685,9 @@ export class RebalancerClient extends EventEmitter {
 
       return {
         hash: result.hash,
-        success: result.status === "SUCCESS",
+        success: result.status !== "ERROR",
         gasUsed: 0,
-        error: result.status === "ERROR" ? result.errorResult : undefined,
+        error: submissionError(result),
       };
     } catch (error: any) {
       throw new RebalanceError(
@@ -720,7 +710,13 @@ export class RebalancerClient extends EventEmitter {
         fee: options?.gasLimit ? `${options.gasLimit}` : BASE_FEE,
         networkPassphrase: this.getNetworkPassphrase(),
       })
-        .addOperation(this.contract.call("set_apy_keepers", publicKey, keepers))
+        .addOperation(
+          this.contract.call(
+            "set_apy_keepers",
+            addressArg(publicKey),
+            vecArg(keepers.map((keeper) => addressArg(keeper))),
+          ),
+        )
         .setTimeout(options?.timeout || 30)
         .build();
 
@@ -729,9 +725,9 @@ export class RebalancerClient extends EventEmitter {
 
       return {
         hash: result.hash,
-        success: result.status === "SUCCESS",
+        success: result.status !== "ERROR",
         gasUsed: 0,
-        error: result.status === "ERROR" ? result.errorResult : undefined,
+        error: submissionError(result),
       };
     } catch (error: any) {
       throw new RebalanceError(
@@ -757,11 +753,11 @@ export class RebalancerClient extends EventEmitter {
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get APY keepers");
       }
 
-      const data = scValToNative(result.result.returnValue) as string[];
+      const data = scValToNative(simulationReturnValue(result)) as string[];
       return Array.isArray(data) ? data : [];
     } catch (error: any) {
       throw new RebalanceError(
@@ -787,9 +783,9 @@ export class RebalancerClient extends EventEmitter {
         .addOperation(
           this.contract.call(
             "update_pool_apy",
-            publicKey,
-            poolId.toString(),
-            apyBps.toString(),
+            addressArg(publicKey),
+            addressArg(poolId),
+            u32Arg(apyBps),
           ),
         )
         .setTimeout(options?.timeout || 30)
@@ -800,9 +796,9 @@ export class RebalancerClient extends EventEmitter {
 
       return {
         hash: result.hash,
-        success: result.status === "SUCCESS",
+        success: result.status !== "ERROR",
         gasUsed: 0,
-        error: result.status === "ERROR" ? result.errorResult : undefined,
+        error: submissionError(result),
       };
     } catch (error: any) {
       throw new RebalanceError(
@@ -825,16 +821,16 @@ export class RebalancerClient extends EventEmitter {
           },
         )
           .addOperation(
-            this.contract.call("get_pool_current_apy", poolId.toString()),
+            this.contract.call("get_pool_current_apy", addressArg(poolId)),
           )
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get pool APY");
       }
 
-      return Number(scValToNative(result.result.returnValue));
+      return Number(scValToNative(simulationReturnValue(result)));
     } catch (error: any) {
       throw new RebalanceError(
         `Failed to get pool APY: ${error.message}`,
@@ -858,16 +854,16 @@ export class RebalancerClient extends EventEmitter {
           },
         )
           .addOperation(
-            this.contract.call("get_pool_apy_record", poolId.toString()),
+            this.contract.call("get_pool_apy_record", addressArg(poolId)),
           )
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get pool APY record");
       }
 
-      const record = scValToNative(result.result.returnValue) as any;
+      const record = scValToNative(simulationReturnValue(result)) as any;
       if (!record) {
         return null;
       }
@@ -898,7 +894,7 @@ export class RebalancerClient extends EventEmitter {
         networkPassphrase: this.getNetworkPassphrase(),
       })
         .addOperation(
-          this.contract.call("set_max_apy_age", publicKey, maxAge.toString()),
+          this.contract.call("set_max_apy_age", addressArg(publicKey), u64Arg(maxAge)),
         )
         .setTimeout(options?.timeout || 30)
         .build();
@@ -908,17 +904,10 @@ export class RebalancerClient extends EventEmitter {
 
       return {
         hash: result.hash,
-        success: result.status === "SUCCESS",
+        success: result.status !== "ERROR",
         gasUsed: 0,
-        error: result.status === "ERROR" ? result.errorResult : undefined,
+        error: submissionError(result),
       };
-
-      // Emit unpause event if successful
-      if (transactionResult.success) {
-        this.emitUnpauseEvent();
-      }
-
-      return transactionResult;
     } catch (error: any) {
       throw new RebalanceError(
         `Set max APY age failed: ${error.message}`,
@@ -943,11 +932,11 @@ export class RebalancerClient extends EventEmitter {
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to get max APY age");
       }
 
-      return Number(scValToNative(result.result.returnValue));
+      return Number(scValToNative(simulationReturnValue(result)));
     } catch (error: any) {
       throw new RebalanceError(
         `Failed to get max APY age: ${error.message}`,
@@ -968,19 +957,20 @@ export class RebalancerClient extends EventEmitter {
             networkPassphrase: this.getNetworkPassphrase(),
           },
         )
-          .addOperation(this.contract.call("is_apy_fresh", poolId.toString()))
+          .addOperation(this.contract.call("is_apy_fresh", addressArg(poolId)))
+          .setTimeout(30)
           .build(),
       );
 
-      if (result.result?.status !== "SUCCESS") {
+      if (SorobanRpc.Api.isSimulationError(result)) {
         throw new Error("Failed to check APY freshness");
       }
 
-      return Boolean(scValToNative(result.result.returnValue));
+      return Boolean(scValToNative(simulationReturnValue(result)));
     } catch (error: any) {
       throw new RebalanceError(
-        `Failed to check APY freshness: ${error.message}`,
-        "IS_APY_FRESH_ERROR",
+        `Freshness check failed: ${error.message}`,
+        "FRESHNESS_CHECK_ERROR",
       );
     }
   }
@@ -1053,32 +1043,37 @@ export class RebalancerClient extends EventEmitter {
       );
     }
 
-    (signer as Keypair).sign(tx);
+    tx.sign(signer as Keypair);
     return tx;
   }
 
-  private formatAllocations(allocations: PoolAllocation[]): any {
-    return allocations.map((alloc) => ({
-      pool_id: alloc.poolId.toString(),
-      token_a: alloc.tokenA.toString(),
-      token_b: alloc.tokenB.toString(),
-      allocation_percent: alloc.allocationPercent.toString(),
-      target_apy: alloc.targetApy.toString(),
-      current_apy: alloc.currentApy.toString(),
-      impermanent_loss_risk: alloc.impermanentLossRisk.toString(),
-    }));
+  private formatAllocations(allocations: PoolAllocation[]): xdr.ScVal {
+    return vecArg(
+      allocations.map((alloc) =>
+        structArg([
+          ["pool_id", addressArg(alloc.poolId)],
+          ["token_a", addressArg(alloc.tokenA)],
+          ["token_b", addressArg(alloc.tokenB)],
+          ["allocation_percent", u32Arg(alloc.allocationPercent)],
+          ["target_apy", u32Arg(alloc.targetApy)],
+          ["current_apy", u32Arg(alloc.currentApy)],
+          ["impermanent_loss_risk", u32Arg(alloc.impermanentLossRisk)],
+        ]),
+      ),
+    );
   }
 
-  private formatRebalanceProposal(proposal: RebalanceProposal): any {
-    return {
-      from_pool: proposal.fromPool.toString(),
-      to_pool: proposal.toPool.toString(),
-      amount_a: proposal.amountA.toString(),
-      amount_b: proposal.amountB.toString(),
-      expected_apy_improvement: proposal.expectedApyImprovement.toString(),
-      estimated_gas_cost: proposal.estimatedGasCost.toString(),
-      timestamp: proposal.timestamp.toString(),
-    };
+  private formatRebalanceProposal(proposal: RebalanceProposal): xdr.ScVal {
+    return structArg([
+      ["from_pool", addressArg(proposal.fromPool)],
+      ["to_pool", addressArg(proposal.toPool)],
+      ["amount_a", i128Arg(proposal.amountA)],
+      ["amount_b", i128Arg(proposal.amountB)],
+      ["expected_apy_improvement", u32Arg(proposal.expectedApyImprovement)],
+      ["estimated_gas_cost", i128Arg(proposal.estimatedGasCost)],
+      ["timestamp", u64Arg(proposal.timestamp)],
+      ["post_rebalance_il_bps", u32Arg(proposal.postRebalanceIlBps)],
+    ]);
   }
 
   /**
@@ -1099,6 +1094,7 @@ export class RebalancerClient extends EventEmitter {
       expectedApyImprovement: Number(item.expected_apy_improvement),
       estimatedGasCost: BigInt(item.estimated_gas_cost),
       timestamp: Number(item.timestamp),
+      postRebalanceIlBps: Number(item.post_rebalance_il_bps),
     }));
   }
 

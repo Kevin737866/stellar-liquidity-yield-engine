@@ -33,6 +33,7 @@
 import { SorobanRpc } from 'stellar-sdk';
 import {
   ContractEventListener,
+  type EventSource,
   type ListenerConfig,
   type FilteredVaultEvent,
   type FilteredRebalanceEvent,
@@ -101,7 +102,10 @@ async function main(): Promise<void> {
     pageSize: 200,
   };
 
-  const listener = new ContractEventListener(server, config);
+  const listener = new ContractEventListener(
+    server as unknown as EventSource,
+    config,
+  );
 
   // -------------------------------------------------------------------------
   // Register typed event handlers

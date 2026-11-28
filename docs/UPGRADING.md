@@ -206,6 +206,18 @@ check_rollback_ready || { echo "Rollback readiness check failed; do not upgrade"
 After a rollback, verify the `contract_upgraded` event carries `OLD_WASM_HASH`
 and that `get_storage_version()` still matches the value recorded above.
 
+### Validating the stages first
+
+A production promotion goes through seven gates: preflight, install, simulate,
+staging on a separate contract, promote, verify and closeout. Build the plan
+from the evidence gathered so far with
+`planStagedUpgrade()` (`sdk/src/stagedUpgrade.ts`) and refuse to submit
+`upgrade` until `plan.canPromote` is true and `plan.nextStage === 'promote'`.
+It blocks a promotion with a missing rollback hash, a schema downgrade, a
+migration whose version does not move, an unverified staging copy, or too few
+approvals — the full procedure is
+[docs/STAGED_UPGRADE_VALIDATION.md](STAGED_UPGRADE_VALIDATION.md).
+
 ### Rolling back
 
 Point `upgrade` at `OLD_WASM_HASH` from the readiness check. The rollback is
@@ -238,6 +250,44 @@ admin key) or when a change cannot be expressed as a migration.
 Budget for step 3 before choosing Flow B — for the vault it means replaying every
 holder's `UserPosition`.
 
+## Staged rollout for new strategy versions
+
+New strategy versions should not go live for every pool at once. The staged
+rollout procedure moves a new version through explicit stages so the keeper and
+governance operators can observe behaviour and halt the rollout at any point.
+
+The rollout is driven by the governance operations surface. Keeper backoff for
+failed canary rebalances follows the `sdk/src/keeperBackoff.ts` helper, so the
+failure threshold below is evaluated against the same retry accounting the keeper
+uses.
+
+1. **Register** the new version with the `StrategyRegistry` as inactive, so it
+   cannot be selected by the engine.
+2. **Canary**: enable the new version for a small, configured subset of pools
+   (the first stage). Keepers only route rebalances to canary pools.
+3. **Expand**: after a monitoring window with no failed rebalances and no
+   adverse yield deviation, widen the rollout to the next set of pools.
+4. **Complete**: enable the version everywhere and retire the previous one.
+
+Boundary behaviour:
+- A rollout stage of 0% or of an empty pool set is rejected; the version stays
+  inactive.
+- Advancing a stage is only allowed when the previous stage is complete; skipping
+  stages is rejected by the governance entrypoint.
+- Setting a rollout to 100% is equivalent to a full enable and is allowed only
+  after the canary stage has been recorded.
+
+Failure behaviour:
+- If the keeper reports failures for the canary pools beyond the configured
+  threshold, the rollout is automatically halted and the previous version is
+  kept active for all pools.
+- A halted rollout can only be resumed or rolled back by the governance admin.
+  Every stage transition emits an event so operators can audit the rollout.
+
+New configuration: the canary pool set and the failure threshold are supplied
+to the governance entrypoint when the rollout is started and should be recorded
+in the operations runbook before the rollout begins.
+
 ## Version policy
 
 `STORAGE_VERSION` in `src/upgrade.rs` describes the **stored layout**, not the
@@ -254,10 +304,63 @@ contract's features.
   code's version, so a post-mortem can tell which build ran against which
   storage.
 
+A configuration change that also alters a stored shape is a migration: follow
+[docs/CONFIG_MIGRATION_CHECKLIST.md](CONFIG_MIGRATION_CHECKLIST.md) for the
+scope classification, bounds, snapshot/rollback and keeper-restart checklists,
+and bump `STORAGE_VERSION` here in the same change.
+
 An example of a change that needs both a bump and migration work: adding
 `RewardStream::claim_deadline` ([#121](https://github.com/Kevin737866/stellar-liquidity-yield-engine/issues/121))
 changes the encoding of the stored stream list, so a build containing it must
 migrate the stored `streams` vector rather than decode it as-is.
+
+## Safe role rotation
+
+Admin and keeper roles are the only keys that can change code (`upgrade`),
+migrate storage (`migrate`), and move funds or configuration. Rotating them is
+an operational step that must not leave a contract without a reachable admin.
+
+### Normal rotation
+
+1. Generate the new key and fund it on the target network.
+2. Use the current admin to rotate the admin role to the new address (the
+   `set_admin`/`transfer_admin` entrypoint on the affected contract). The
+   change takes effect immediately and emits an admin-changed event.
+3. Verify with a read-only call from the new key before retiring the old key.
+4. Rotate keeper roles the same way (`set_keeper` on `RebalanceEngine` and
+   related contracts). Keepers are operationally separated from the admin, so
+   a keeper rotation never requires admin authority to be shared.
+5. Only after both roles are verified on the new keys, revoke the old keys.
+
+### Boundary cases
+
+- **Rotating to the same address** is a no-op and should be treated as a
+  successful but unchanged operation; it must not emit a misleading event.
+- **Rotating to the zero/invalid address** must be rejected. A contract with no
+  admin cannot be upgraded or recovered.
+- **Rotating a keeper while it has in-flight rebalances** is safe: the old
+  keeper's pending calls revert once the role is revoked, and the operator
+  should re-submit them from the new keeper.
+- **Multiple contracts** share an operator key in practice. Rotate them in a
+  fixed order (registry, distributor, vault, engine) and record each contract's
+  new admin before moving on, so a partial rotation is visible.
+
+### Failure behaviour
+
+- If the rotation transaction reverts (wrong caller, bad address), the role
+  stays with the previous holder. Nothing is half-applied; retry from step 2.
+- If the new key is lost before step 5, the old key must still be held. Do not
+  revoke the old key until the new key has demonstrably signed a transaction.
+- If the old key is compromised mid-rotation, prefer `upgrade` to a fixed build
+  that stores the new admin, or re-deploy (Flow B), rather than racing the
+  attacker for the admin entrypoint.
+
+### Tests
+
+Rotation coverage lives alongside the upgrade tests: a rotated admin can call
+`upgrade`/`migrate`, the previous admin cannot, rotating to the same address is
+a no-op, and a failed rotation leaves the existing admin in place. Run
+`cargo test --test upgrade_tests` to exercise these paths.
 
 ## Testing an upgrade
 
@@ -266,6 +369,13 @@ migrate the stored `streams` vector rather than decode it as-is.
   admin entrypoints, rejection of an unknown wasm hash, and a real code swap
   through the host deployer (the contract's entrypoints stop existing, while the
   address and storage survive).
+- A stored-layout change is also tested against captured state: run a
+  `get_storage_version` fixture through the build's migration ladder with
+  `checkMigrationCompatibility()` / `assertMigrationCompatible()`
+  (`npx jest sdk/src/storageMigrationCompat.test.ts`). It blocks the upgrade on
+  ladder gaps, downgrades, dropped keys and non-idempotent migration work before
+  any wasm is installed — see
+  [docs/STORAGE_MIGRATION_COMPATIBILITY.md](STORAGE_MIGRATION_COMPATIBILITY.md).
 - The same file also covers rollback readiness (an uninstalled rollback hash is
   rejected) and persistent-storage expiration boundaries: an entry is readable
   on its last live ledger, archived on the next one, and `extend_ttl` moves that

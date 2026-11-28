@@ -84,16 +84,7 @@ export {
   DEFAULT_CRITICAL_LEDGERS,
   LEDGER_CLOSE_TIME_SECONDS,
 } from './rpcSync';
-export type { RpcLagReport, RpcLagOptions, RpcLagThresholds, LagSeverity, LedgerHeadSource, RpcLagMonitorOptions } from './rpcSync';
-
-// Keeper health metrics for ops monitoring.
-export { KeeperMetrics, KEEPER_METRICS_PREFIX, } from './keeperMetrics';
-export type {
-  KeeperMetricsSnapshot,
-  KeeperMetricsOptions,
-  MetricSample,
-  MetricType,
-} from './keeperMetrics';
+export type { RpcLagReport, RpcLagOptions, RpcLagThresholds, LagSeverity, LedgerHeadSource } from './rpcSync';
 
 // Address-filtered contract event listener for off-chain keepers.
 // Operators running multiple contracts can restrict a single listener to only
@@ -140,6 +131,26 @@ export {
 } from './persistence';
 export type { CheckpointStore, KeeperCheckpoint } from './persistence';
 
+// Compatibility checks for contract storage migrations: run a captured storage
+// fixture through a migration ladder before shipping the wasm. The operator
+// procedure is docs/STORAGE_MIGRATION_COMPATIBILITY.md.
+export {
+  MigrationCompatibilityError,
+  assertMigrationCompatible,
+  checkMigrationCompatibility,
+  formatMigrationCompatibilityReport,
+  validateMigrationLadder,
+} from './storageMigrationCompat';
+export type {
+  MigrationCompatibilityIssue,
+  MigrationCompatibilityOptions,
+  MigrationCompatibilityResult,
+  MigrationIssueCode,
+  MigrationStep,
+  StorageFixture,
+  StoredEntry,
+} from './storageMigrationCompat';
+
 // TEMP-VERIFY-DISABLED (pre-existing syntax error unrelated to this change, restored after check): export { AutoRebalancer, runScheduledRebalancer } from './bots/autoRebalancer';
 
 // Governance SDK exports
@@ -170,6 +181,69 @@ export {
   getTimeUntilExpiry,
   GOVERNANCE_CONSTANTS
 } from './governance';
+
+// Migration checklist for protocol configuration changes. The operator
+// procedure is docs/CONFIG_MIGRATION_CHECKLIST.md.
+export {
+  PROTOCOL_CONFIG_BOUNDS,
+  buildConfigMigrationChecklist,
+  validateProtocolConfig,
+} from './configMigration';
+export type {
+  ConfigBound,
+  ConfigChangeScope,
+  ConfigMigrationChecklist,
+  ConfigValueChange,
+  ProtocolConfig,
+  ProtocolConfigChangeRequest,
+  ProtocolConfigField,
+} from './configMigration';
+
+// Required contract IDs are read from the environment rather than hardcoded,
+// since a hardcoded placeholder address is not a usable/deployed contract.
+// Set these to the real contract IDs from your deployment before using a
+// network config - see the README / examples for the full variable list.
+function requiredEnvContract(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `Missing required environment variable ${name}: set it to a real deployed contract ID before using this network config.`
+    );
+  }
+  return value;
+}
+
+function contractsFromEnv() {
+  return {
+    get yieldEngine() { return requiredEnvContract('YIELD_ENGINE_CONTRACT_ID'); },
+    get rewardDistributor() { return requiredEnvContract('REWARD_DISTRIBUTOR_CONTRACT_ID'); },
+    get rebalanceEngine() { return requiredEnvContract('REBALANCE_ENGINE_CONTRACT_ID'); },
+    get strategyRegistry() { return requiredEnvContract('STRATEGY_REGISTRY_CONTRACT_ID'); },
+    get governanceToken() { return requiredEnvContract('GOVERNANCE_TOKEN_CONTRACT_ID'); },
+    get votingEscrow() { return requiredEnvContract('VOTING_ESCROW_CONTRACT_ID'); },
+    get stakingContract() { return requiredEnvContract('STAKING_CONTRACT_ID'); },
+    get feeDistributor() { return requiredEnvContract('FEE_DISTRIBUTOR_CONTRACT_ID'); }
+  };
+}
+
+// Network configurations
+//
+// Public endpoints are only defaults: every one of them can be pointed at a
+// custom RPC via the environment, which is what `Soroban_RPC_URL` /
+// `HORIZON_URL` in `.env.example` are for. See `.emdfile` for the convention.
+export const TESTNET_CONFIG = {
+  network: 'testnet' as const,
+  horizonUrl: process.env.HORIZON_URL || 'https://horizon-testnet.stellar.org',
+  sorobanRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-testnet.stellar.org',
+  contracts: contractsFromEnv()
+};
+
+export const MAINNET_CONFIG = {
+  network: 'mainnet' as const,
+  horizonUrl: process.env.MAINNET_HORIZON_URL || 'https://horizon.stellar.org',
+  sorobanRpcUrl: process.env.MAINNET_SOROBAN_RPC_URL || 'https://soroban.stellar.org',
+  contracts: contractsFromEnv()
+};
 
 // Utility functions
 export function createVaultClient(
@@ -252,3 +326,22 @@ export {
   isContractEvent,
 } from './eventOrigin';
 export type { EventOrigin, LedgerEvent } from './eventOrigin';
+
+// Staged validation for contract upgrades: seven gates from preflight to
+// closeout, so promotion is refused until the wasm is installed, simulated,
+// exercised on a separate contract and approved. The operator procedure is
+// docs/STAGED_UPGRADE_VALIDATION.md.
+export {
+  StagedUpgradeValidationError,
+  WASM_HASH_PATTERN,
+  assertStagedUpgradeReady,
+  formatStagedUpgradePlan,
+  planStagedUpgrade,
+} from './stagedUpgrade';
+export type {
+  StagedUpgradeEvidence,
+  StagedUpgradePlan,
+  StagedUpgradeStage,
+  StagedUpgradeStageId,
+  StagedUpgradeStageStatus,
+} from './stagedUpgrade';

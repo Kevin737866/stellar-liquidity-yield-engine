@@ -9,7 +9,7 @@ describe('Pause Event Emission', () => {
     let mockVaultAddress: Address;
 
     beforeEach(() => {
-      mockVaultAddress = new Address('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
+      mockVaultAddress = new Address('CABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAFNSZ');
       mockNetworkConfig = {
         network: 'testnet' as const,
         horizonUrl: 'https://horizon-testnet.stellar.org',
@@ -32,7 +32,7 @@ describe('Pause Event Emission', () => {
         expect(event.type).toBe('pause');
         expect(event.reason).toBe(reason);
         expect(event.reasonDetails).toBe(reasonDetails);
-        expect(event.vault).toBe(mockVaultAddress.toString());
+        expect(event.vault.toString()).toBe(mockVaultAddress.toString());
         expect(event.timestamp).toBeGreaterThan(0);
         done();
       });
@@ -155,7 +155,7 @@ describe('Pause Event Emission', () => {
     it('should emit unpause event', (done) => {
       vaultClient.on('unpause', (event: VaultEvent) => {
         expect(event.type).toBe('unpause');
-        expect(event.vault).toBe(mockVaultAddress.toString());
+        expect(event.vault.toString()).toBe(mockVaultAddress.toString());
         expect(event.timestamp).toBeGreaterThan(0);
         expect(event.reason).toBeUndefined();
         done();
@@ -198,7 +198,7 @@ describe('Pause Event Emission', () => {
         contracts: {
           yieldEngine: '',
           rewardDistributor: '',
-          rebalanceEngine: 'CBALANCE',
+          rebalanceEngine: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
           strategyRegistry: ''
         }
       };

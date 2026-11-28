@@ -69,6 +69,8 @@ export interface RebalanceProposal {
   expectedApyImprovement: number; // Basis points
   estimatedGasCost: bigint;
   timestamp: number;
+  // Projected IL exposure of the strategy after the move, in basis points.
+  postRebalanceIlBps: number;
 }
 
 export interface RebalanceHistory {
@@ -460,6 +462,53 @@ export interface HarvestEfficiencyMetrics {
  * Pause reason categories for vault and rebalance engine pause events.
  * These help monitors and dashboards understand why a system was paused.
  */
+/**
+ * Pause reason categories for vault and rebalance engine pause events.
+ * These help monitors and dashboards understand why a system was paused.
+ */
 export type PauseReason =
   | 'security' // Security concern detected (exploit, suspicious activity)
-  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large
+  | 'circuit_breaker' // Circuit breaker triggered (high volatility, large slippage)
+  | 'slippage_protection' // Price deviation exceeded threshold
+  | 'maintenance' // Scheduled maintenance or upgrade
+  | 'governance' // Governance decision or protocol vote
+  | 'liquidity_issue' // Insufficient liquidity in pool
+  | 'emergency' // Emergency situation requiring immediate pause
+  | 'manual'; // Manual administrative pause
+
+// Event Types
+export interface VaultEvent {
+  type: "deposit" | "withdraw" | "harvest" | "pause" | "unpause";
+  vault: Address;
+  user?: Address;
+  amount?: bigint;
+  timestamp: number;
+  data?: any;
+  /** Reason for pause/unpause events */
+  reason?: PauseReason;
+  /** Additional context about the pause reason */
+  reasonDetails?: string;
+}
+
+export interface RebalanceEvent {
+  type: "proposal" | "execution" | "failure" | "pause" | "unpause";
+  strategy: number;
+  fromPool?: Address;
+  toPool?: Address;
+  amount?: bigint;
+  timestamp: number;
+  data?: any;
+  /** Reason for pause/unpause events */
+  reason?: PauseReason;
+  /** Additional context about the pause reason */
+  reasonDetails?: string;
+}
+
+export interface RewardEvent {
+  type: "distribution" | "claim" | "expiry";
+  vault: Address;
+  user?: Address;
+  amount?: bigint;
+  timestamp: number;
+  data?: any;
+}

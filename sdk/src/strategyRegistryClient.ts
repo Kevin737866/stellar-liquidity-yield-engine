@@ -13,6 +13,7 @@
  */
 
 import {
+  Address,
   Contract,
   SorobanRpc,
   TransactionBuilder,
@@ -20,7 +21,13 @@ import {
   BASE_FEE,
   scValToNative,
 } from 'stellar-sdk';
+import { simulationReturnValue } from './utils/soroban';
 import { NetworkConfig, YieldStrategy, StrategyError } from './types';
+
+/** Valid address used by the built-in fallback strategies. */
+const DEFAULT_CREATOR = Address.fromString(
+  'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
+);
 
 export class StrategyRegistryClient {
   private server: SorobanRpc.Server;
@@ -67,14 +74,8 @@ export class StrategyRegistryClient {
           .build()
       );
 
-      if (
-        simResult.result &&
-        (simResult.result as any).status === 'SUCCESS' &&
-        (simResult.result as any).returnValue
-      ) {
-        const raw = scValToNative(
-          (simResult.result as any).returnValue
-        ) as any[];
+      if (!SorobanRpc.Api.isSimulationError(simResult)) {
+        const raw = scValToNative(simulationReturnValue(simResult)) as any[];
 
         const strategies: YieldStrategy[] = raw
           .slice(0, limit)
@@ -161,7 +162,7 @@ export class StrategyRegistryClient {
         name: 'Conservative Growth',
         description:
           'Low-risk strategy focusing on stable pairs with minimal impermanent loss',
-        creator: 'GADMIN123456789',
+        creator: DEFAULT_CREATOR,
         riskLevel: 1,
         minInvestment: 1_000_000n, // 1 000 USD (6 dp)
         maxInvestment: 100_000_000n, // 100 000 USD
@@ -203,7 +204,7 @@ export class StrategyRegistryClient {
         name: 'Balanced Portfolio',
         description:
           'Medium-risk strategy with diversified exposure across multiple pools',
-        creator: 'GADMIN123456789',
+        creator: DEFAULT_CREATOR,
         riskLevel: 2,
         minInvestment: 500_000n,
         maxInvestment: 500_000_000n,
@@ -245,7 +246,7 @@ export class StrategyRegistryClient {
         name: 'Aggressive Yield',
         description:
           'High-risk strategy targeting maximum yields through volatile asset pairs',
-        creator: 'GADMIN123456789',
+        creator: DEFAULT_CREATOR,
         riskLevel: 3,
         minInvestment: 100_000n,
         maxInvestment: 1_000_000_000n,

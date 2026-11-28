@@ -35,7 +35,7 @@ async function exampleBasicRetry() {
     });
 
     console.log(`Success after ${attempts} attempts:`, result);
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed after all retries:', error);
   }
 }
@@ -70,7 +70,7 @@ async function exampleCustomBackoff() {
     });
 
     console.log(`Success after ${attempts} attempts:`, result);
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed:', error);
   }
 }
@@ -96,7 +96,7 @@ async function exampleNonTransientError() {
         console.log(`  Retrying...`);
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.log(`Failed immediately without retries (expected): ${error.message}`);
     console.log(`Total attempts: ${attemptCount}`);
   }
@@ -128,7 +128,7 @@ async function exampleRetryRpcServer() {
   try {
     const account = await retryServer.getAccount('G...');
     console.log('Account fetched:', account.id);
-  } catch (error) {
+  } catch (error: any) {
     console.error('Failed to fetch account:', error);
   }
   */
@@ -157,7 +157,7 @@ async function exampleExhaustedRetries() {
         console.log(`  Retrying...`);
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.log(`Failed after exhausting retries (expected): ${error.message}`);
     console.log(`Total attempts: ${attemptCount} (1 initial + 2 retries)`);
   }

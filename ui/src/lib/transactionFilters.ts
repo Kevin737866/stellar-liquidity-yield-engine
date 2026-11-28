@@ -17,6 +17,13 @@ export interface TransactionRecord {
   asset: string;
   timestamp: string;
   hash?: string;
+  /**
+   * Vault selected for this transaction. Optional so records produced by older
+   * integrations continue to validate and render without modification.
+   */
+  vault?: string | null;
+  /** Pool selected for this transaction. Optional for backwards compatibility. */
+  pool?: string | null;
 }
 
 export interface TransactionFilters {

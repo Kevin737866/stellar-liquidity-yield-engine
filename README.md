@@ -370,6 +370,14 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 - **Release Provenance**: Admin-only `record_release(...)` stores the published
   artifact's SHA-256 checksum, release version and source commit on-chain; anyone
   can read it back with `get_release_record()`
+- **Storage-Migration Compatibility**: `checkMigrationCompatibility()` runs a
+  captured storage fixture through a migration ladder and blocks the upgrade on
+  gaps, dropped keys, downgrades and non-idempotent work before the wasm ships —
+  see [docs/STORAGE_MIGRATION_COMPATIBILITY.md](docs/STORAGE_MIGRATION_COMPATIBILITY.md)
+- **Staged Upgrade Validation**: `planStagedUpgrade()` gates a promotion on
+  installed wasm, simulation, a verified staging copy, approvals and a written
+  rollback plan, and refuses to advance until each stage is complete — see
+  [docs/STAGED_UPGRADE_VALIDATION.md](docs/STAGED_UPGRADE_VALIDATION.md)
 - **Emergency Pause**: Admin can pause all operations
 - **Access Control**: Role-based permissions
 - **Input Validation**: Comprehensive parameter checks
@@ -408,6 +416,8 @@ Real-time monitoring of:
 - Gas usage and optimization
 - User activity patterns
 
+The `/transactions` history includes expandable [transaction confirmation details](docs/TRANSACTION_CONFIRMATION_DETAILS.md) showing the vault and pool selected for each transaction.
+
 ## 🌐 Network Support
 
 ### Testnet
@@ -419,6 +429,23 @@ Real-time monitoring of:
 - **RPC**: `https://soroban.stellar.org`
 - **Horizon**: `https://horizon.stellar.org`
 - **Network Passphrase**: `Public Global Stellar Network ; September 2015`
+
+### Supported Wallet Providers
+
+The SDK and UI interact with user wallets only through the signing interface
+exposed by the connected provider. Permissions are granted per request; the
+SDK never stores private keys.
+
+| Provider | Networks | Permissions Requested | Notes |
+|----------|----------|------------------------|-------|
+| Freighter | Testnet, Mainnet | Read account address, sign transactions | Browser extension; user approves each signature |
+| Albedo | Testnet, Mainnet | Read account address, sign transactions | Web-based signer; no extension required |
+| Keypair (`Keypair` from Stellar SDK) | Testnet, Mainnet | Sign transactions locally | Server-side bots only; the key must be supplied via environment configuration |
+
+Behavior by case:
+- **Normal**: the provider returns a public address and signs requested transactions after user approval.
+- **Boundary**: a wallet on a network different from the configured `STELLAR_NETWORK` is rejected before any transaction is built.
+- **Failure**: if a provider is missing, denies a permission, or returns a malformed signature, the operation fails with an explicit error and no transaction is submitted.
 
 ## 🔧 Configuration
 
@@ -486,6 +513,12 @@ objects):
     `NetworkConfigError` (`MISSING_CONTRACT_ID`) naming the missing variable,
     and constructing `RebalancerClient` without a `rebalanceEngine` contract ID
     throws `RebalanceError` (`MISSING_CONTRACT_ID`).
+
+Protocol parameter changes (fees, rebalance threshold, insurance reserve)
+follow [docs/CONFIG_MIGRATION_CHECKLIST.md](docs/CONFIG_MIGRATION_CHECKLIST.md)
+and `buildConfigMigrationChecklist()` in the SDK. A change that alters a stored
+shape also needs the version bump and migration described in
+[docs/UPGRADING.md](docs/UPGRADING.md).
 
 ### Contract Deployment
 
@@ -557,6 +590,13 @@ before running step 4 above).
 
 For reproducible randomized swap path and quote tests, including seed replay
 and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
+
+For model-based `YieldVault` share accounting sequence tests (comparing
+`deposit`, `withdraw`, and `harvest` sequences against a reference state
+machine), run:
+```bash
+cargo test --test vault_share_model_tests
+```
 
 ### Unit Tests
 ```bash

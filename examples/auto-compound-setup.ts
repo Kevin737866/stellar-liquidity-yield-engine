@@ -6,6 +6,7 @@ import {
   VaultInfo,
   UserPosition
 } from '../sdk/src';
+import { Address } from 'stellar-sdk';
 
 /**
  * Example: Setting up auto-compounding for USDC/XLM LP position
@@ -32,7 +33,7 @@ async function setupAutoCompounding() {
 
   try {
     // Initialize vault client
-    const vaultClient = new VaultClient(VAULT_ADDRESS, TESTNET_CONFIG);
+    const vaultClient = new VaultClient(new Address(VAULT_ADDRESS), TESTNET_CONFIG);
     
     // 1. Get vault information
     console.log('📊 Fetching vault information...');
@@ -67,7 +68,7 @@ async function setupAutoCompounding() {
 
     // 3. Check user's current position
     console.log('\n👤 Checking user position...');
-    const userPosition = await vaultClient.getUserPosition(USER_KEYPAIR.publicKey);
+    const userPosition = await vaultClient.getUserPosition(new Address(USER_KEYPAIR.publicKey));
     console.log('User Position:', {
       shares: Number(userPosition.shares).toLocaleString(),
       lastHarvest: new Date(userPosition.lastHarvest * 1000).toLocaleString(),
@@ -145,7 +146,7 @@ async function setupAutoCompounding() {
     async function monitorAutoCompounding() {
       try {
         const currentMetrics = await vaultClient.getMetrics();
-        const currentUserPosition = await vaultClient.getUserPosition(USER_KEYPAIR.publicKey);
+        const currentUserPosition = await vaultClient.getUserPosition(new Address(USER_KEYPAIR.publicKey));
         
         const timeSinceLastHarvest = Date.now() - (currentMetrics.lastHarvest * 1000);
         const hoursSinceLastHarvest = timeSinceLastHarvest / (1000 * 60 * 60);
@@ -200,7 +201,7 @@ export class AutoCompoundManager {
   private monitoringInterval: NodeJS.Timeout | null = null;
 
   constructor(vaultAddress: string, networkConfig: NetworkConfig) {
-    this.vaultClient = new VaultClient(vaultAddress, networkConfig);
+    this.vaultClient = new VaultClient(new Address(vaultAddress), networkConfig);
   }
 
   /**
@@ -255,7 +256,7 @@ export class AutoCompoundManager {
   async getPerformanceStats(userAddress: string) {
     const [metrics, userPosition] = await Promise.all([
       this.vaultClient.getMetrics(),
-      this.vaultClient.getUserPosition(userAddress)
+      this.vaultClient.getUserPosition(new Address(userAddress))
     ]);
 
     const timeSinceLastHarvest = Date.now() - (metrics.lastHarvest * 1000);
