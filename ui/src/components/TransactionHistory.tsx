@@ -53,18 +53,22 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
   const [operation, setOperation] = useState<TransactionOperationFilter>(
     DEFAULT_TRANSACTION_FILTERS.operation,
   );
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const statusId = useId();
   const operationId = useId();
+  const startDateId = useId();
+  const endDateId = useId();
   const summaryId = useId();
   const detailsIdPrefix = useId();
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const filtered = useMemo(
-    () => filterTransactions(transactions, { status, operation }),
-    [transactions, status, operation],
+    () => filterTransactions(transactions, { status, operation, startDate, endDate }),
+    [transactions, status, operation, startDate, endDate],
   );
 
-  const filtersActive = hasActiveFilters({ status, operation });
+  const filtersActive = hasActiveFilters({ status, operation, startDate, endDate });
 
   return (
     <section aria-labelledby={`${statusId}-heading`}>
@@ -84,6 +88,8 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
           onClick={() => {
             setStatus(DEFAULT_TRANSACTION_FILTERS.status);
             setOperation(DEFAULT_TRANSACTION_FILTERS.operation);
+            setStartDate('');
+            setEndDate('');
           }}
           disabled={!filtersActive}
         >
@@ -137,6 +143,32 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
                 ))}
               </select>
             </div>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor={startDateId}>Start date</Label>
+              <input
+                id={startDateId}
+                type="date"
+                value={startDate}
+                max={endDate || undefined}
+                aria-describedby={summaryId}
+                onChange={(event) => setStartDate(event.target.value)}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-1"
+              />
+            </div>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor={endDateId}>End date</Label>
+              <input
+                id={endDateId}
+                type="date"
+                value={endDate}
+                min={startDate || undefined}
+                aria-describedby={summaryId}
+                onChange={(event) => setEndDate(event.target.value)}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900 focus-visible:ring-offset-1"
+              />
+            </div>
           </div>
 
           <p id={summaryId} aria-live="polite" className="mt-4 text-sm text-slate-600">
@@ -146,6 +178,8 @@ export function TransactionHistory({ transactions }: TransactionHistoryProps) {
           <div className="mt-2 overflow-x-auto">
             <table className="w-full text-left text-sm">
               <caption className="sr-only">
+                Filtered transaction history. Use the status, operation, and date filters to
+                narrow the list.
                 Filtered transaction history. Use the status and operation filters to narrow the
                 list, and the details buttons to review the selected vault and pool.
               </caption>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useId } from 'react';
 import {
     PieChart,
     Pie,
@@ -24,6 +24,7 @@ import {
     FaChevronUp,
     FaInfoCircle
 } from 'react-icons/fa';
+import { isTimestampInDateRange } from '../lib/dateRange';
 
 // Types
 interface RewardStream {
@@ -127,11 +128,27 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
     const [convertToToken, setConvertToToken] = useState<string>('USDC');
     const [autoCompoundConfigs, setAutoCompoundConfigs] = useState<Map<string, AutoCompoundConfig>>(new Map());
     const [rewardHistory, setRewardHistory] = useState<RewardHistoryEntry[]>([]);
+    const [historyStartDate, setHistoryStartDate] = useState('');
+    const [historyEndDate, setHistoryEndDate] = useState('');
+    const historyId = useId();
     const [error, setError] = useState<string | null>(null);
     const [success, setSuccess] = useState<string | null>(null);
     const [swapQuote, setSwapQuote] = useState<SwapQuote | null>(null);
     const [isLoadingQuote, setIsLoadingQuote] = useState<boolean>(false);
     const [quoteError, setQuoteError] = useState<string | null>(null);
+
+    const filteredRewardHistory = useMemo(
+        () =>
+            rewardHistory.filter(entry =>
+                isTimestampInDateRange(entry.timestamp, {
+                    startDate: historyStartDate,
+                    endDate: historyEndDate
+                })
+            ),
+        [rewardHistory, historyStartDate, historyEndDate]
+    );
+    const invalidHistoryRange =
+        Boolean(historyStartDate && historyEndDate) && historyStartDate > historyEndDate;
 
     // Calculate total USD value
     const totalUsdValue = useMemo(() => {
@@ -308,7 +325,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
             'Type'
         ];
 
-        const rows = rewardHistory.map(entry => [
+        const rows = filteredRewardHistory.map(entry => [
             entry.timestamp.toString(),
             new Date(entry.timestamp).toISOString(),
             entry.streamIndex.toString(),
@@ -332,7 +349,7 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
         a.download = `reward-history-${user}-${Date.now()}.csv`;
         a.click();
         URL.revokeObjectURL(url);
-    }, [rewardHistory, user]);
+    }, [filteredRewardHistory, user]);
 
     // Format amount
     const formatAmount = useCallback((amount: string | number, decimals: number = 7) => {
@@ -788,11 +805,53 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                             <button className="close-btn" onClick={() => setShowHistoryPanel(false)}>×</button>
                         </div>
                         <div className="modal-content">
+                            <div className="history-date-range">
+                                <div>
+                                    <label htmlFor={`${historyId}-start`}>Start date</label>
+                                    <input
+                                        id={`${historyId}-start`}
+                                        type="date"
+                                        value={historyStartDate}
+                                        max={historyEndDate || undefined}
+                                        onChange={event => setHistoryStartDate(event.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label htmlFor={`${historyId}-end`}>End date</label>
+                                    <input
+                                        id={`${historyId}-end`}
+                                        type="date"
+                                        value={historyEndDate}
+                                        min={historyStartDate || undefined}
+                                        onChange={event => setHistoryEndDate(event.target.value)}
+                                    />
+                                </div>
+                                <button
+                                    className="btn btn-secondary"
+                                    type="button"
+                                    onClick={() => {
+                                        setHistoryStartDate('');
+                                        setHistoryEndDate('');
+                                    }}
+                                    disabled={!historyStartDate && !historyEndDate}
+                                >
+                                    Clear dates
+                                </button>
+                            </div>
+                            {invalidHistoryRange ? (
+                                <p role="alert" className="history-range-error">
+                                    End date must be on or after the start date.
+                                </p>
+                            ) : (
+                                <p className="history-range-summary" aria-live="polite">
+                                    Showing {filteredRewardHistory.length} of {rewardHistory.length} reward entries.
+                                </p>
+                            )}
                             <div className="history-actions">
                                 <button
                                     className="btn btn-secondary"
                                     onClick={handleExportCSV}
-                                    disabled={rewardHistory.length === 0}
+                                    disabled={filteredRewardHistory.length === 0 || invalidHistoryRange}
                                 >
                                     <FaDownload />
                                     Export CSV
@@ -818,8 +877,14 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
                                                     No reward history available
                                                 </td>
                                             </tr>
+                                        ) : filteredRewardHistory.length === 0 ? (
+                                            <tr>
+                                                <td colSpan={6} className="no-history">
+                                                    No reward entries match the selected date range
+                                                </td>
+                                            </tr>
                                         ) : (
-                                            rewardHistory.map((entry, idx) => (
+                                            filteredRewardHistory.map((entry, idx) => (
                                                 <tr key={idx}>
                                                     <td>{new Date(entry.timestamp).toLocaleDateString()}</td>
                                                     <td>
@@ -1355,6 +1420,42 @@ export const RewardDashboard: React.FC<RewardDashboardProps> = ({
 
         .history-actions {
           margin-bottom: 16px;
+        }
+
+        .history-date-range {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: flex-end;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+
+        .history-date-range label {
+          display: block;
+          margin-bottom: 6px;
+          font-size: 13px;
+        }
+
+        .history-date-range input {
+          padding: 8px;
+          background: #1f2937;
+          border: 1px solid #4b5563;
+          border-radius: 6px;
+          color: #fff;
+        }
+
+        .history-range-summary,
+        .history-range-error {
+          margin-bottom: 12px;
+          font-size: 13px;
+        }
+
+        .history-range-summary {
+          color: #9ca3af;
+        }
+
+        .history-range-error {
+          color: #fca5a5;
         }
 
         .history-table-container {

@@ -1,3 +1,5 @@
+import { isTimestampInDateRange } from '@/lib/dateRange';
+
 export const TRANSACTION_STATUSES = ['confirmed', 'pending', 'failed'] as const;
 export const TRANSACTION_OPERATIONS = ['deposit', 'withdraw', 'rebalance', 'harvest', 'claim'] as const;
 
@@ -29,11 +31,15 @@ export interface TransactionRecord {
 export interface TransactionFilters {
   status: TransactionStatusFilter;
   operation: TransactionOperationFilter;
+  startDate?: string;
+  endDate?: string;
 }
 
 export const DEFAULT_TRANSACTION_FILTERS: TransactionFilters = {
   status: ALL_TRANSACTIONS,
   operation: ALL_TRANSACTIONS,
+  startDate: '',
+  endDate: '',
 };
 
 export function isTransactionStatusFilter(value: string): value is TransactionStatusFilter {
@@ -55,10 +61,20 @@ export function filterTransactions(
       filters.status === ALL_TRANSACTIONS || record.status === filters.status;
     const operationMatches =
       filters.operation === ALL_TRANSACTIONS || record.operation === filters.operation;
-    return statusMatches && operationMatches;
+    return (
+      statusMatches &&
+      operationMatches &&
+      (!(filters.startDate || filters.endDate) ||
+        isTimestampInDateRange(record.timestamp, filters))
+    );
   });
 }
 
 export function hasActiveFilters(filters: TransactionFilters): boolean {
-  return filters.status !== ALL_TRANSACTIONS || filters.operation !== ALL_TRANSACTIONS;
+  return (
+    filters.status !== ALL_TRANSACTIONS ||
+    filters.operation !== ALL_TRANSACTIONS ||
+    Boolean(filters.startDate) ||
+    Boolean(filters.endDate)
+  );
 }
