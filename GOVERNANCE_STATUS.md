@@ -91,3 +91,26 @@ out-of-range pages to the last page. `getAllProposals()` and all state-filter
 helpers keep their existing signatures, so this is additive. It does not make
 the on-chain governance module deployable; it only keeps the history reader
 usable for keepers and UI callers without probing unbounded IDs per page.
+
+## SDK governance participation summary
+
+The read-only SDK surface also answers "how has this account participated?"
+with `summarizeGovernanceParticipation(account, proposals)` and
+`GovernanceSDK.getParticipationSummary(account, { proposals?, maxProposals? })`.
+The summary reports the proposals examined, how many reached a voting window
+(`Pending` proposals are excluded because they cannot be voted on yet), how
+many the account voted on, the for/against split, the total voting power
+committed, authored proposal count, the voted proposal IDs, and a
+participation rate (percentage with one decimal, 0 when nothing is eligible).
+
+The pure helper accepts the voter maps either as a JS `Map` or a plain object,
+treats a missing `null` map or absent account as "did not vote", and treats a
+malformed weight as a zero-weight vote instead of failing the report. An empty
+account or a non-array history raises a `TypeError`; the SDK method validates
+its arguments before any RPC call, and passes read failures through rather than
+reporting a fabricated summary. Callers that already hold a proposal list (the
+UI's governance panel does) can pass `proposals` to skip the extra RPC sweep.
+
+The UI surfaces this as the `ParticipationSummary` card above the proposal
+list. It is reporting only: it does not change what the (still incomplete)
+governing contracts do.
