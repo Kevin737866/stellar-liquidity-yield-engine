@@ -74,8 +74,6 @@ pub enum VaultError {
     ThresholdMustBePositive = 18,
     /// Fewer authorized emergency signers than the threshold were supplied.
     InsufficientEmergencySignatures = 19,
-    /// A harvest was attempted before the configured interval had elapsed.
-    HarvestTooEarly = 20,
     /// The emergency action did not include a reason.
     EmergencyReasonRequired = 20,
     /// The emergency action reason exceeds [`MAX_EMERGENCY_REASON_LENGTH`].
@@ -90,6 +88,8 @@ pub enum VaultError {
     HarvestFeeTooHigh = 25,
     /// `withdrawal_fee` exceeds [`MAX_WITHDRAWAL_FEE_BPS`].
     WithdrawalFeeTooHigh = 26,
+    /// A harvest was attempted before the configured interval had elapsed.
+    HarvestTooEarly = 27,
 }
 
 #[contracttype]
@@ -861,7 +861,7 @@ impl YieldVault {
             return 0;
         }
 
-        let last = Self::get_metrics(env).last_harvest;
+        let last = Self::get_metrics(env.clone()).last_harvest;
         interval.saturating_sub(env.ledger().timestamp().saturating_sub(last))
     }
 
