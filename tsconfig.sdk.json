@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./sdk",
+    "outDir": "./dist"
+  },
+  "include": [
+    "sdk/src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "ui",
+    "examples",
+    "sdk/src/**/*.test.ts"
+  ]
+}

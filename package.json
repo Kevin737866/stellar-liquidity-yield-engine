@@ -5,11 +5,13 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.sdk.json",
     "dev": "tsc --watch",
     "test": "jest",
     "lint": "eslint \"sdk/src/**/*.ts\"",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "release:check": "node scripts/check-release.cjs",
+    "release:dry-run": "npm run build && npm pack --dry-run"
   },
   "dependencies": {
     "axios": "^1.6.0",

@@ -1,16 +1,9 @@
 {
   "root": true,
   "parser": "@typescript-eslint/parser",
+  "ignorePatterns": ["**/*.test.ts"],
   "parserOptions": {
     "ecmaVersion": 2020,
     "sourceType": "module"
-  },
-  "plugins": ["@typescript-eslint"],
-  "env": {
-    "node": true,
-    "jest": true,
-    "es2020": true
-  },
-  "ignorePatterns": ["dist/", "node_modules/", "ui/"],
-  "rules": {}
+  }
 }
