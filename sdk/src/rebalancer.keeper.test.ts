@@ -31,6 +31,15 @@ describe("RebalancerClient APY keeper permissions", () => {
     expect(admin.publicKey()).not.toBe(keeper.publicKey());
   });
 
+  it("documents role rotation as a distinct operation from keeper updates", () => {
+    const client = buildClient();
+    // Role rotation (setApyKeepers) must be callable independently of the
+    // keeper write path (updatePoolApy), so governance can replace keepers
+    // without touching pool APY state.
+    expect(client.setApyKeepers).not.toBe(client.updatePoolApy);
+    expect(client.getApyKeepers).not.toBe(client.setApyKeepers);
+  });
+
   it("keeps signing keys distinct when rotating a keeper key", () => {
     const oldKeeper = Keypair.random();
     const newKeeper = Keypair.random();
@@ -40,7 +49,11 @@ describe("RebalancerClient APY keeper permissions", () => {
   });
 
   it("rejects malformed keeper public keys during rotation", () => {
-    expect(StrKey.isValidEd25519PublicKey("not-a-key")).toBe(false);
+    const client = buildClient();
+    const invalidKeeper = "not-a-valid-public-key";
+
+    expect(StrKey.isValidEd25519PublicKey(invalidKeeper)).toBe(false);
     expect(StrKey.isValidEd25519PublicKey("")).toBe(false);
+    expect(typeof client.setApyKeepers).toBe("function");
   });
 });
