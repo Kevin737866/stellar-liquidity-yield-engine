@@ -115,6 +115,10 @@ export type {
   EventHandler,
   RawEventHandler,
   ListenerErrorEvent,
+  ListenerState,
+  ListenerStateTransitionReason,
+  ListenerStateTransition,
+  ListenerStateHandler,
 } from './eventListener';
 
 // Durable keeper state: checkpoints let a keeper resume exactly where it left

@@ -264,7 +264,7 @@ export interface ListenerConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Error event
+// Error event & listener state transitions
 // ---------------------------------------------------------------------------
 
 export interface ListenerErrorEvent {
@@ -272,6 +272,49 @@ export interface ListenerErrorEvent {
   /** Current cursor (ledger) at the time of the error. */
   ledger: number;
 }
+
+/**
+ * Explicit operational state of a {@link ContractEventListener}.
+ *
+ * - `'idle'`: Constructed and not yet started (manual `poll()` calls may still run).
+ * - `'running'`: Actively polling and healthy.
+ * - `'error'`: Most recent poll, restore, or persistence step failed.
+ * - `'recovering'`: Attempting a poll after entering `'error'` to verify recovery.
+ * - `'stopped'`: Polling was explicitly stopped via `stop()`.
+ */
+export type ListenerState = 'idle' | 'running' | 'error' | 'recovering' | 'stopped';
+
+/** Reason a {@link ContractEventListener} transitioned between states. */
+export type ListenerStateTransitionReason =
+  | 'started'
+  | 'stopped'
+  | 'poll_error'
+  | 'cursor_expired'
+  | 'restore_error'
+  | 'persist_error'
+  | 'recovery_attempt'
+  | 'recovered';
+
+/** Record emitted whenever a {@link ContractEventListener} changes state. */
+export interface ListenerStateTransition {
+  /** State before the transition. */
+  from: ListenerState;
+  /** State after the transition. */
+  to: ListenerState;
+  /** Why the transition happened. */
+  reason: ListenerStateTransitionReason;
+  /** Listener cursor (next ledger) at the time of the transition. */
+  ledger: number;
+  /** Wall-clock timestamp (ms since epoch) from the listener's clock. */
+  timestamp: number;
+  /** Number of consecutive failed polls at the time of the transition. */
+  consecutiveErrors: number;
+  /** Underlying error when transitioning into `'error'`. */
+  error?: Error;
+}
+
+/** Handler invoked whenever the listener transitions to a new state. */
+export type ListenerStateHandler = (transition: ListenerStateTransition) => void;
 
 // ---------------------------------------------------------------------------
 // Cursor expiration
@@ -476,6 +519,21 @@ export class ContractEventListener {
   /** Error handlers. */
   private errorHandlers: Set<(e: ListenerErrorEvent) => void> = new Set();
 
+  /** State transition handlers. */
+  private stateHandlers: Set<ListenerStateHandler> = new Set();
+
+  /** Current operational state of the listener. */
+  private _state: ListenerState = 'idle';
+
+  /** Number of consecutive poll/restore/persist failures since the last healthy poll. */
+  private _consecutiveErrors = 0;
+
+  /** Most recent error observed while in `'error'` or `'recovering'`, or `null` when healthy. */
+  private _lastError: Error | null = null;
+
+  /** Most recent state transition record, or `null` before any transition. */
+  private _lastTransition: ListenerStateTransition | null = null;
+
   /** Timer handle returned by `setInterval`, null when stopped. */
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -583,6 +641,27 @@ export class ContractEventListener {
     return this;
   }
 
+  /** Remove a previously registered error handler. */
+  offError(handler: (e: ListenerErrorEvent) => void): this {
+    this.errorHandlers.delete(handler);
+    return this;
+  }
+
+  /**
+   * Register a handler that is notified whenever the listener transitions
+   * between operational states (e.g. `running -> error -> recovering -> running`).
+   */
+  onStateChange(handler: ListenerStateHandler): this {
+    this.stateHandlers.add(handler);
+    return this;
+  }
+
+  /** Remove a previously registered state transition handler. */
+  offStateChange(handler: ListenerStateHandler): this {
+    this.stateHandlers.delete(handler);
+    return this;
+  }
+
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
@@ -600,6 +679,9 @@ export class ContractEventListener {
    */
   start(intervalMs = 5_000): void {
     if (this.intervalHandle !== null) return; // already running
+    this._consecutiveErrors = 0;
+    this._lastError = null;
+    this.transitionState('running', 'started');
     this.intervalHandle = setInterval(() => void this.poll(), intervalMs);
     // Poll immediately on start (the first poll restores the durable
     // position first); it runs in the background so `start()` stays
@@ -613,11 +695,34 @@ export class ContractEventListener {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
     }
+    if (this._state !== 'idle' && this._state !== 'stopped') {
+      this.transitionState('stopped', 'stopped');
+    }
   }
 
   /** Whether the listener is currently polling. */
   get isRunning(): boolean {
     return this.intervalHandle !== null;
+  }
+
+  /** Current operational state of the listener. */
+  get state(): ListenerState {
+    return this._state;
+  }
+
+  /** Number of consecutive failed polls/operations since the last healthy poll. */
+  get consecutiveErrors(): number {
+    return this._consecutiveErrors;
+  }
+
+  /** Most recent error while in `'error'` or `'recovering'`, or `null` when healthy. */
+  get lastError(): Error | null {
+    return this._lastError;
+  }
+
+  /** Most recent state transition record, or `null` before any transition. */
+  get lastTransition(): ListenerStateTransition | null {
+    return this._lastTransition;
   }
 
   /** The ledger the listener will start from on the next poll. */
@@ -756,13 +861,22 @@ export class ContractEventListener {
    * fetch, dispatch and persist.
    */
   private async runPoll(): Promise<PollResult> {
+    if (this._state === 'error') {
+      this.transitionState('recovering', 'recovery_attempt');
+    }
+
     try {
       await this.restoreIfNeeded();
       const request = this.buildRequest();
       const response = await this.source.getEvents(request);
       const eventsProcessed = response.events.length;
       this.processResponse(response);
-      await this.persistIfEnabled();
+      const persisted = await this.persistIfEnabled();
+      if (persisted && (this._state === 'recovering' || this._state === 'error')) {
+        this._consecutiveErrors = 0;
+        this._lastError = null;
+        this.transitionState(this.isRunning ? 'running' : 'idle', 'recovered');
+      }
       return { status: 'ok', eventsProcessed, nextLedger: this.cursor };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -780,10 +894,12 @@ export class ContractEventListener {
         // the ledger position, which may replay part of the last ledger but
         // never skips an event.
         this.pagingCursor = null;
+        this.recordErrorState(expired, 'cursor_expired');
         this.emitError(expired);
         return { status: 'cursor_expired', cursor, resumeFromLedger, error: expired };
       }
 
+      this.recordErrorState(error, 'poll_error');
       this.emitError(error);
       return { status: 'error', ledger: this.cursor, error };
     }
@@ -805,20 +921,61 @@ export class ContractEventListener {
       await this.restore();
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      this.recordErrorState(error, 'restore_error');
       this.emitError(error);
     }
   }
 
-  private async persistIfEnabled(): Promise<void> {
-    if (!this.store) return;
-    if (this.config.persistOnPoll === false) return;
+  private async persistIfEnabled(): Promise<boolean> {
+    if (!this.store) return true;
+    if (this.config.persistOnPoll === false) return true;
 
     try {
       await this.persist();
+      return true;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      this.recordErrorState(error, 'persist_error');
       this.emitError(error);
+      return false;
     }
+  }
+
+  private recordErrorState(error: Error, reason: ListenerStateTransitionReason): void {
+    this._consecutiveErrors += 1;
+    this._lastError = error;
+    if (this._state !== 'stopped') {
+      this.transitionState('error', reason, error);
+    }
+  }
+
+  private transitionState(
+    to: ListenerState,
+    reason: ListenerStateTransitionReason,
+    error?: Error,
+  ): void {
+    const from = this._state;
+    if (from === to) return;
+
+    this._state = to;
+    const transition: ListenerStateTransition = {
+      from,
+      to,
+      reason,
+      ledger: this.cursor,
+      timestamp: this.now(),
+      consecutiveErrors: this._consecutiveErrors,
+      ...(error !== undefined ? { error } : {}),
+    };
+    this._lastTransition = transition;
+
+    this.stateHandlers.forEach((handler) => {
+      try {
+        handler(transition);
+      } catch {
+        // A broken state observer must not take the keeper down.
+      }
+    });
   }
 
   private emitError(error: Error): void {
