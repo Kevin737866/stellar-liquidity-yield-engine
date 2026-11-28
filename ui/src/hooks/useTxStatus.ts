@@ -1,5 +1,5 @@
 /**
- * useTxStatus — Issue #131
+ * useTxStatus — Issues #131, #456
  *
  * Tracks the lifecycle of a Soroban transaction submitted through the UI:
  *
@@ -13,11 +13,21 @@
  *               `txHash`) and we are waiting for final confirmation.
  * - confirmed:  The transaction succeeded on-chain.
  * - failed:     The transaction was rejected or an error occurred.
+ *
+ * Issue #456: the lifecycle snapshot is mirrored to localStorage so a hash and
+ * its status survive unmounting a dashboard view (navigation, refresh, or a
+ * tab switch) and can be restored by the next view that mounts this hook.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import {
+  PENDING_TX_STORAGE_KEY,
+  readPersistedTx,
+  writePersistedTx,
+} from '../../sdk/src/txStatusStorage';
+import type { PersistedTxState, TxStatus } from '../../sdk/src/txStatusStorage';
 
-export type TxStatus = 'idle' | 'submitting' | 'pending' | 'confirmed' | 'failed';
+export type { TxStatus };
 
 export interface UseTxStatusReturn {
   /** Current transaction lifecycle state */
@@ -44,9 +54,43 @@ export interface UseTxStatusReturn {
 }
 
 export function useTxStatus(): UseTxStatusReturn {
-  const [txStatus, setTxStatus] = useState<TxStatus>('idle');
-  const [txHash, setTxHash] = useState<string | null>(null);
-  const [txError, setTxError] = useState<string | null>(null);
+  const [initial] = useState<PersistedTxState | null>(readPersistedTx);
+  const [txStatus, setTxStatus] = useState<TxStatus>(initial?.status ?? 'idle');
+  const [txHash, setTxHash] = useState<string | null>(initial?.hash ?? null);
+  const [txError, setTxError] = useState<string | null>(initial?.error ?? null);
+
+  useEffect(() => {
+    writePersistedTx({
+      status: txStatus,
+      hash: txHash,
+      error: txError,
+      updatedAt: Date.now(),
+    });
+  }, [txStatus, txHash, txError]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key !== PENDING_TX_STORAGE_KEY) {
+        return;
+      }
+
+      const next = readPersistedTx();
+      if (!next) {
+        return;
+      }
+
+      setTxStatus(next.status);
+      setTxHash(next.hash);
+      setTxError(next.error);
+    };
+
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const resetTx = useCallback(() => {
     setTxStatus('idle');
@@ -76,7 +120,6 @@ export function useTxStatus(): UseTxStatusReturn {
       try {
         const result = await action();
 
-        // We have a hash — the transaction was at least submitted.
         if (result.hash) {
           setTxHash(result.hash);
           setTxStatus('pending');

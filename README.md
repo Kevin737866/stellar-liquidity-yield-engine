@@ -148,6 +148,15 @@ autoCompoundManager.startMonitoring(userKeyPair, 60);
 - **Max IL Risk**: 30%
 - **Suitable For**: High risk tolerance, volatile assets
 
+### Per-vault harvest cadence
+
+Vault admins can tune harvest timing without redeploying via
+`set_harvest_interval(admin, interval_seconds)`. A zero interval (the default)
+keeps harvesting permissionless; a positive interval rejects early harvests with
+`HarvestTooEarly`. `get_harvest_interval`, `get_seconds_until_next_harvest` and
+`can_harvest` expose the configuration to keepers, with matching SDK methods on
+`VaultClient`.
+
 ## 🔄 Rebalancing System
 
 The rebalancing engine automatically optimizes liquidity allocation:
@@ -360,6 +369,15 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
   timeElapsed={30}
 />
 ```
+
+### Persistent transaction status
+
+`useTxStatus` mirrors the current lifecycle snapshot to `localStorage` under
+`stellar-liquidity-yield:pending-tx`, so navigating between dashboard views (or
+refreshing) restores the hash and status instead of showing an idle state.
+Stale `submitting` entries are normalized on read and `resetTx()` returns the
+snapshot to idle. The serialization helpers live in
+`sdk/src/txStatusStorage.ts` and are covered by SDK tests.
 
 ## 🔒 Security Features
 

@@ -30,6 +30,8 @@ pub enum RebalanceError {
     AllocationsMustSumTo100Percent = 8,
     /// The published APY exceeds [`MAX_APY_BPS`].
     ApyOutOfRange = 9,
+    /// An allocation references a pool that has not been registered as known.
+    UnknownPool = 10,
 }
 
 /// The single vault call this engine makes.
@@ -254,6 +256,10 @@ impl RebalanceEngine {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "pool_apy"), &apy_registry);
+        let known_pools: Map<Address, bool> = Map::new(&env);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "known_pools"), &known_pools);
         let keepers: Vec<Address> = Vec::new(&env);
         env.storage()
             .instance()
@@ -554,7 +560,8 @@ impl RebalanceEngine {
     }
 
     /// Validate that allocations are non-empty, each within bounds (<= 10000 bps),
-    /// and that the percentages sum to exactly 10000 bps (100%).
+    /// that they sum to exactly 10000 bps (100%), and - once the pool registry
+    /// has been populated - that every referenced pool is known (Issue #279).
     fn validate_allocations(env: &Env, allocations: &Vec<PoolAllocation>) {
         require!(
             env,
@@ -562,6 +569,7 @@ impl RebalanceEngine {
             RebalanceError::EmptyAllocations
         );
 
+        let known_pools = Self::get_known_pools_map(env);
         let mut total_bps: u64 = 0;
         for allocation in allocations.iter() {
             require!(
@@ -569,6 +577,13 @@ impl RebalanceEngine {
                 allocation.allocation_percent <= 10000,
                 RebalanceError::AllocationOutOfRange
             );
+            if !known_pools.is_empty() {
+                require!(
+                    env,
+                    known_pools.contains_key(allocation.pool_id.clone()),
+                    RebalanceError::UnknownPool
+                );
+            }
             total_bps += allocation.allocation_percent as u64;
         }
 
@@ -577,6 +592,15 @@ impl RebalanceEngine {
             total_bps == 10000,
             RebalanceError::AllocationsMustSumTo100Percent
         );
+    }
+
+    /// Pools that strategies may reference. An empty registry keeps legacy
+    /// deployments working; populating it turns on strict validation.
+    fn get_known_pools_map(env: &Env) -> Map<Address, bool> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "known_pools"))
+            .unwrap_or_else(|| Map::new(env))
     }
 
     /// Internal: get strategies Map for O(1) access
@@ -750,6 +774,53 @@ impl RebalanceEngine {
     /// Full oracle record for a pool, if a feed exists.
     pub fn get_pool_apy_record(env: Env, pool_id: Address) -> Option<PoolApyRecord> {
         Self::get_apy_registry(env).get(pool_id)
+    }
+
+    // ============ KNOWN POOL REGISTRY (Issue #279) ============
+
+    /// Register a pool as a valid allocation target (admin only).
+    ///
+    /// Once at least one pool is registered, creating or updating a strategy
+    /// with a different `pool_id` fails with [`RebalanceError::UnknownPool`].
+    pub fn register_known_pool(env: Env, admin: Address, pool_id: Address) {
+        Self::require_admin(&env, admin.clone());
+        let mut pools = Self::get_known_pools_map(&env);
+        if !pools.contains_key(pool_id.clone()) {
+            pools.set(pool_id.clone(), true);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "known_pools"), &pools);
+        }
+        env.events().publish(
+            (Symbol::new(&env, "known_pool_registered"), pool_id),
+            (admin,),
+        );
+    }
+
+    /// Remove a pool from the known set (admin only).
+    pub fn unregister_known_pool(env: Env, admin: Address, pool_id: Address) {
+        Self::require_admin(&env, admin.clone());
+        let mut pools = Self::get_known_pools_map(&env);
+        if pools.contains_key(pool_id.clone()) {
+            pools.remove(pool_id.clone());
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "known_pools"), &pools);
+        }
+        env.events().publish(
+            (Symbol::new(&env, "known_pool_unregistered"), pool_id),
+            (admin,),
+        );
+    }
+
+    /// Whether the given pool is registered as a valid allocation target.
+    pub fn is_known_pool(env: Env, pool_id: Address) -> bool {
+        Self::get_known_pools_map(&env).contains_key(pool_id)
+    }
+
+    /// All registered pool addresses (empty before the registry is configured).
+    pub fn get_known_pools(env: Env) -> Vec<Address> {
+        Self::get_known_pools_map(&env).keys()
     }
 
     /// Age in seconds after which an APY observation is rejected as stale.
@@ -2010,6 +2081,124 @@ mod tests {
             current_apy: 1000,
             impermanent_loss_risk: il_risk,
         }
+    }
+
+    // ============ KNOWN POOL VALIDATION TESTS (Issue #279) ============
+
+    #[test]
+    fn test_known_pool_registry_is_admin_only() {
+        let env = Env::default();
+        let (client, admin) = engine(&env);
+        let pool = Address::generate(&env);
+
+        assert!(!client.is_known_pool(&pool));
+        assert_eq!(client.get_known_pools().len(), 0);
+
+        client.register_known_pool(&admin, &pool);
+        assert!(client.is_known_pool(&pool));
+        assert_eq!(client.get_known_pools().len(), 1);
+
+        let stranger = Address::generate(&env);
+        let err = client
+            .try_register_known_pool(&stranger, &pool)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::Unauthorized.into());
+
+        client.unregister_known_pool(&admin, &pool);
+        assert!(!client.is_known_pool(&pool));
+        assert_eq!(client.get_known_pools().len(), 0);
+    }
+
+    #[test]
+    fn test_create_strategy_rejects_unknown_pool() {
+        let env = Env::default();
+        let (client, admin) = engine(&env);
+        let known = Address::generate(&env);
+        let unknown = Address::generate(&env);
+        client.register_known_pool(&admin, &known);
+
+        let valid = Vec::from_array(&env, [allocation(&env, &known, 10000, 500, 500)]);
+        let id = client.create_strategy(
+            &admin,
+            &Symbol::new(&env, "Known"),
+            &1,
+            &100,
+            &500,
+            &3600,
+            &valid,
+        );
+        assert!(id > 0);
+
+        let invalid = Vec::from_array(&env, [allocation(&env, &unknown, 10000, 500, 500)]);
+        let err = client
+            .try_create_strategy(
+                &admin,
+                &Symbol::new(&env, "Unknown"),
+                &1,
+                &100,
+                &500,
+                &3600,
+                &invalid,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::UnknownPool.into());
+    }
+
+    #[test]
+    fn test_update_strategy_rejects_unknown_pool() {
+        let env = Env::default();
+        let (client, admin) = engine(&env);
+        let known = Address::generate(&env);
+        let unknown = Address::generate(&env);
+
+        let allocations = Vec::from_array(&env, [allocation(&env, &known, 10000, 500, 500)]);
+        let id = client.create_strategy(
+            &admin,
+            &Symbol::new(&env, "First"),
+            &1,
+            &100,
+            &500,
+            &3600,
+            &allocations,
+        );
+
+        client.register_known_pool(&admin, &known);
+        let invalid = Vec::from_array(&env, [allocation(&env, &unknown, 10000, 500, 500)]);
+        let err = client
+            .try_update_strategy(
+                &admin,
+                &id,
+                &Symbol::new(&env, "Second"),
+                &1,
+                &100,
+                &500,
+                &3600,
+                &invalid,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, RebalanceError::UnknownPool.into());
+    }
+
+    #[test]
+    fn test_unconfigured_pool_registry_keeps_legacy_behaviour() {
+        let env = Env::default();
+        let (client, admin) = engine(&env);
+        let pool = Address::generate(&env);
+        let allocations = Vec::from_array(&env, [allocation(&env, &pool, 10000, 500, 500)]);
+
+        let id = client.create_strategy(
+            &admin,
+            &Symbol::new(&env, "Legacy"),
+            &1,
+            &100,
+            &500,
+            &3600,
+            &allocations,
+        );
+        assert!(id > 0);
     }
 
     #[test]

@@ -12,6 +12,18 @@ When creating or updating a rebalance strategy, the allocations must meet strict
 1. **Non-Empty**: At least one pool allocation must be provided
 2. **Individual Limits**: Each allocation cannot exceed 100% (10000 basis points)
 3. **Exact Sum**: All allocations must sum to exactly 100% (10000 basis points)
+4. **Known Pools** (Issue #279): Once the pool registry is populated, every `pool_id` must be registered via `register_known_pool`; unknown references fail with the typed `UnknownPool` error
+
+### Known Pool Registry
+
+An operator registers the pools that strategies may allocate to:
+
+```rust
+engine.register_known_pool(&admin, &pool_a);
+assert!(engine.is_known_pool(&pool_a));
+```
+
+An empty registry preserves the legacy behaviour and skips the pool-existence check, so existing deployments keep working. Populating it enables strict validation on both `create_strategy` and `update_strategy`. `unregister_known_pool`, `is_known_pool`, and `get_known_pools` provide the matching management and read paths. The SDK exposes the same operations through `RebalancerClient.registerKnownPool`, `unregisterKnownPool`, `isKnownPool`, and `getKnownPools`, plus optional early client-side rejection through the constructor's `knownPoolIds` argument.
 
 ## Why Basis Points?
 
