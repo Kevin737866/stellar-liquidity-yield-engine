@@ -146,6 +146,18 @@ check_rollback_ready || { echo "Rollback readiness check failed; do not upgrade"
 After a rollback, verify the `contract_upgraded` event carries `OLD_WASM_HASH`
 and that `get_storage_version()` still matches the value recorded above.
 
+### Validating the stages first
+
+A production promotion goes through seven gates: preflight, install, simulate,
+staging on a separate contract, promote, verify and closeout. Build the plan
+from the evidence gathered so far with
+`planStagedUpgrade()` (`sdk/src/stagedUpgrade.ts`) and refuse to submit
+`upgrade` until `plan.canPromote` is true and `plan.nextStage === 'promote'`.
+It blocks a promotion with a missing rollback hash, a schema downgrade, a
+migration whose version does not move, an unverified staging copy, or too few
+approvals — the full procedure is
+[docs/STAGED_UPGRADE_VALIDATION.md](STAGED_UPGRADE_VALIDATION.md).
+
 ### Rolling back
 
 Point `upgrade` at `OLD_WASM_HASH` from the readiness check. The rollback is

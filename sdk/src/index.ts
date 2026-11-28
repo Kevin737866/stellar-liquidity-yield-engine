@@ -252,3 +252,22 @@ export {
   isContractEvent,
 } from './eventOrigin';
 export type { EventOrigin, LedgerEvent } from './eventOrigin';
+
+// Staged validation for contract upgrades: seven gates from preflight to
+// closeout, so promotion is refused until the wasm is installed, simulated,
+// exercised on a separate contract and approved. The operator procedure is
+// docs/STAGED_UPGRADE_VALIDATION.md.
+export {
+  StagedUpgradeValidationError,
+  WASM_HASH_PATTERN,
+  assertStagedUpgradeReady,
+  formatStagedUpgradePlan,
+  planStagedUpgrade,
+} from './stagedUpgrade';
+export type {
+  StagedUpgradeEvidence,
+  StagedUpgradePlan,
+  StagedUpgradeStage,
+  StagedUpgradeStageId,
+  StagedUpgradeStageStatus,
+} from './stagedUpgrade';
