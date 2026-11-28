@@ -51,11 +51,11 @@ jobs:
           cargo update -p ed25519-dalek@3.0.0 --precise 2.2.0
 
       # Lint the same targets the `test` job builds: the crate's library and
-      # its unit tests, upgrade tests, and the dedicated router fuzz harness. The
-      # other files in tests/ target contracts that are not part of the crate
+      # its unit tests, upgrade/TTL tests, and the dedicated router fuzz harness.
+      # The other files in tests/ target contracts that are not part of the crate
       # (SwapRouter, RiskEngine, ProtocolGovernor, ...), so `--all-targets`
       # cannot be used until they are repaired - see the note in `test` below.
-      - run: cargo clippy --lib --test upgrade_tests --test swap_router_fuzz --all-features -- -D warnings
+      - run: cargo clippy --lib --test upgrade_tests --test ttl_renewal_tests --test swap_router_fuzz --all-features -- -D warnings
 
   # Builds every Soroban contract to wasm. Each contract is a separate matrix
   # leg so a broken contract fails its own check with a readable name, and
@@ -140,6 +140,7 @@ jobs:
       # contracts that are not part of the crate (SwapRouter, RiskEngine,
       # ProtocolGovernor, ...), so they are excluded until they are repaired.
       - name: Run contract test suite
+        run: cargo test --all-features --lib --test upgrade_tests --test ttl_renewal_tests --test swap_router_fuzz
         run: cargo test --all-features --lib --test upgrade_tests --test swap_router_fuzz
 
       - name: Verify contribution contract checklist
