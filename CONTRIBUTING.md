@@ -4,9 +4,11 @@ Thank you for your interest in contributing! This guide covers everything you ne
 
 ## Table of Contents
 - [Development Workflow](#development-workflow)
+- [Contract Change Checklist](#contract-change-checklist)
 - [Code Standards](#code-standards)
 - [Pull Request Process](#pull-request-process)
 - [Issue Reporting](#issue-reporting)
+- [Keeper Signing Key Rotation](#keeper-signing-key-rotation)
 - [Community](#community)
 
 ## Development Workflow
@@ -92,6 +94,29 @@ git push -u origin feat/your-feature-name
 ```
 Then open a Pull Request against `main` on GitHub.
 
+## Contract Change Checklist
+
+Changes to `src/` contracts or contract-facing SDK and deployment code require the
+[contract change checklist](docs/CONTRACT_CHANGE_CHECKLIST.md). Use it when
+changing entrypoints, storage, authorization, upgrade behavior, events, fees,
+token transfers, or WASM build/deployment configuration.
+
+The pull request template includes the minimum contract-change sign-off:
+
+- [ ] Normal behavior and success paths are covered by tests.
+- [ ] Boundary values (zero, maximum, overflow, cooldown, and limit cases) are
+      covered explicitly.
+- [ ] Failure behavior (invalid inputs, unauthorized callers, pause state, and
+      migration/upgrade failures) is covered explicitly.
+- [ ] Storage compatibility and migration behavior are documented.
+- [ ] Authorization, pause, fee, and event changes are reflected in
+      `docs/SECURITY_CHECKLIST.md`.
+- [ ] Every affected contract is built as a separate WASM artifact.
+- [ ] User-facing behavior and deployment or migration steps are documented.
+
+If a contract change is not applicable to an item, explain why in the PR rather
+than leaving the checkbox unexplained.
+
 ## Code Standards
 
 ### Rust (Smart Contracts)
@@ -117,6 +142,23 @@ Then open a Pull Request against `main` on GitHub.
 - Update README.md when adding or changing features
 - Add JSDoc comments to all exported SDK functions
 - Keep code examples in docs accurate and runnable
+- When adding or changing wallet provider support, update the "Supported Wallet Providers" table below with each provider's supported operations and required permissions
+
+### Supported Wallet Providers
+
+| Provider | Status | Permissions Required | Notes |
+|----------|--------|----------------------|-------|
+| Freighter | Supported | Read account address, sign transactions | Primary browser extension wallet |
+| Albedo | Supported | Read account address, sign transactions | Web-based signing flow, no extension install |
+| xBull | Supported | Read account address, sign transactions | Browser extension wallet |
+| Manual secret key (SDK/CLI only) | Supported (non-browser) | Full key access | Never use in browser UIs; intended for scripts and tests |
+
+**Permission boundaries:**
+- Read-only operations (balances, vault positions) must not request signing permissions.
+- Transaction signing requires explicit user approval through the wallet provider UI.
+- Providers that are unreachable or unauthorized should fail with a clear error and must not fall back to a different provider silently.
+
+**Failure behavior:** If a wallet provider is not installed, the UI should prompt installation; if the user rejects a permission request, no transaction is submitted.
 
 ## Pull Request Process
 
@@ -148,6 +190,43 @@ Found a bug or have a feature request? Please [open an issue](https://github.com
 ## Security
 
 Do **not** open public issues for security vulnerabilities. Instead, email **support@stellar-yield.com** with details. See the README for our bug bounty program.
+
+## Keeper Signing Key Rotation
+
+Keeper signing keys authorize automated vault operations (harvests, rebalances, auto-compounding). Rotate them on a regular schedule and immediately after any suspected exposure. Follow this procedure to rotate safely.
+
+### 1. Prepare the New Key
+- Generate the new keypair on an offline or hardware-backed machine. Never store it in the repository, CI logs, or shared chat.
+- Fund the new account with the minimum XLM needed for keeper transaction fees.
+- Record the new public key in your operations inventory before proceeding.
+
+### 2. Register the New Key in Parallel
+- Add the new public key as an authorized keeper **while the old key remains active**. This avoids a window where no keeper can operate.
+- Confirm the new key is listed as authorized on-chain before continuing.
+
+### 3. Switch Keeper Configuration
+- Update the keeper secret in your secret manager (e.g. environment variable or vault), not in source files.
+- Restart the keeper service and verify it signs a no-op or low-risk operation successfully with the new key.
+- Expected result: keeper logs show the new public key as the signer, and no signature-verification errors occur.
+
+### 4. Revoke the Old Key
+- Once the new key is confirmed working, remove the old public key from the authorized keeper set.
+- Confirm on-chain that the old key can no longer authorize operations.
+- Securely destroy any local copies of the old secret and rotate any backups that contained it.
+
+### Boundary and Failure Handling
+- **New key not yet authorized**: Do not swap the keeper secret. Keep the old key running and retry registration.
+- **New key fails to sign**: Roll back the keeper configuration to the old key, which is still authorized, and investigate. Do not revoke the old key.
+- **Old key revocation fails**: Keep both keys in a known state, treat the old key as still active, and escalate before further changes.
+- **Suspected compromise**: Skip the parallel window. Revoke the compromised key immediately, pause keeper-dependent operations if needed, and follow the security process below.
+- **Partial rotation across multiple keepers**: Track each keeper's status in your inventory and complete the rotation per instance; never revoke a key that another live keeper still uses.
+
+### Operational Checklist
+- [ ] New key generated offline and stored in a secret manager
+- [ ] New key funded and authorized on-chain
+- [ ] Keeper restarted and verified with the new key
+- [ ] Old key revoked on-chain and local/backup copies destroyed
+- [ ] Rotation date and key identifiers recorded
 
 ## Community
 

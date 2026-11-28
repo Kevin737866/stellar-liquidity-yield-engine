@@ -4,7 +4,7 @@
  * Wraps key RPC methods with retry logic for transient errors.
  */
 
-import { SorobanRpc } from 'stellar-sdk';
+import { Account, SorobanRpc, Transaction } from 'stellar-sdk';
 import { withRetry, RetryOptions, DEFAULT_RETRY_OPTIONS } from './retry';
 
 /**
@@ -38,7 +38,7 @@ export class RetryRpcServer {
   /**
    * Get account with retry for transient errors.
    */
-  async getAccount(address: string): Promise<SorobanRpc.Api.AccountResponse> {
+  async getAccount(address: string): Promise<Account> {
     if (!this.options.retryReads) {
       return this.server.getAccount(address);
     }
@@ -54,7 +54,7 @@ export class RetryRpcServer {
    * Simulate transaction with retry for transient errors.
    */
   async simulateTransaction(
-    transaction: SorobanRpc.Api.SimulateTransactionRequest
+    transaction: Transaction
   ): Promise<SorobanRpc.Api.SimulateTransactionResponse> {
     if (!this.options.retryReads) {
       return this.server.simulateTransaction(transaction);
@@ -71,7 +71,7 @@ export class RetryRpcServer {
    * Send transaction with retry for transient errors.
    */
   async sendTransaction(
-    transaction: SorobanRpc.Api.SendTransactionRequest
+    transaction: Transaction
   ): Promise<SorobanRpc.Api.SendTransactionResponse> {
     if (!this.options.retryWrites) {
       return this.server.sendTransaction(transaction);
@@ -89,7 +89,7 @@ export class RetryRpcServer {
    */
   async getTransaction(
     hash: string
-  ): Promise<SorobanRpc.GetTransactionResponse> {
+  ): Promise<SorobanRpc.Api.GetTransactionResponse> {
     if (!this.options.retryReads) {
       return this.server.getTransaction(hash);
     }
@@ -104,7 +104,7 @@ export class RetryRpcServer {
   /**
    * Get latest ledger with retry for transient errors.
    */
-  async getLatestLedger(): Promise<SorobanRpc.Api.LedgerSequenceResponse> {
+  async getLatestLedger(): Promise<SorobanRpc.Api.GetLatestLedgerResponse> {
     if (!this.options.retryReads) {
       return this.server.getLatestLedger();
     }
@@ -120,8 +120,8 @@ export class RetryRpcServer {
    * Get events with retry for transient errors.
    */
   async getEvents(
-    request: SorobanRpc.Api.GetEventsRequest
-  ): Promise<SorobanRpc.Api.GetEventsResponse> {
+    request: Parameters<SorobanRpc.Server["getEvents"]>[0]
+  ): Promise<Awaited<ReturnType<SorobanRpc.Server["getEvents"]>>> {
     if (!this.options.retryReads) {
       return this.server.getEvents(request);
     }
