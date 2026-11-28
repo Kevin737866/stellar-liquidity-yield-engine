@@ -304,6 +304,13 @@ a no-op, and a failed rotation leaves the existing admin in place. Run
   admin entrypoints, rejection of an unknown wasm hash, and a real code swap
   through the host deployer (the contract's entrypoints stop existing, while the
   address and storage survive).
+- A stored-layout change is also tested against captured state: run a
+  `get_storage_version` fixture through the build's migration ladder with
+  `checkMigrationCompatibility()` / `assertMigrationCompatible()`
+  (`npx jest sdk/src/storageMigrationCompat.test.ts`). It blocks the upgrade on
+  ladder gaps, downgrades, dropped keys and non-idempotent migration work before
+  any wasm is installed — see
+  [docs/STORAGE_MIGRATION_COMPATIBILITY.md](STORAGE_MIGRATION_COMPATIBILITY.md).
 - The same file also covers rollback readiness (an uninstalled rollback hash is
   rejected) and persistent-storage expiration boundaries: an entry is readable
   on its last live ledger, archived on the next one, and `extend_ttl` moves that
