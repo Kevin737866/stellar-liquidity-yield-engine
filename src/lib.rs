@@ -257,6 +257,10 @@ impl StellarLiquidityYieldEngine {
     ///
     /// Fails with [`EngineError::NotInitialized`] when the contract has not
     /// been initialized, instead of an opaque storage panic.
+    ///
+    /// Role rotation: `update_admin` replaces the admin in a single step and
+    /// requires the current admin to authorize it. Rotations are not paused
+    /// by the emergency switch, so a compromised admin can always be replaced.
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
