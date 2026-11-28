@@ -616,6 +616,9 @@ cd ui/
 npm test
 ```
 
+For TTL renewal across repeated contract writes, see
+[Storage TTL testing](docs/STORAGE_TTL_TESTING.md).
+
 ### Integration Tests
 ```bash
 # Run full integration suite
