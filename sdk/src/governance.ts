@@ -57,6 +57,30 @@ export const DEFAULT_GOVERNANCE_CONTRACTS: GovernanceContracts = {
   feeDistributor: process.env.FEE_DISTRIBUTOR_CONTRACT || UNCONFIGURED_CONTRACT,
 };
 
+/**
+ * A single proposal lifecycle event, as surfaced by the audit view.
+ * `timestamp` is the ledger close time (unix seconds) when known.
+ */
+export interface ProposalLifecycleEvent {
+  proposalId: number;
+  type: 'created' | 'vote' | 'state_changed' | 'queued' | 'executed' | 'canceled';
+  actor?: string;
+  state?: ProposalState;
+  ledger?: number;
+  timestamp?: number;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * Read-only audit view of a proposal's lifecycle events, ordered oldest first.
+ */
+export interface ProposalAuditView {
+  proposalId: number;
+  events: ProposalLifecycleEvent[];
+  /** True when the requested range was truncated by `limit`. */
+  truncated: boolean;
+}
+
 /** True when `contractId` is a usable, explicitly configured contract ID. */
 export function isContractConfigured(contractId: string | undefined | null): boolean {
   return typeof contractId === 'string' && contractId.length > 0 && contractId !== UNCONFIGURED_CONTRACT;
@@ -481,6 +505,46 @@ export class GovernanceSDK {
       );
     }
     return contractId;
+  }
+
+  /**
+   * Build a read-only audit view of proposal lifecycle events.
+   *
+   * Events are read from the governance contract's `get_proposal_events`
+   * entrypoint. Boundary behavior: an unknown proposal ID yields an empty
+   * event list rather than an error; a non-positive or non-integer ID is
+   * rejected; `limit` is clamped to [1, 500] and `truncated` reports when more
+   * events existed. Failure behavior: RPC/simulation errors are propagated.
+   */
+  async getProposalAuditView(
+    proposalId: number,
+    options: { limit?: number; fromLedger?: number } = {}
+  ): Promise<ProposalAuditView> {
+    if (!Number.isInteger(proposalId) || proposalId <= 0) {
+      throw new Error('proposalId must be a positive integer');
+    }
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+    const fromLedger = options.fromLedger ?? 0;
+
+    const raw = await this.simulateCall(
+      this.governanceContract,
+      'get_proposal_events',
+      { proposal_id: proposalId, from_ledger: fromLedger, limit: limit + 1 }
+    );
+
+    const list: any[] = Array.isArray(raw) ? raw : [];
+    const truncated = list.length > limit;
+    const events: ProposalLifecycleEvent[] = list.slice(0, limit).map((e: any) => ({
+      proposalId,
+      type: e.type,
+      actor: e.actor,
+      state: e.state,
+      ledger: e.ledger !== undefined ? Number(e.ledger) : undefined,
+      timestamp: e.timestamp !== undefined ? Number(e.timestamp) : undefined,
+      details: e.details,
+    }));
+
+    return { proposalId, events, truncated };
   }
 
   /**
