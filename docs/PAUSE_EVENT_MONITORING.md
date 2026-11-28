@@ -24,6 +24,32 @@ Pause events now include structured reason categories that help monitoring syste
 | `emergency` | Emergency situation requiring immediate pause | Critical alerts, immediate response |
 | `manual` | Manual administrative pause | Informational, admin action |
 
+## Emergency multisig actions
+
+The vault's multisig `emergency_pause` and `emergency_unpause` entrypoints
+require a reason string in addition to the signer set. The reason is published
+with the event, so a monitor can tell why the vault was paused or resumed
+without reconstructing the multisig session:
+
+```text
+topics: ("emergency_pause",)
+data:   (contract_address, reason)
+```
+
+```text
+topics: ("emergency_unpause",)
+data:   (contract_address, reason)
+```
+
+- The reason must be non-empty and at most 256 bytes. An empty reason fails
+  with `EmergencyReasonRequired` (20); an over-long one fails with
+  `EmergencyReasonTooLong` (21). Neither failure changes the paused state.
+- The 256-byte limit is a byte length, not a character count. A UTF-8 reason
+  with multi-byte characters consumes more than one byte per character.
+- Read the reason from the second element of the event data to display or
+  alert on it. The first element remains the emitting vault address, so
+  existing address-based filters keep working.
+
 ## Consuming Pause Events
 
 ### VaultClient Example
@@ -358,5 +384,20 @@ Run tests with:
 ```bash
 npm test -- pauseEvents.test.ts
 npm test -- emergencyAuditHistory.test.ts
+```
 
+## Contract Pause & Unpause Verification
+
+See `tests/pause_unpause_tests.rs` for Rust integration tests verifying pause and unpause behavior across every mutating contract entrypoint:
+
+- **`StellarLiquidityYieldEngine`**: `update_strategy_registry` and `update_reward_distributor` are blocked when paused or when the circuit breaker is tripped, and restored on `unpause` / `reset_circuit_breaker`.
+- **`YieldVault`**: `deposit`, `withdraw`, and `harvest` are blocked on `pause` or multisig `emergency_pause`, and restored on `unpause` or `emergency_unpause` (including cross-recovery).
+- **`RebalanceEngine`**: `create_strategy`, `update_strategy`, `analyze_rebalance_opportunities`, `execute_rebalance`, `update_pool_apy`, `record_feed_validation_failure`, `record_feed_validation_success`, `scan_opportunities`, and `execute_flash_rebalance` are blocked while paused and restored on `unpause`.
+- **`StrategyRegistry`**: `register_strategy`, `update_strategy`, and `record_performance` are blocked while paused and restored on `unpause`; admin governance actions (`approve_strategy`, `deactivate_strategy`) remain available.
+- **`MultiRewardDistributor`**: `add_reward_stream` and `claim_rewards` are blocked while paused and restored on `unpause`; `emergency_withdraw` remains available.
+- **`SwapRouter`**: `update_pool_reserves` is blocked on `pause_oracle` and restored on `unpause_oracle`.
+
+Run the contract pause/unpause tests with:
+```bash
+cargo test --test pause_unpause_tests
 ```

@@ -314,6 +314,55 @@ describe('an unreadable checkpoint', () => {
   });
 });
 
+describe('checkpoint persistence failure after event handling', () => {
+  it('can redeliver handled events after a restart from the older checkpoint', async () => {
+    const chain = new FakeChain();
+    chain.appendRange(1, 2);
+
+    const durableStore = new MemoryCheckpointStore();
+    await durableStore.save({
+      version: 1,
+      nextLedger: 1,
+      lastProcessedLedger: 0,
+      updatedAt: 0,
+    });
+
+    let failSave = true;
+    const store = {
+      load: () => durableStore.load(),
+      save: async (checkpoint: Parameters<typeof durableStore.save>[0]) => {
+        if (failSave) throw new Error('checkpoint storage unavailable');
+        await durableStore.save(checkpoint);
+      },
+      clear: () => durableStore.clear(),
+    };
+
+    const first = new ContractEventListener(chain.source(), { startLedger: 1, store });
+    const errors: string[] = [];
+    const handledBeforeRestart: number[] = [];
+    first.onError(({ error }) => errors.push(error.message));
+    first.onRaw((event) => handledBeforeRestart.push(event.ledger));
+    await first.poll();
+
+    expect(handledBeforeRestart).toEqual([1, 2]);
+    expect(errors).toContain('checkpoint storage unavailable');
+    expect(first.currentLedger).toBe(3);
+    expect((await durableStore.load())!.nextLedger).toBe(1);
+
+    failSave = false;
+    const restarted = new ContractEventListener(chain.source(), {
+      startLedger: 1,
+      store: durableStore,
+    });
+    const handledAfterRestart: number[] = [];
+    restarted.onRaw((event) => handledAfterRestart.push(event.ledger));
+    await restarted.poll();
+
+    expect(handledAfterRestart).toEqual([1, 2]);
+    expect((await durableStore.load())!.nextLedger).toBe(3);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Scenario: the RPC lag monitor comes back with the rest of the keeper
 // ---------------------------------------------------------------------------

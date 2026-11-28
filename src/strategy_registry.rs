@@ -34,6 +34,12 @@ pub enum RegistryError {
     StrategyIdCollision = 9,
     /// The caller neither created the strategy nor is the admin.
     NotStrategyCreator = 10,
+    /// The rollout step is zero, above 10000, or does not advance the rollout.
+    InvalidRolloutStep = 11,
+    /// A rollout is already active for this strategy.
+    RolloutAlreadyActive = 12,
+    /// No active rollout exists for this strategy.
+    RolloutNotFound = 13,
 }
 
 #[contracttype]
@@ -145,6 +151,11 @@ impl StrategyRegistry {
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
     }
 
+    /// Return whether this contract has been initialized.
+    pub fn is_initialized(env: Env) -> bool {
+        crate::upgrade::is_initialized(&env)
+    }
+
     /// Storage schema version of this contract's stored data.
     pub fn get_storage_version(env: Env) -> u32 {
         crate::upgrade::storage_version(&env)
@@ -155,6 +166,96 @@ impl StrategyRegistry {
     pub fn migrate(env: Env, admin: Address) -> u32 {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::mark_migrated(&env, &admin)
+    }
+
+    /// Stage a new version of an existing strategy for a gradual rollout.
+    ///
+    /// Only the creator may stage a version. The rollout starts at `start_bps`
+    /// (basis points of target exposure, 1..=10000) and must be advanced with
+    /// `advance_rollout` in monotonically increasing steps until it reaches
+    /// 10000 (full rollout). Rolling back to 0 is allowed at any time by the
+    /// admin via `abort_rollout`.
+    pub fn begin_rollout(env: Env, creator: Address, strategy_id: u32, start_bps: u32) {
+        Self::require_not_paused(&env);
+        creator.require_auth();
+        let strategies = Self::get_strategies_map(&env);
+        let strategy = strategies
+            .get(strategy_id)
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyNotFound));
+        if strategy.creator != creator {
+            panic_with_error!(&env, RegistryError::NotStrategyCreator);
+        }
+        if !(start_bps > 0 && start_bps <= 10000) {
+            panic_with_error!(&env, RegistryError::InvalidRolloutStep);
+        }
+        let mut rollouts = Self::get_rollouts_map(&env);
+        if rollouts.get(strategy_id).is_some() {
+            panic_with_error!(&env, RegistryError::RolloutAlreadyActive);
+        }
+        rollouts.set(strategy_id, start_bps);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "rollouts"), &rollouts);
+        env.events().publish(
+            (Symbol::new(&env, "rollout_started"), strategy_id),
+            (creator, start_bps),
+        );
+    }
+
+    /// Advance an active rollout to a higher exposure (creator only).
+    /// Each step must strictly increase exposure and not exceed 10000.
+    /// Reaching 10000 completes the rollout and removes it from storage.
+    pub fn advance_rollout(env: Env, creator: Address, strategy_id: u32, next_bps: u32) {
+        Self::require_not_paused(&env);
+        creator.require_auth();
+        let strategies = Self::get_strategies_map(&env);
+        let strategy = strategies
+            .get(strategy_id)
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::StrategyNotFound));
+        if strategy.creator != creator {
+            panic_with_error!(&env, RegistryError::NotStrategyCreator);
+        }
+        let mut rollouts = Self::get_rollouts_map(&env);
+        let current = rollouts
+            .get(strategy_id)
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::RolloutNotFound));
+        if !(next_bps > current && next_bps <= 10000) {
+            panic_with_error!(&env, RegistryError::InvalidRolloutStep);
+        }
+        if next_bps == 10000 {
+            rollouts.remove(strategy_id);
+        } else {
+            rollouts.set(strategy_id, next_bps);
+        }
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "rollouts"), &rollouts);
+        env.events().publish(
+            (Symbol::new(&env, "rollout_advanced"), strategy_id),
+            (creator, next_bps),
+        );
+    }
+
+    /// Abort an active rollout, removing it from storage (admin only).
+    pub fn abort_rollout(env: Env, admin: Address, strategy_id: u32) {
+        Self::require_admin(&env, admin.clone());
+        let mut rollouts = Self::get_rollouts_map(&env);
+        if rollouts.get(strategy_id).is_none() {
+            panic_with_error!(&env, RegistryError::RolloutNotFound);
+        }
+        rollouts.remove(strategy_id);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "rollouts"), &rollouts);
+        env.events().publish(
+            (Symbol::new(&env, "rollout_aborted"), strategy_id),
+            admin,
+        );
+    }
+
+    /// Current rollout exposure in basis points, or `None` if no rollout is active.
+    pub fn get_rollout(env: Env, strategy_id: u32) -> Option<u32> {
+        Self::get_rollouts_map(&env).get(strategy_id)
     }
 
     /// Register a new yield strategy
@@ -335,6 +436,20 @@ impl StrategyRegistry {
             (Symbol::new(&env, "strategy_updated"), strategy_id),
             (creator, name, risk_level),
         );
+    }
+
+    /// Return the ids of all strategies that are currently active (approved and
+    /// not pending re-approval), in ascending id order. Read-only; not blocked by
+    /// the pause flag so operators can inventory the registry during an incident.
+    pub fn list_active_strategies(env: Env) -> Vec<u32> {
+        let strategies = Self::get_strategies_map(&env);
+        let mut active: Vec<u32> = Vec::new(&env);
+        for (strategy_id, strategy) in strategies.iter() {
+            if strategy.is_active {
+                active.push_back(strategy_id);
+            }
+        }
+        active
     }
 
     /// Record strategy performance
@@ -624,6 +739,25 @@ impl StrategyRegistry {
         id
     }
 
+    fn get_rollouts_map(env: &Env) -> Map<u32, u32> {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(env, "rollouts"))
+            .unwrap_or_else(|| Map::new(env))
+    }
+
+    fn get_next_strategy_id_unused(env: &Env) -> u32 {
+        let id: u32 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(env, "next_strategy_id"))
+            .unwrap_or_else(|| env.panic_with_error(RegistryError::NotInitialized));
+        env.storage()
+            .instance()
+            .set(&Symbol::new(env, "next_strategy_id"), &(id + 1));
+        id
+    }
+
     fn get_strategies_map(env: &Env) -> Map<u32, YieldStrategy> {
         env.storage()
             .instance()
@@ -737,7 +871,6 @@ mod tests {
 
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Env, Symbol, TryFromVal, Vec};
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::{Env, Symbol, TryFromVal, Vec};
 

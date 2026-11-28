@@ -303,8 +303,11 @@ await bot.forceHarvest('VAULT_ADDRESS');
 
 ### Surviving Restarts and Outages
 Keepers can checkpoint their position so a restart resumes exactly where the
-previous process stopped — no replay, no gaps. Pass a `CheckpointStore` to the
-event listener, the RPC lag monitor, and/or the auto-rebalancer:
+previous process stopped without gaps when the checkpoint is saved
+successfully. A crash after a handler's external side effect but before the
+checkpoint save can replay that event, so handlers should be idempotent. Pass
+a `CheckpointStore` to the event listener, the RPC lag monitor, and/or the
+auto-rebalancer:
 
 ```typescript
 import { ContractEventListener, FileCheckpointStore } from 'stellar-liquidity-yield-engine-sdk';
@@ -324,6 +327,9 @@ model and `examples/restart-during-outage.ts` for a runnable demonstration:
 ```bash
 npx ts-node examples/restart-during-outage.ts
 ```
+
+For on-call recovery steps, checkpoint inspection, and failure handling, see
+the [indexer checkpoint recovery runbook](docs/INDEXER_CHECKPOINT_RECOVERY.md).
 
 ## 🎛️ React Components
 
@@ -368,6 +374,18 @@ import { ImpermanentLossChart } from '@/components/ImpermanentLossChart';
 - **In-place Upgrades**: Every contract exposes admin-only `upgrade(admin, new_wasm_hash)`,
   `migrate(admin)` and `get_storage_version()` so deployed state can be fixed
   without changing the contract address — see [docs/UPGRADING.md](docs/UPGRADING.md)
+- **Failed-Upgrade Recovery**: A triage runbook for an upgrade that did not
+  land, landed on the wrong schema, or needs a rollback — see
+  [docs/RUNBOOK_FAILED_UPGRADE.md](docs/RUNBOOK_FAILED_UPGRADE.md) and
+  `planUpgradeRecovery()` in the SDK
+- **Storage-Migration Compatibility**: `checkMigrationCompatibility()` runs a
+  captured storage fixture through a migration ladder and blocks the upgrade on
+  gaps, dropped keys, downgrades and non-idempotent work before the wasm ships —
+  see [docs/STORAGE_MIGRATION_COMPATIBILITY.md](docs/STORAGE_MIGRATION_COMPATIBILITY.md)
+- **Staged Upgrade Validation**: `planStagedUpgrade()` gates a promotion on
+  installed wasm, simulation, a verified staging copy, approvals and a written
+  rollback plan, and refuses to advance until each stage is complete — see
+  [docs/STAGED_UPGRADE_VALIDATION.md](docs/STAGED_UPGRADE_VALIDATION.md)
 - **Emergency Pause**: Admin can pause all operations
 - **Access Control**: Role-based permissions
 - **Input Validation**: Comprehensive parameter checks
@@ -406,6 +424,8 @@ Real-time monitoring of:
 - Gas usage and optimization
 - User activity patterns
 
+The `/transactions` history includes expandable [transaction confirmation details](docs/TRANSACTION_CONFIRMATION_DETAILS.md) showing the vault and pool selected for each transaction.
+
 ## 🌐 Network Support
 
 ### Testnet
@@ -417,6 +437,23 @@ Real-time monitoring of:
 - **RPC**: `https://soroban.stellar.org`
 - **Horizon**: `https://horizon.stellar.org`
 - **Network Passphrase**: `Public Global Stellar Network ; September 2015`
+
+### Supported Wallet Providers
+
+The SDK and UI interact with user wallets only through the signing interface
+exposed by the connected provider. Permissions are granted per request; the
+SDK never stores private keys.
+
+| Provider | Networks | Permissions Requested | Notes |
+|----------|----------|------------------------|-------|
+| Freighter | Testnet, Mainnet | Read account address, sign transactions | Browser extension; user approves each signature |
+| Albedo | Testnet, Mainnet | Read account address, sign transactions | Web-based signer; no extension required |
+| Keypair (`Keypair` from Stellar SDK) | Testnet, Mainnet | Sign transactions locally | Server-side bots only; the key must be supplied via environment configuration |
+
+Behavior by case:
+- **Normal**: the provider returns a public address and signs requested transactions after user approval.
+- **Boundary**: a wallet on a network different from the configured `STELLAR_NETWORK` is rejected before any transaction is built.
+- **Failure**: if a provider is missing, denies a permission, or returns a malformed signature, the operation fails with an explicit error and no transaction is submitted.
 
 ## 🔧 Configuration
 
@@ -448,7 +485,50 @@ CHECK_INTERVAL=300000
 `.env.example` also lists governance-related addresses
 (`GOVERNANCE_CONTRACT`, `VOTING_ESCROW_CONTRACT`, etc.) read by
 `sdk/src/governance.ts`. There is no working contract to deploy for those
-yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md).
+yet — see [GOVERNANCE_STATUS.md](GOVERNANCE_STATUS.md). The SDK history reader
+does support bounded pages via `getProposalPage()` / `paginateProposals()` for
+keepers and UI callers, plus a per-account reporting surface through
+`getParticipationSummary()` / `summarizeGovernanceParticipation()` (proposals
+voted, for/against split, voting power used and participation rate).
+
+### Optional Network Configuration Behavior
+
+When optional network configuration fields or environment variables are omitted
+(or contain only whitespace), the SDK resolves deterministic defaults via
+`resolveNetworkConfig()` (and the preset `TESTNET_CONFIG` / `MAINNET_CONFIG`
+objects):
+
+- **Default network:** Omitting `network` defaults to `'testnet'`
+  (`DEFAULT_NETWORK`).
+- **Default endpoints:** Omitting `horizonUrl` / `sorobanRpcUrl` checks the
+  matching network environment variables (`HORIZON_URL` / `SOROBAN_RPC_URL` for
+  testnet, `MAINNET_HORIZON_URL` / `MAINNET_SOROBAN_RPC_URL` for mainnet,
+  `FUTURENET_HORIZON_URL` / `FUTURENET_SOROBAN_RPC_URL` for futurenet) and falls
+  back to the public Stellar endpoints in `DEFAULT_NETWORK_ENDPOINTS`.
+- **Optional client config:**
+  - `createVaultClient(vaultAddress)` defaults to `'testnet'` and does not
+    require contract environment variables to construct.
+  - `createGovernanceClient()` defaults to `'testnet'`, starts read-only when
+    `keypair` is omitted, and reports unconfigured contracts via
+    `isContractConfigured(...) === false`.
+  - `StrategyRegistryClient` falls back to built-in default strategies when
+    `contracts.strategyRegistry` is empty or unavailable.
+- **Explicit failure cases:**
+  - Passing an unsupported network name throws `NetworkConfigError`
+    (`INVALID_NETWORK`) rather than silently targeting mainnet.
+  - Supplying a malformed or non-`http(s)` endpoint URL (via config or env)
+    throws `NetworkConfigError` (`INVALID_ENDPOINT_URL`).
+  - Accessing an unset or whitespace-only contract ID on
+    `TESTNET_CONFIG.contracts.*` / `MAINNET_CONFIG.contracts.*` throws
+    `NetworkConfigError` (`MISSING_CONTRACT_ID`) naming the missing variable,
+    and constructing `RebalancerClient` without a `rebalanceEngine` contract ID
+    throws `RebalanceError` (`MISSING_CONTRACT_ID`).
+
+Protocol parameter changes (fees, rebalance threshold, insurance reserve)
+follow [docs/CONFIG_MIGRATION_CHECKLIST.md](docs/CONFIG_MIGRATION_CHECKLIST.md)
+and `buildConfigMigrationChecklist()` in the SDK. A change that alters a stored
+shape also needs the version bump and migration described in
+[docs/UPGRADING.md](docs/UPGRADING.md).
 
 ### Dashboard environment variables
 
@@ -546,10 +626,20 @@ before running step 4 above).
 For reproducible randomized swap path and quote tests, including seed replay
 and known router limitations, see [Router fuzzing](docs/ROUTER_FUZZING.md).
 
+For model-based `YieldVault` share accounting sequence tests (comparing
+`deposit`, `withdraw`, and `harvest` sequences against a reference state
+machine), run:
+```bash
+cargo test --test vault_share_model_tests
+```
+
 ### Unit Tests
 ```bash
 # Run contract tests (run from the repository root)
 cargo test
+
+# Run token amount boundary tests (zero, minimum, maximum)
+cargo test --test token_amount_boundary_tests
 
 # Run SDK tests
 cd sdk/
@@ -559,6 +649,9 @@ npm test
 cd ui/
 npm test
 ```
+
+For TTL renewal across repeated contract writes, see
+[Storage TTL testing](docs/STORAGE_TTL_TESTING.md).
 
 ### Integration Tests
 ```bash
@@ -626,6 +719,10 @@ class YieldCalculator {
   static calculateMaxDrawdown(values: number[]): MaxDrawdownData
 }
 ```
+
+## SDK Error and Retry API
+
+For domain error types, retry options, transient-error detection, RPC wrapper behavior, and write-retry safety guidance, see [SDK Error and Retry API Reference](docs/SDK_ERROR_RETRY_API.md).
 
 ## 🤝 Contributing
 

@@ -220,6 +220,22 @@ export interface ListenerConfig {
   pageSize?: number;
 
   /**
+   * Restrict event delivery to events whose `topic` array starts with at least
+   * one of these prefixes. Each prefix is a non-empty array of exact,
+   * case-sensitive topic segment strings (e.g. `[['vault', 'deposit'], ['harvest']]`).
+   *
+   * When omitted or empty (`[]`), events with any topic are forwarded.
+   * Passing an empty prefix (`[[]]`) or a blank/non-string segment throws an
+   * `Error` when constructing the listener.
+   *
+   * When set and `rpcFilter.topics` is not explicitly provided, each prefix is
+   * also pushed down to the RPC `getEvents` filter with a trailing `'**'`
+   * wildcard (`[...prefix, '**']`), and re-checked at the SDK level before
+   * dispatching to `onRaw` or typed handlers.
+   */
+  topicPrefixes?: string[][];
+
+  /**
    * Additional RPC-level event filter (e.g. event type or topic). The
    * `contractIds` inside this filter is merged with (or overridden by)
    * `contractAddresses` — do **not** set both; use `contractAddresses`.
@@ -264,13 +280,248 @@ export interface ListenerConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Error event
+// Error event & listener state transitions
 // ---------------------------------------------------------------------------
 
 export interface ListenerErrorEvent {
   error: Error;
   /** Current cursor (ledger) at the time of the error. */
   ledger: number;
+}
+
+/**
+ * Explicit operational state of a {@link ContractEventListener}.
+ *
+ * - `'idle'`: Constructed and not yet started (manual `poll()` calls may still run).
+ * - `'running'`: Actively polling and healthy.
+ * - `'error'`: Most recent poll, restore, or persistence step failed.
+ * - `'recovering'`: Attempting a poll after entering `'error'` to verify recovery.
+ * - `'stopped'`: Polling was explicitly stopped via `stop()`.
+ */
+export type ListenerState = 'idle' | 'running' | 'error' | 'recovering' | 'stopped';
+
+/** Reason a {@link ContractEventListener} transitioned between states. */
+export type ListenerStateTransitionReason =
+  | 'started'
+  | 'stopped'
+  | 'poll_error'
+  | 'cursor_expired'
+  | 'restore_error'
+  | 'persist_error'
+  | 'recovery_attempt'
+  | 'recovered';
+
+/** Record emitted whenever a {@link ContractEventListener} changes state. */
+export interface ListenerStateTransition {
+  /** State before the transition. */
+  from: ListenerState;
+  /** State after the transition. */
+  to: ListenerState;
+  /** Why the transition happened. */
+  reason: ListenerStateTransitionReason;
+  /** Listener cursor (next ledger) at the time of the transition. */
+  ledger: number;
+  /** Wall-clock timestamp (ms since epoch) from the listener's clock. */
+  timestamp: number;
+  /** Number of consecutive failed polls at the time of the transition. */
+  consecutiveErrors: number;
+  /** Underlying error when transitioning into `'error'`. */
+  error?: Error;
+}
+
+/** Handler invoked whenever the listener transitions to a new state. */
+export type ListenerStateHandler = (transition: ListenerStateTransition) => void;
+
+// ---------------------------------------------------------------------------
+// Cursor expiration
+// ---------------------------------------------------------------------------
+
+/** Why the RPC stopped accepting the listener's saved cursor. */
+export type CursorExpirationReason = 'expired' | 'pruned' | 'invalid';
+
+/**
+ * Typed error raised when the RPC rejects a saved cursor.
+ *
+ * Soroban RPC keeps event history for a bounded window. A paging cursor that
+ * points into a ledger older than that window is rejected, which is a
+ * different failure from a network outage: retrying the same cursor will keep
+ * failing, so the listener drops it and resumes from its ledger position.
+ */
+export class CursorExpiredError extends Error {
+  /** The cursor the RPC rejected (a paging token, or a ledger number). */
+  readonly cursor: string | number;
+  /** Ledger the listener will resume from on the next poll. */
+  readonly resumeFromLedger: number;
+  /** Best-effort classification of the RPC rejection. */
+  readonly reason: CursorExpirationReason;
+  /** The original RPC error, kept for logging. */
+  readonly originalError: Error;
+
+  constructor(
+    cursor: string | number,
+    resumeFromLedger: number,
+    reason: CursorExpirationReason,
+    originalError: Error,
+  ) {
+    super(
+      `RPC cursor ${String(cursor)} is no longer usable (${reason}); ` +
+        `resuming from ledger ${resumeFromLedger}`,
+    );
+    this.name = 'CursorExpiredError';
+    this.cursor = cursor;
+    this.resumeFromLedger = resumeFromLedger;
+    this.reason = reason;
+    this.originalError = originalError;
+  }
+}
+
+/** Flatten an unknown thrown value into searchable text. */
+function errorText(error: unknown): string {
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) {
+    const extra = error as Error & {
+      code?: unknown;
+      details?: unknown;
+      response?: { data?: unknown };
+    };
+    return [error.message, extra.code, extra.details, extra.response?.data]
+      .filter((part) => part !== undefined && part !== null)
+      .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
+      .join(' ');
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+/**
+ * Whether an RPC failure means the saved cursor can no longer be used.
+ *
+ * Detection is message-based because Soroban RPC does not expose a stable
+ * machine-readable code for this condition. The check deliberately requires
+ * both a cursor mention and an expiration-like word so an unrelated error that
+ * happens to contain "cursor" is not misclassified.
+ */
+export function isCursorExpiredError(error: unknown): boolean {
+  const text = errorText(error).toLowerCase();
+  if (!text.includes('cursor')) return false;
+  return /(expir|too old|stale|invalid|not found|unknown|pruned|out of range|outside)/.test(
+    text,
+  );
+}
+
+/** Classify a cursor-expiration error for the typed result. */
+export function classifyCursorExpiration(error: unknown): CursorExpirationReason {
+  const text = errorText(error).toLowerCase();
+  if (text.includes('prun')) return 'pruned';
+  if (text.includes('invalid') || text.includes('not found') || text.includes('unknown')) {
+    return 'invalid';
+  }
+  return 'expired';
+}
+
+/** Outcome of a single poll. */
+export type PollResult =
+  | {
+      /** The poll completed and the listener advanced. */
+      status: 'ok';
+      /** Number of raw events returned by the RPC in this poll. */
+      eventsProcessed: number;
+      /** Ledger the next poll will start from. */
+      nextLedger: number;
+    }
+  | {
+      /** The saved cursor was rejected; the listener dropped it. */
+      status: 'cursor_expired';
+      /** Cursor the RPC rejected. */
+      cursor: string | number;
+      /** Ledger the next poll will resume from. */
+      resumeFromLedger: number;
+      /** Typed error also delivered through the error handler. */
+      error: CursorExpiredError;
+    }
+  | {
+      /** Any other poll failure (network, checkpoint, ...). */
+      status: 'error';
+      /** Ledger at the time of the failure. */
+      ledger: number;
+      /** The underlying error. */
+      error: Error;
+    };
+
+// ---------------------------------------------------------------------------
+// Topic prefix matching & validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate and defensively copy a list of topic prefixes.
+ *
+ * Each prefix must be a non-empty array of non-empty (non-whitespace) strings.
+ * An empty outer array `[]` is valid and represents pass-all mode.
+ *
+ * @throws {Error} when any prefix is empty or contains a blank/non-string segment.
+ */
+export function validateTopicPrefixes(
+  prefixes: readonly (readonly string[])[],
+): string[][] {
+  if (!Array.isArray(prefixes)) {
+    throw new Error('topicPrefixes must be an array of string arrays');
+  }
+
+  return prefixes.map((prefix, prefixIndex) => {
+    if (!Array.isArray(prefix) || prefix.length === 0) {
+      throw new Error(
+        `Invalid topic prefix at index ${prefixIndex}: prefix must be a non-empty array of strings`,
+      );
+    }
+
+    return prefix.map((segment, segIndex) => {
+      if (typeof segment !== 'string' || segment.trim().length === 0) {
+        throw new Error(
+          `Invalid topic prefix segment at [${prefixIndex}][${segIndex}]: segment must be a non-empty string`,
+        );
+      }
+      return segment;
+    });
+  });
+}
+
+/**
+ * Return `true` when `topic` starts with every segment of `prefix` (exact,
+ * case-sensitive string comparison).
+ *
+ * Returns `false` when `prefix` is empty, `topic` is missing/shorter than
+ * `prefix`, or any leading topic element is not a matching string.
+ */
+export function matchesTopicPrefix(
+  topic: readonly unknown[] | undefined,
+  prefix: readonly string[],
+): boolean {
+  if (!Array.isArray(topic) || prefix.length === 0 || topic.length < prefix.length) {
+    return false;
+  }
+
+  for (let i = 0; i < prefix.length; i += 1) {
+    if (typeof topic[i] !== 'string' || topic[i] !== prefix[i]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Return `true` when `prefixes` is empty (pass-all) or `topic` matches at
+ * least one prefix in `prefixes`.
+ */
+export function matchesAnyTopicPrefix(
+  topic: readonly unknown[] | undefined,
+  prefixes: readonly (readonly string[])[],
+): boolean {
+  if (prefixes.length === 0) return true;
+  return prefixes.some((prefix) => matchesTopicPrefix(topic, prefix));
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +572,9 @@ export class ContractEventListener {
   /** Lower-cased canonical address allow-list (empty ⟹ pass-all). */
   private readonly allowedAddresses: Set<string>;
 
+  /** Validated topic prefixes (empty ⟹ pass-all). */
+  private readonly topicPrefixes: string[][];
+
   /** Latest ledger the listener has consumed (exclusive lower bound). */
   private cursor: number;
   /** Tail of the serialized poll queue; keeps polls from overlapping. */
@@ -332,9 +586,6 @@ export class ContractEventListener {
    * at {@link cursor}, so a page that ends mid-ledger loses nothing.
    */
   private pagingCursor: string | null = null;
-
-  /** Tail of the poll queue; polls run one after another, never overlapping. */
-  private pollChain: Promise<void> = Promise.resolve();
 
   /** Durable store for the listener's position (optional). */
   private readonly store?: CheckpointStore;
@@ -359,6 +610,21 @@ export class ContractEventListener {
 
   /** Error handlers. */
   private errorHandlers: Set<(e: ListenerErrorEvent) => void> = new Set();
+
+  /** State transition handlers. */
+  private stateHandlers: Set<ListenerStateHandler> = new Set();
+
+  /** Current operational state of the listener. */
+  private _state: ListenerState = 'idle';
+
+  /** Number of consecutive poll/restore/persist failures since the last healthy poll. */
+  private _consecutiveErrors = 0;
+
+  /** Most recent error observed while in `'error'` or `'recovering'`, or `null` when healthy. */
+  private _lastError: Error | null = null;
+
+  /** Most recent state transition record, or `null` before any transition. */
+  private _lastTransition: ListenerStateTransition | null = null;
 
   /** Timer handle returned by `setInterval`, null when stopped. */
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -414,6 +680,9 @@ export class ContractEventListener {
     this.allowedAddresses = new Set(
       (config.contractAddresses ?? []).map((a) => a.toLowerCase()),
     );
+
+    // Validate and defensively copy topic prefixes up front.
+    this.topicPrefixes = validateTopicPrefixes(config.topicPrefixes ?? []);
   }
 
   // -------------------------------------------------------------------------
@@ -467,6 +736,27 @@ export class ContractEventListener {
     return this;
   }
 
+  /** Remove a previously registered error handler. */
+  offError(handler: (e: ListenerErrorEvent) => void): this {
+    this.errorHandlers.delete(handler);
+    return this;
+  }
+
+  /**
+   * Register a handler that is notified whenever the listener transitions
+   * between operational states (e.g. `running -> error -> recovering -> running`).
+   */
+  onStateChange(handler: ListenerStateHandler): this {
+    this.stateHandlers.add(handler);
+    return this;
+  }
+
+  /** Remove a previously registered state transition handler. */
+  offStateChange(handler: ListenerStateHandler): this {
+    this.stateHandlers.delete(handler);
+    return this;
+  }
+
   // -------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------
@@ -484,6 +774,9 @@ export class ContractEventListener {
    */
   start(intervalMs = 5_000): void {
     if (this.intervalHandle !== null) return; // already running
+    this._consecutiveErrors = 0;
+    this._lastError = null;
+    this.transitionState('running', 'started');
     this.intervalHandle = setInterval(() => void this.poll(), intervalMs);
     // Poll immediately on start (the first poll restores the durable
     // position first); it runs in the background so `start()` stays
@@ -497,11 +790,34 @@ export class ContractEventListener {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
     }
+    if (this._state !== 'idle' && this._state !== 'stopped') {
+      this.transitionState('stopped', 'stopped');
+    }
   }
 
   /** Whether the listener is currently polling. */
   get isRunning(): boolean {
     return this.intervalHandle !== null;
+  }
+
+  /** Current operational state of the listener. */
+  get state(): ListenerState {
+    return this._state;
+  }
+
+  /** Number of consecutive failed polls/operations since the last healthy poll. */
+  get consecutiveErrors(): number {
+    return this._consecutiveErrors;
+  }
+
+  /** Most recent error while in `'error'` or `'recovering'`, or `null` when healthy. */
+  get lastError(): Error | null {
+    return this._lastError;
+  }
+
+  /** Most recent state transition record, or `null` before any transition. */
+  get lastTransition(): ListenerStateTransition | null {
+    return this._lastTransition;
   }
 
   /** The ledger the listener will start from on the next poll. */
@@ -603,13 +919,32 @@ export class ContractEventListener {
    * poll is in flight waits for it to finish.
    */
   poll(): Promise<void> {
+    return this.pollWithResult().then(() => undefined);
+  }
+
+  /**
+   * Perform a single poll and return a typed outcome.
+   *
+   * Unlike {@link poll}, this distinguishes a rejected cursor from any other
+   * failure. A cursor the RPC has aged out is not retryable with the same
+   * position, so the listener drops the paging token and reports
+   * `cursor_expired` with the ledger it will resume from.
+   *
+   * Polls never overlap: a call made while another poll is in flight waits for
+   * it to finish.
+   */
+  pollWithResult(): Promise<PollResult> {
     // Chain onto the previous poll. Both arms run the next poll so a rejection
     // can never stall the loop permanently.
-    this.pollChain = this.pollChain.then(
+    const run = this.pollChain.then(
       () => this.runPoll(),
       () => this.runPoll(),
     );
-    return this.pollChain;
+    this.pollChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   // -------------------------------------------------------------------------
@@ -620,16 +955,48 @@ export class ContractEventListener {
    * Run a single poll: restore the durable position (first poll only),
    * fetch, dispatch and persist.
    */
-  private async runPoll(): Promise<void> {
+  private async runPoll(): Promise<PollResult> {
+    if (this._state === 'error') {
+      this.transitionState('recovering', 'recovery_attempt');
+    }
+
     try {
       await this.restoreIfNeeded();
       const request = this.buildRequest();
       const response = await this.source.getEvents(request);
+      const eventsProcessed = response.events.length;
       this.processResponse(response);
-      await this.persistIfEnabled();
+      const persisted = await this.persistIfEnabled();
+      if (persisted && (this._state === 'recovering' || this._state === 'error')) {
+        this._consecutiveErrors = 0;
+        this._lastError = null;
+        this.transitionState(this.isRunning ? 'running' : 'idle', 'recovered');
+      }
+      return { status: 'ok', eventsProcessed, nextLedger: this.cursor };
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+
+      if (isCursorExpiredError(error)) {
+        const cursor = this.pagingCursor ?? this.cursor;
+        const resumeFromLedger = this.cursor;
+        const expired = new CursorExpiredError(
+          cursor,
+          resumeFromLedger,
+          classifyCursorExpiration(error),
+          error,
+        );
+        // The token is unusable. Dropping it makes the next poll fall back to
+        // the ledger position, which may replay part of the last ledger but
+        // never skips an event.
+        this.pagingCursor = null;
+        this.recordErrorState(expired, 'cursor_expired');
+        this.emitError(expired);
+        return { status: 'cursor_expired', cursor, resumeFromLedger, error: expired };
+      }
+
+      this.recordErrorState(error, 'poll_error');
       this.emitError(error);
+      return { status: 'error', ledger: this.cursor, error };
     }
   }
 
@@ -649,20 +1016,61 @@ export class ContractEventListener {
       await this.restore();
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      this.recordErrorState(error, 'restore_error');
       this.emitError(error);
     }
   }
 
-  private async persistIfEnabled(): Promise<void> {
-    if (!this.store) return;
-    if (this.config.persistOnPoll === false) return;
+  private async persistIfEnabled(): Promise<boolean> {
+    if (!this.store) return true;
+    if (this.config.persistOnPoll === false) return true;
 
     try {
       await this.persist();
+      return true;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      this.recordErrorState(error, 'persist_error');
       this.emitError(error);
+      return false;
     }
+  }
+
+  private recordErrorState(error: Error, reason: ListenerStateTransitionReason): void {
+    this._consecutiveErrors += 1;
+    this._lastError = error;
+    if (this._state !== 'stopped') {
+      this.transitionState('error', reason, error);
+    }
+  }
+
+  private transitionState(
+    to: ListenerState,
+    reason: ListenerStateTransitionReason,
+    error?: Error,
+  ): void {
+    const from = this._state;
+    if (from === to) return;
+
+    this._state = to;
+    const transition: ListenerStateTransition = {
+      from,
+      to,
+      reason,
+      ledger: this.cursor,
+      timestamp: this.now(),
+      consecutiveErrors: this._consecutiveErrors,
+      ...(error !== undefined ? { error } : {}),
+    };
+    this._lastTransition = transition;
+
+    this.stateHandlers.forEach((handler) => {
+      try {
+        handler(transition);
+      } catch {
+        // A broken state observer must not take the keeper down.
+      }
+    });
   }
 
   private emitError(error: Error): void {
@@ -692,6 +1100,12 @@ export class ContractEventListener {
       filter.contractIds = [...this.allowedAddresses];
     }
 
+    // Push topic prefix filtering down to the RPC layer when configured and
+    // no explicit rpcFilter.topics override was provided.
+    if (this.topicPrefixes.length > 0 && !filter.topics?.length) {
+      filter.topics = this.topicPrefixes.map((prefix) => [...prefix, '**']);
+    }
+
     const position = this.pagingCursor !== null
       ? { cursor: this.pagingCursor }
       : { startLedger: this.cursor };
@@ -713,6 +1127,12 @@ export class ContractEventListener {
       // SDK-level guard: drop events not in the allow-list.
       if (!this.isAllowed(raw.contractId)) {
         this.logSkipped('address_filtered', raw, null);
+        continue;
+      }
+
+      // SDK-level guard: drop events that do not match any configured topic prefix.
+      if (!this.matchesTopicFilter(raw.topic)) {
+        this.logSkipped('topic_filtered', raw, null);
         continue;
       }
 
@@ -798,6 +1218,15 @@ export class ContractEventListener {
   private isAllowed(contractId: string): boolean {
     if (this.allowedAddresses.size === 0) return true;
     return this.allowedAddresses.has(contractId.toLowerCase());
+  }
+
+  /**
+   * Returns true when:
+   * - no topic prefixes are configured (pass-all mode), or
+   * - the event's topic array starts with at least one configured prefix.
+   */
+  private matchesTopicFilter(topic: unknown[] | undefined): boolean {
+    return matchesAnyTopicPrefix(topic, this.topicPrefixes);
   }
 
   /**

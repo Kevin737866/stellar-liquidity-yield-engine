@@ -8,7 +8,7 @@
  * npx ts-node examples/partnership-airdrop.ts
  */
 
-import { Keypair, Networks, TransactionBuilder, Operation, Asset, HorizonServer } from 'stellar-sdk';
+import { Address, Keypair, Networks, TransactionBuilder, Operation, Asset, Horizon } from 'stellar-sdk';
 import { RewardsSDK, RewardStreamInfo, PendingRewards } from '../sdk/src/rewards';
 import { VaultClient } from '../sdk/src/vaultClient';
 
@@ -66,7 +66,7 @@ class PartnershipAirdrop {
     private snapshot: AirdropSnapshot | null = null;
 
     constructor() {
-        const horizonServer = new HorizonServer(CONFIG.horizonUrl, CONFIG.networkPassphrase);
+        const horizonServer = new Horizon.Server(CONFIG.horizonUrl, { allowHttp: false });
 
         this.rewardsSDK = new RewardsSDK({
             horizonServer,
@@ -79,9 +79,9 @@ class PartnershipAirdrop {
             },
         });
 
-        this.vaultClient = new VaultClient({
-            horizonServer,
-            networkPassphrase: CONFIG.networkPassphrase,
+        this.vaultClient = new VaultClient(new Address(CONFIG.rewardDistributor), {
+            network: 'testnet',
+            sorobanRpcUrl: 'https://soroban-testnet.stellar.org',
         });
     }
 
@@ -165,15 +165,14 @@ class PartnershipAirdrop {
     /**
      * Create airdrop snapshot from vault depositors
      */
-    async createSnapshot(vaultAddress: string, minDeposit: string = '10000000'): Promise<AirdropSnapshot> {
+    async createSnapshot(_vaultAddress: string, minDeposit: string = '10000000'): Promise<AirdropSnapshot> {
         console.log('Creating airdrop snapshot from vault depositors...');
 
         // In production, query actual vault depositors
-        const vaultInfo = await this.vaultClient.getVaultInfo(vaultAddress);
-
         // Mock recipients based on vault shares
         const recipients: AirdropRecipient[] = [];
-        const totalShares = BigInt(vaultInfo.totalShares.toString());
+        const vaultMetrics = await this.vaultClient.getMetrics();
+        const totalShares = vaultMetrics.totalShares;
 
         // Simulate recipients (in production, query actual depositors)
         const mockRecipients = [
@@ -399,7 +398,7 @@ class PartnershipAirdrop {
     /**
      * Format amount for display
      */
-    private formatAmount(amount: string | bigint): string {
+    formatAmount(amount: string | bigint): string {
         const num = typeof amount === 'string' ? parseFloat(amount) : Number(amount);
         return (num / 1e7).toLocaleString(undefined, {
             minimumFractionDigits: 2,

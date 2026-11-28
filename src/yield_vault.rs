@@ -1,7 +1,31 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, token::TokenClient,
-    Address, Env, Map, Symbol, Vec,
+    Address, Env, Map, String, Symbol, Vec,
 };
+
+/// Maximum length of an emergency action reason, in bytes.
+///
+/// The reason is published in the event payload, so an unbounded string would
+/// let a signer inflate the event size (and the ledger fee) arbitrarily. 256
+/// bytes is enough for a short incident reference.
+pub const MAX_EMERGENCY_REASON_LENGTH: u32 = 256;
+
+/// Canonical Stellar zero-key Ed25519 account address (32 zero bytes).
+/// Rejected as a placeholder `pool_id` during vault initialization.
+pub const ZERO_ACCOUNT_ADDRESS: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+/// Canonical Stellar zero-hash contract address (32 zero bytes).
+/// Rejected as a placeholder `pool_id` during vault initialization.
+pub const ZERO_CONTRACT_ADDRESS: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+
+/// Maximum allowed vault performance fee rate in basis points (20% = 2,000 bps).
+pub const MAX_FEE_RATE_BPS: u32 = 2_000;
+
+/// Maximum allowed harvest fee in basis points (10% = 1,000 bps).
+pub const MAX_HARVEST_FEE_BPS: u32 = 1_000;
+
+/// Maximum allowed withdrawal fee in basis points (5% = 500 bps).
+pub const MAX_WITHDRAWAL_FEE_BPS: u32 = 500;
 
 /// Typed failures of the yield vault.
 ///
@@ -50,6 +74,20 @@ pub enum VaultError {
     ThresholdMustBePositive = 18,
     /// Fewer authorized emergency signers than the threshold were supplied.
     InsufficientEmergencySignatures = 19,
+    /// The emergency action did not include a reason.
+    EmergencyReasonRequired = 20,
+    /// The emergency action reason exceeds [`MAX_EMERGENCY_REASON_LENGTH`].
+    EmergencyReasonTooLong = 21,
+    /// `token_a` and `token_b` must refer to distinct token contracts.
+    IdenticalTokens = 22,
+    /// `pool_id` cannot be a zero/placeholder Stellar address.
+    InvalidPoolId = 23,
+    /// `fee_rate` exceeds [`MAX_FEE_RATE_BPS`].
+    FeeRateTooHigh = 24,
+    /// `harvest_fee` exceeds [`MAX_HARVEST_FEE_BPS`].
+    HarvestFeeTooHigh = 25,
+    /// `withdrawal_fee` exceeds [`MAX_WITHDRAWAL_FEE_BPS`].
+    WithdrawalFeeTooHigh = 26,
 }
 
 #[contracttype]
@@ -180,7 +218,14 @@ pub const DEFAULT_TIMELOCK_DELAY: u64 = 48 * 60 * 60;
 #[cfg(feature = "yield-vault")]
 #[contractimpl]
 impl YieldVault {
-    /// Initialize a new yield vault
+    /// Initialize a new yield vault.
+    ///
+    /// # Invariants
+    /// - `token_a` and `token_b` must be distinct addresses (`VaultError::IdenticalTokens`).
+    /// - `pool_id` must not be a zero/placeholder address (`VaultError::InvalidPoolId`).
+    /// - Fee parameters (in basis points) must stay within their documented ceilings:
+    ///   `fee_rate <= MAX_FEE_RATE_BPS`, `harvest_fee <= MAX_HARVEST_FEE_BPS`,
+    ///   and `withdrawal_fee <= MAX_WITHDRAWAL_FEE_BPS`.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -194,6 +239,26 @@ impl YieldVault {
         withdrawal_fee: u32,
         treasury: Address,
     ) {
+        if token_a == token_b {
+            panic_with_error!(&env, VaultError::IdenticalTokens);
+        }
+
+        let zero_account = Address::from_string(&String::from_str(&env, ZERO_ACCOUNT_ADDRESS));
+        let zero_contract = Address::from_string(&String::from_str(&env, ZERO_CONTRACT_ADDRESS));
+        if pool_id == zero_account || pool_id == zero_contract {
+            panic_with_error!(&env, VaultError::InvalidPoolId);
+        }
+
+        if fee_rate > MAX_FEE_RATE_BPS {
+            panic_with_error!(&env, VaultError::FeeRateTooHigh);
+        }
+        if harvest_fee > MAX_HARVEST_FEE_BPS {
+            panic_with_error!(&env, VaultError::HarvestFeeTooHigh);
+        }
+        if withdrawal_fee > MAX_WITHDRAWAL_FEE_BPS {
+            panic_with_error!(&env, VaultError::WithdrawalFeeTooHigh);
+        }
+
         let vault_info = VaultInfo {
             name: name.clone(),
             token_a: token_a.clone(),
@@ -265,6 +330,11 @@ impl YieldVault {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
+    }
+
+    /// Return whether this contract has been initialized.
+    pub fn is_initialized(env: Env) -> bool {
+        crate::upgrade::is_initialized(&env)
     }
 
     /// Storage schema version of this contract's stored data.
@@ -1362,26 +1432,48 @@ impl YieldVault {
         }
     }
 
-    /// Emergency pause (multisig required)
-    pub fn emergency_pause(env: Env, signers: Vec<Address>) {
+    /// Reject an emergency reason that is empty or too long.
+    fn require_valid_emergency_reason(env: &Env, reason: &String) {
+        if reason.is_empty() {
+            env.panic_with_error(VaultError::EmergencyReasonRequired);
+        }
+        if reason.len() > MAX_EMERGENCY_REASON_LENGTH {
+            env.panic_with_error(VaultError::EmergencyReasonTooLong);
+        }
+    }
+
+    /// Emergency pause (multisig required).
+    ///
+    /// `reason` is published with the event so an off-chain monitor can tell
+    /// why the vault was paused without reconstructing the multisig session.
+    pub fn emergency_pause(env: Env, signers: Vec<Address>, reason: String) {
         Self::require_multisig(&env, signers);
+        Self::require_valid_emergency_reason(&env, &reason);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &true);
 
-        env.events()
-            .publish(("emergency_pause",), (env.current_contract_address(),));
+        env.events().publish(
+            ("emergency_pause",),
+            (env.current_contract_address(), reason),
+        );
     }
 
-    /// Emergency unpause (multisig required)
-    pub fn emergency_unpause(env: Env, signers: Vec<Address>) {
+    /// Emergency unpause (multisig required).
+    ///
+    /// `reason` is published with the event for the same auditability reason as
+    /// [`Self::emergency_pause`].
+    pub fn emergency_unpause(env: Env, signers: Vec<Address>, reason: String) {
         Self::require_multisig(&env, signers);
+        Self::require_valid_emergency_reason(&env, &reason);
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "paused"), &false);
 
-        env.events()
-            .publish(("emergency_unpause",), (env.current_contract_address(),));
+        env.events().publish(
+            ("emergency_unpause",),
+            (env.current_contract_address(), reason),
+        );
     }
 }
 
@@ -1390,10 +1482,10 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
     use soroban_sdk::{
         token::{StellarAssetClient, TokenClient},
-        Env, Symbol,
+        Env, Symbol, TryFromVal, Val,
     };
 
     fn setup(
@@ -2296,21 +2388,24 @@ mod tests {
             apy: 2_500,
         };
 
-        env.storage().instance().set(
-            &Symbol::new(&env, "harvest_snapshot"),
-            &snapshot,
-        );
-        env.storage().instance().set(
-            &Symbol::new(&env, "metrics"),
-            &VaultMetrics {
-                total_shares: 10,
-                total_amount_a: 5_000,
-                total_amount_b: 5_000,
-                apy: 0,
-                tvl: 10_000,
-                last_harvest: 1_000,
-            },
-        );
+        // The snapshot and metrics live in the vault's own storage, so they can
+        // only be written from inside its contract context.
+        env.as_contract(&vault.address, || {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "harvest_snapshot"), &snapshot);
+            env.storage().instance().set(
+                &Symbol::new(&env, "metrics"),
+                &VaultMetrics {
+                    total_shares: 10,
+                    total_amount_a: 5_000,
+                    total_amount_b: 5_000,
+                    apy: 0,
+                    tvl: 10_000,
+                    last_harvest: 1_000,
+                },
+            );
+        });
 
         env.ledger().set_timestamp(20_000);
 
@@ -2416,6 +2511,255 @@ mod tests {
             } else {
                 (false, 0)
             }
+        }
+    }
+
+    // ==================== Emergency action audit trail (#239) ====================
+
+    fn configure_emergency_multisig(
+        env: &Env,
+        vault: &YieldVaultClient,
+        admin: &Address,
+    ) -> Vec<Address> {
+        let mut signers = Vec::new(env);
+        signers.push_back(Address::generate(env));
+        signers.push_back(Address::generate(env));
+        signers.push_back(Address::generate(env));
+        vault.set_emergency_signers(admin, &signers);
+        vault.set_emergency_threshold(admin, &3u32);
+        signers
+    }
+
+    fn last_event_data(env: &Env) -> Val {
+        let events = env.events().all();
+        let (_, _, data) = events.last().unwrap();
+        data
+    }
+
+    #[test]
+    fn test_emergency_pause_publishes_reason() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let reason = String::from_str(&env, "oracle deviation above 5%");
+
+        vault.emergency_pause(&signers, &reason);
+
+        let (contract, published_reason): (Address, String) =
+            <(Address, String)>::try_from_val(&env, &last_event_data(&env)).unwrap();
+        assert_eq!(contract, vault.address);
+        assert_eq!(published_reason, reason);
+        assert!(env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_unpause_publishes_reason() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        vault.emergency_pause(&signers, &String::from_str(&env, "incident 42"));
+
+        let unpause_reason = String::from_str(&env, "incident 42 resolved");
+        vault.emergency_unpause(&signers, &unpause_reason);
+
+        let (_, published_reason): (Address, String) =
+            <(Address, String)>::try_from_val(&env, &last_event_data(&env)).unwrap();
+        assert_eq!(published_reason, unpause_reason);
+        assert!(!env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_pause_rejects_empty_reason() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let empty = String::from_str(&env, "");
+
+        let err = vault
+            .try_emergency_pause(&signers, &empty)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, VaultError::EmergencyReasonRequired.into());
+        assert!(!env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_pause_rejects_reason_over_limit() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let bytes = [b'a'; (MAX_EMERGENCY_REASON_LENGTH + 1) as usize];
+        let long_reason = String::from_bytes(&env, &bytes);
+
+        let err = vault
+            .try_emergency_pause(&signers, &long_reason)
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, VaultError::EmergencyReasonTooLong.into());
+        assert!(!env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    #[test]
+    fn test_emergency_pause_accepts_reason_at_limit() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let (vault, _, _, _, _, _, admin, _) = setup(&env, 0, 0, 0);
+        let signers = configure_emergency_multisig(&env, &vault, &admin);
+        let bytes = [b'a'; MAX_EMERGENCY_REASON_LENGTH as usize];
+        let reason = String::from_bytes(&env, &bytes);
+
+        vault.emergency_pause(&signers, &reason);
+
+        let (_, published_reason): (Address, String) =
+            <(Address, String)>::try_from_val(&env, &last_event_data(&env)).unwrap();
+        assert_eq!(published_reason, reason);
+        assert!(env.as_contract(&vault.address, || YieldVault::is_paused(env.clone())));
+    }
+
+    // ==================== Initialization validation (#219 / #220 / #221) ====================
+
+    #[test]
+    fn test_initialize_rejects_identical_tokens() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let vault_id = env.register(YieldVault, ());
+        let vault = YieldVaultClient::new(&env, &vault_id);
+
+        let admin = Address::generate(&env);
+        let token = Address::generate(&env);
+        let pool_id = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let err = vault
+            .try_initialize(
+                &admin,
+                &Symbol::new(&env, "DupTokenVault"),
+                &token,
+                &token,
+                &pool_id,
+                &1,
+                &100,
+                &50,
+                &25,
+                &treasury,
+            )
+            .unwrap_err()
+            .unwrap();
+        assert_eq!(err, VaultError::IdenticalTokens.into());
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_placeholder_pool_ids() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        for zero_str in [ZERO_ACCOUNT_ADDRESS, ZERO_CONTRACT_ADDRESS] {
+            let vault_id = env.register(YieldVault, ());
+            let vault = YieldVaultClient::new(&env, &vault_id);
+            let zero_pool = Address::from_string(&String::from_str(&env, zero_str));
+
+            let err = vault
+                .try_initialize(
+                    &admin,
+                    &Symbol::new(&env, "ZeroPoolVault"),
+                    &token_a,
+                    &token_b,
+                    &zero_pool,
+                    &1,
+                    &100,
+                    &50,
+                    &25,
+                    &treasury,
+                )
+                .unwrap_err()
+                .unwrap();
+            assert_eq!(err, VaultError::InvalidPoolId.into());
+        }
+    }
+
+    #[test]
+    fn test_initialize_accepts_fees_at_documented_ceilings() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+        let vault_id = env.register(YieldVault, ());
+        let vault = YieldVaultClient::new(&env, &vault_id);
+
+        let admin = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+        let pool_id = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        vault.initialize(
+            &admin,
+            &Symbol::new(&env, "MaxFeeVault"),
+            &token_a,
+            &token_b,
+            &pool_id,
+            &1,
+            &MAX_FEE_RATE_BPS,
+            &MAX_HARVEST_FEE_BPS,
+            &MAX_WITHDRAWAL_FEE_BPS,
+            &treasury,
+        );
+
+        let info = vault.get_vault_info();
+        assert_eq!(info.fee_rate, MAX_FEE_RATE_BPS);
+        assert_eq!(info.harvest_fee, MAX_HARVEST_FEE_BPS);
+        assert_eq!(info.withdrawal_fee, MAX_WITHDRAWAL_FEE_BPS);
+    }
+
+    #[test]
+    fn test_initialize_rejects_fees_above_documented_ceilings() {
+        let env = Env::default();
+        env.mock_all_auths_allowing_non_root_auth();
+
+        let admin = Address::generate(&env);
+        let token_a = Address::generate(&env);
+        let token_b = Address::generate(&env);
+        let pool_id = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let cases = [
+            (MAX_FEE_RATE_BPS + 1, 0, 0, VaultError::FeeRateTooHigh),
+            (0, MAX_HARVEST_FEE_BPS + 1, 0, VaultError::HarvestFeeTooHigh),
+            (
+                0,
+                0,
+                MAX_WITHDRAWAL_FEE_BPS + 1,
+                VaultError::WithdrawalFeeTooHigh,
+            ),
+        ];
+
+        for (fee_rate, harvest_fee, withdrawal_fee, expected_err) in cases {
+            let vault_id = env.register(YieldVault, ());
+            let vault = YieldVaultClient::new(&env, &vault_id);
+
+            let err = vault
+                .try_initialize(
+                    &admin,
+                    &Symbol::new(&env, "BadFeeVault"),
+                    &token_a,
+                    &token_b,
+                    &pool_id,
+                    &1,
+                    &fee_rate,
+                    &harvest_fee,
+                    &withdrawal_fee,
+                    &treasury,
+                )
+                .unwrap_err()
+                .unwrap();
+            assert_eq!(err, expected_err.into());
         }
     }
 }

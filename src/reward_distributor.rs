@@ -8,7 +8,6 @@ const MAX_REWARD_STREAMS: u32 = 10;
 
 /// Basis points divisor (10000 = 100%)
 const BPS_DIVISOR: i128 = 10000;
-const BASIS_POINTS_DIVISOR: i128 = BPS_DIVISOR;
 
 /// Treasury fee in basis points (0.25% = 25 bps)
 const TREASURY_FEE_BPS: u32 = 25;
@@ -222,6 +221,11 @@ impl MultiRewardDistributor {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
+    }
+
+    /// Return whether this contract has been initialized.
+    pub fn is_initialized(env: Env) -> bool {
+        crate::upgrade::is_initialized(&env)
     }
 
     /// Storage schema version of this contract's stored data.
@@ -864,7 +868,10 @@ impl MultiRewardDistributor {
     /// Aligned with swap_router::update_default_slippage for consistency
     pub fn update_default_slippage(env: Env, admin: Address, new_slippage_bps: u32) {
         Self::require_admin(&env, admin.clone());
-        require!(new_slippage_bps <= BPS_DIVISOR as u32, RewardError::InvalidPercentage);
+        require!(
+            new_slippage_bps <= BPS_DIVISOR as u32,
+            RewardError::InvalidPercentage
+        );
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "default_slippage"), &new_slippage_bps);

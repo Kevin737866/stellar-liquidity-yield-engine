@@ -16,7 +16,7 @@ export interface Opportunity {
   net_profit: bigint;
   apy_delta: number;
   recommended: boolean;
-  confidence: number; // 0-100, confidence score based on data age and sample size
+  confidence?: number; // 0-100, confidence score based on data age and sample size
 }
 
 export interface RoundTripCostEstimate {
@@ -57,7 +57,7 @@ export interface PoolMetrics {
   reserve_b: bigint;
   volatility_24h: number;
   volatility_7d: number;
-  confidence: number; // 0-100, confidence score based on data age and sample size
+  confidence?: number; // 0-100, confidence score based on data age and sample size
 }
 
 /**
@@ -95,6 +95,10 @@ export function calculateConfidence(
   maxSampleSize: number = 50,
   halfLifeSeconds: number = 86400, // 24 hours
 ): number {
+  // No observations means no evidence, regardless of how recent the
+  // (nonexistent) observation is.
+  if (sampleSize <= 0) return 0;
+
   // Sample size component: 0-50 points maps to 0-50 confidence
   const sampleScore = Math.min(sampleSize / maxSampleSize, 1) * 50;
   
@@ -418,6 +422,7 @@ export class ArbitrageScanner {
           net_profit,
           apy_delta,
           recommended: netApyDelta >= minApyDelta * 2,
+          confidence: pool.confidence,
         });
       }
     }
@@ -648,8 +653,20 @@ export class ArbitrageOptimizer {
         b.investment_amount > BigInt(0)
           ? Number((b.net_profit * BigInt(10000)) / b.investment_amount)
           : Number.NEGATIVE_INFINITY;
-      const scoreA = netApyDeltaA - a.il_risk * riskFactor;
-      const scoreB = netApyDeltaB - b.il_risk * riskFactor;
+      // Without a cost estimate, fall back to the raw APY delta so the ranking
+      // still reflects the opportunity's upside.
+      const baseA = Number.isFinite(netApyDeltaA)
+        ? netApyDeltaA
+        : a.apy_delta;
+      const baseB = Number.isFinite(netApyDeltaB)
+        ? netApyDeltaB
+        : b.apy_delta;
+      // Confidence is a small tie-breaker; it must not overwhelm a real risk
+      // difference between two otherwise comparable opportunities.
+      const confidenceA = (a.confidence ?? 100) * 0.1;
+      const confidenceB = (b.confidence ?? 100) * 0.1;
+      const scoreA = baseA + confidenceA - a.il_risk * riskFactor;
+      const scoreB = baseB + confidenceB - b.il_risk * riskFactor;
       return scoreB - scoreA;
     });
   }

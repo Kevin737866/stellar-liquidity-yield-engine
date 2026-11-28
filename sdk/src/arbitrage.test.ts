@@ -332,7 +332,12 @@ describe('ArbitrageOptimizer confidence-weighted ranking', () => {
 
 describe('ArbitrageScanner round-trip cost scoring', () => {
   const source: VolatilitySource = {
-    getVolatility: async () => ({ volatility_24h: 100, volatility_7d: 100 }),
+    getVolatility: async () => ({
+      volatility_24h: 100,
+      volatility_7d: 100,
+      sampleSize_24h: 30,
+      sampleSize_7d: 90,
+    }),
   };
   const amount = BigInt(10_000);
   const scanOptions = {

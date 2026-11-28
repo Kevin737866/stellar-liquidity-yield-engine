@@ -1,7 +1,7 @@
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, Map,
-    Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, unwrap::UnwrapOptimized,
+    Address, Env, Map, Symbol, Vec,
 };
 
 /// Typed failures of the rebalance engine.
@@ -54,6 +54,20 @@ pub const DEFAULT_MAX_APY_AGE: u64 = 86_400;
 /// until its feed is accepted again (Issue #289).
 pub const DEFAULT_FEED_FAILURE_THRESHOLD: u32 = 3;
 
+/// Data-age snapshot of a pool's oracle feed (Issue #293).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeedDataAge {
+    /// Ledger timestamp of the most recent observation (0 when never published).
+    pub updated_at: u64,
+    /// Seconds elapsed since that observation (0 when never published).
+    pub age_seconds: u64,
+    /// Age after which the observation is considered stale.
+    pub max_age_seconds: u64,
+    /// Whether the observation is within `max_age_seconds` and was published.
+    pub fresh: bool,
+}
+
 /// Number of consecutive failed rebalances that trips the circuit breaker.
 pub const EMERGENCY_STOP_WINDOW: u32 = 3;
 
@@ -93,6 +107,15 @@ pub struct RebalanceProposal {
     pub timestamp: u64,
     /// Minimum acceptable output (in the moved unit) enforced at execution time.
     pub min_output: i128,
+    /// Projected impermanent-loss exposure of the strategy after the move, in
+    /// basis points (10000 = 100%).
+    ///
+    /// Built by `analyze_rebalance_opportunities` as the allocation-weighted
+    /// average of every pool's `impermanent_loss_risk` with the moved slice
+    /// re-weighted to the destination pool, so an operator can judge the move's
+    /// `expected_apy_improvement` against the IL the position would carry. The
+    /// estimate is advisory: execution does not depend on it.
+    pub post_rebalance_il_bps: u32,
 }
 
 #[contracttype]
@@ -247,9 +270,10 @@ impl RebalanceEngine {
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_apy_age"), &DEFAULT_MAX_APY_AGE);
-        env.storage()
-            .instance()
-            .set(&Symbol::new(&env, "max_slippage_bps"), &DEFAULT_MAX_SLIPPAGE_BPS);
+        env.storage().instance().set(
+            &Symbol::new(&env, "max_slippage_bps"),
+            &DEFAULT_MAX_SLIPPAGE_BPS,
+        );
         // Record the storage schema version of this build; `migrate` moves it
         // forward after an upgrade swaps the code.
         crate::upgrade::set_storage_version(&env, crate::upgrade::STORAGE_VERSION);
@@ -260,6 +284,11 @@ impl RebalanceEngine {
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
+    }
+
+    /// Return whether this contract has been initialized.
+    pub fn is_initialized(env: Env) -> bool {
+        crate::upgrade::is_initialized(&env)
     }
 
     /// Storage schema version of this contract's stored data.
@@ -386,6 +415,12 @@ impl RebalanceEngine {
                     Self::find_better_pools(&env, &allocation, &strategy, current_apy);
 
                 for better_pool in better_pools {
+                    let post_rebalance_il_bps = Self::project_post_rebalance_il(
+                        &strategy,
+                        &allocation.pool_id,
+                        &better_pool.pool_id,
+                        allocation.allocation_percent,
+                    );
                     let proposal = RebalanceProposal {
                         from_pool: allocation.pool_id.clone(),
                         to_pool: better_pool.pool_id,
@@ -395,6 +430,7 @@ impl RebalanceEngine {
                         estimated_gas_cost: Self::estimate_gas_cost(&env),
                         timestamp: env.ledger().timestamp(),
                         min_output: 0,
+                        post_rebalance_il_bps,
                     };
                     proposals.push_back(proposal);
                 }
@@ -416,6 +452,7 @@ impl RebalanceEngine {
         // single window. Only successful rebalances consume the budget.
         let moved_amount = proposal.amount_a + proposal.amount_b;
         if moved_amount > 0 && !Self::pacing_allows(&env, &proposal.from_pool, moved_amount) {
+            Self::record_failed_attempt(&env, &proposal);
             return false;
         }
 
@@ -424,6 +461,7 @@ impl RebalanceEngine {
         // as the only safeguard: the bound carried on the proposal must still
         // hold against the configured maximum slippage.
         if !Self::slippage_allows(&env, &proposal) {
+            Self::record_failed_attempt(&env, &proposal);
             return false;
         }
 
@@ -460,6 +498,27 @@ impl RebalanceEngine {
         success
     }
 
+    /// Record an attempt that was rejected before any token moved.
+    ///
+    /// A rejection is a failed rebalance, not a no-op: the circuit breaker
+    /// counts consecutive failures from the history, so dropping rejected
+    /// attempts would let a repeatedly rejected keeper mask a broken strategy.
+    fn record_failed_attempt(env: &Env, proposal: &RebalanceProposal) {
+        let apy = Self::get_pool_current_apy(env.clone(), proposal.from_pool.clone());
+        Self::add_to_history(
+            env,
+            RebalanceHistory {
+                timestamp: env.ledger().timestamp(),
+                from_pool: proposal.from_pool.clone(),
+                to_pool: proposal.to_pool.clone(),
+                amount_moved: proposal.amount_a + proposal.amount_b,
+                apy_before: apy,
+                apy_after: apy,
+                success: false,
+            },
+        );
+    }
+
     /// Current maximum slippage tolerated at execution time, in basis points.
     pub fn get_max_slippage_bps(env: Env) -> u32 {
         env.storage()
@@ -471,7 +530,10 @@ impl RebalanceEngine {
     /// Set the maximum slippage tolerated at execution time (admin only).
     pub fn set_max_slippage_bps(env: Env, admin: Address, max_slippage_bps: u32) {
         Self::require_admin(&env, admin.clone());
-        require!(max_slippage_bps <= 10000, "max_slippage_bps must not exceed 10000");
+        require!(
+            max_slippage_bps <= 10000,
+            "max_slippage_bps must not exceed 10000"
+        );
         env.storage()
             .instance()
             .set(&Symbol::new(&env, "max_slippage_bps"), &max_slippage_bps);
@@ -1084,6 +1146,51 @@ impl RebalanceEngine {
         il_bp.min(10000) as u32
     }
 
+    /// Project the strategy's impermanent-loss exposure after a proposal moves
+    /// `moved_bps` of the portfolio from `from_pool` to `to_pool`.
+    ///
+    /// The projection is the allocation-weighted average of every pool's
+    /// `impermanent_loss_risk`, with the moved slice re-weighted from the source
+    /// pool to the destination pool. Both inputs are basis points, and the result
+    /// is reported in the same unit, capped at 10000 (100%). Returns 0 when
+    /// either pool is absent from the strategy, because the move cannot then be
+    /// priced - no estimate is better than a fabricated one.
+    fn project_post_rebalance_il(
+        strategy: &RebalanceStrategy,
+        from_pool: &Address,
+        to_pool: &Address,
+        moved_bps: u32,
+    ) -> u32 {
+        let mut weighted_sum: u64 = 0;
+        let mut from_il: Option<u32> = None;
+        let mut to_il: Option<u32> = None;
+
+        for allocation in strategy.allocations.iter() {
+            weighted_sum +=
+                allocation.allocation_percent as u64 * allocation.impermanent_loss_risk as u64;
+            if allocation.pool_id == *from_pool {
+                from_il = Some(allocation.impermanent_loss_risk);
+            }
+            if allocation.pool_id == *to_pool {
+                to_il = Some(allocation.impermanent_loss_risk);
+            }
+        }
+
+        let (from_il, to_il) = match (from_il, to_il) {
+            (Some(from), Some(to)) => (from, to),
+            _ => return 0,
+        };
+
+        let moved = moved_bps.min(10000) as u64;
+        let post = weighted_sum
+            .saturating_sub(moved * from_il as u64)
+            .saturating_add(moved * to_il as u64);
+
+        // `allocation_percent` sums to 10000 for a valid strategy, so dividing
+        // by 10000 turns the weighted sum back into a basis-point average.
+        ((post / 10000).min(10000)) as u32
+    }
+
     /// Integer square root (Babylonian), returns floor(sqrt(n)).
     fn isqrt(n: u128) -> u128 {
         if n <= 1 {
@@ -1581,6 +1688,7 @@ impl RebalanceEngine {
                 estimated_gas_cost: 30000,
                 timestamp: env.ledger().timestamp(),
                 min_output: amount,
+                post_rebalance_il_bps: opportunity.il_risk,
             },
         );
 
@@ -1600,6 +1708,7 @@ impl RebalanceEngine {
                 estimated_gas_cost: 30000,
                 timestamp: env.ledger().timestamp(),
                 min_output: amount,
+                post_rebalance_il_bps: opportunity.il_risk,
             },
         );
 
@@ -1751,7 +1860,12 @@ impl RebalanceEngine {
     }
 
     /// Set consecutive failure breaker threshold for a specific strategy (admin only).
-    pub fn set_strategy_breaker_threshold(env: Env, admin: Address, strategy_id: u32, threshold: u32) {
+    pub fn set_strategy_breaker_threshold(
+        env: Env,
+        admin: Address,
+        strategy_id: u32,
+        threshold: u32,
+    ) {
         Self::require_admin(&env, admin.clone());
         require!(threshold > 0, "threshold must be greater than zero");
         let mut thresholds: Map<u32, u32> = env
@@ -1764,7 +1878,10 @@ impl RebalanceEngine {
             .instance()
             .set(&Symbol::new(&env, "strat_breaker_thresh"), &thresholds);
         env.events().publish(
-            (Symbol::new(&env, "strat_breaker_thresh_updated"), strategy_id),
+            (
+                Symbol::new(&env, "strat_breaker_thresh_updated"),
+                strategy_id,
+            ),
             (admin, threshold),
         );
     }
@@ -2196,6 +2313,117 @@ mod tests {
         assert_eq!(client.analyze_rebalance_opportunities(&sid).len(), 0);
     }
 
+    /// Allocation with an explicit APY and impermanent-loss risk, so the
+    /// post-rebalance IL projection (Issue #264) can be exercised.
+    fn risky_allocation(
+        env: &Env,
+        pool: &Address,
+        percent: u32,
+        current: u32,
+        target: u32,
+        il_risk: u32,
+    ) -> PoolAllocation {
+        PoolAllocation {
+            pool_id: pool.clone(),
+            token_a: Address::generate(env),
+            token_b: Address::generate(env),
+            allocation_percent: percent,
+            target_apy: target,
+            current_apy: current,
+            impermanent_loss_risk: il_risk,
+        }
+    }
+
+    fn strategy_with(env: &Env, allocations: Vec<PoolAllocation>) -> RebalanceStrategy {
+        RebalanceStrategy {
+            strategy_id: 1,
+            name: Symbol::new(env, "Proj"),
+            risk_level: 2,
+            min_apy_threshold: 100,
+            max_il_risk: 10000,
+            rebalance_frequency: 3600,
+            allocations,
+        }
+    }
+
+    /// The proposal must state the strategy's projected IL exposure after the
+    /// move, so an operator can weigh it against the APY improvement.
+    #[test]
+    fn test_proposals_carry_post_rebalance_il_estimate() {
+        let env = Env::default();
+        let (client, admin) = engine(&env);
+        let pool_a = Address::generate(&env);
+        let pool_b = Address::generate(&env);
+        let pool_c = Address::generate(&env);
+
+        // Weighted IL before any move: (4000*200 + 3000*100 + 3000*0) / 10000 = 110 bps.
+        let alloc = Vec::from_array(
+            &env,
+            [
+                risky_allocation(&env, &pool_a, 4000, 500, 1000, 200),
+                risky_allocation(&env, &pool_b, 3000, 1500, 1000, 100),
+                risky_allocation(&env, &pool_c, 3000, 1500, 1000, 0),
+            ],
+        );
+        let sid = client.create_strategy(
+            &admin,
+            &Symbol::new(&env, "Projection"),
+            &2,
+            &100,
+            &500,
+            &3600,
+            &alloc,
+        );
+
+        let proposals = client.analyze_rebalance_opportunities(&sid);
+        assert_eq!(proposals.len(), 2);
+
+        // Moving A -> B re-weights 4000 bps from IL 200 to IL 100:
+        // 110 - 80 + 40 = 70 bps.
+        let to_b = proposals.get(0).unwrap();
+        assert_eq!(to_b.to_pool, pool_b);
+        assert_eq!(to_b.post_rebalance_il_bps, 70);
+
+        // Moving A -> C re-weights the same slice to a pool with no IL:
+        // 110 - 80 + 0 = 30 bps.
+        let to_c = proposals.get(1).unwrap();
+        assert_eq!(to_c.to_pool, pool_c);
+        assert_eq!(to_c.post_rebalance_il_bps, 30);
+    }
+
+    /// The projection is bounded and refuses to price a move to a pool the
+    /// strategy does not allocate to.
+    #[test]
+    fn test_post_rebalance_il_projection_is_capped_and_requires_both_pools() {
+        let env = Env::default();
+        let pool_a = Address::generate(&env);
+        let pool_b = Address::generate(&env);
+
+        let strategy = strategy_with(
+            &env,
+            Vec::from_array(
+                &env,
+                [
+                    risky_allocation(&env, &pool_a, 5000, 0, 0, 30_000),
+                    risky_allocation(&env, &pool_b, 5000, 0, 0, 30_000),
+                ],
+            ),
+        );
+
+        // Even a nonsensical per-pool risk cannot push the estimate past 100%.
+        assert_eq!(
+            RebalanceEngine::project_post_rebalance_il(&strategy, &pool_a, &pool_b, 5000),
+            10000
+        );
+
+        // A destination the strategy does not know cannot be priced.
+        let unknown = Address::generate(&env);
+        assert_eq!(
+            RebalanceEngine::project_post_rebalance_il(&strategy, &pool_a, &unknown, 5000),
+            0
+        );
+    }
+
     #[test]
     fn test_scan_opportunities_prefers_oracle_apy() {
         let env = Env::default();
@@ -2312,6 +2540,8 @@ mod tests {
 
         let err = client.try_get_strategy(&7).unwrap_err().unwrap();
         assert_eq!(err, RebalanceError::StrategyNotFound.into());
+    }
+
     // ============ REBALANCE PACING TESTS (Issue #302) ============
 
     /// Real token contracts for a rebalance leg: the engine pulls the `from`
@@ -2335,6 +2565,7 @@ mod tests {
             estimated_gas_cost: 0,
             timestamp: 0,
             min_output: amount,
+            post_rebalance_il_bps: 0,
         }
     }
 
@@ -2365,6 +2596,7 @@ mod tests {
             estimated_gas_cost: 0,
             timestamp: env.ledger().timestamp(),
             min_output: 0,
+            post_rebalance_il_bps: 0,
         }
     }
 
@@ -2547,7 +2779,10 @@ mod tests {
 
         assert_eq!(client.get_pool_breaker_threshold(&pool_a), 2);
         assert_eq!(client.get_pool_breaker_threshold(&pool_b), 4);
-        assert_eq!(client.get_pool_breaker_threshold(&pool_c), EMERGENCY_STOP_WINDOW);
+        assert_eq!(
+            client.get_pool_breaker_threshold(&pool_c),
+            EMERGENCY_STOP_WINDOW
+        );
 
         // Record 2 failures for Pool A
         client.execute_rebalance(&caller, &failed_proposal(&env, &pool_a));

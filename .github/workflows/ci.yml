@@ -114,6 +114,28 @@ jobs:
           path: target/wasm32-unknown-unknown/release/stellar_liquidity_yield_engine.wasm
           if-no-files-found: error
 
+  ttl-repeated-operations:
+    name: repeated-operation TTL tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # Same host dependency pin as the `test` job (see the note at the top).
+      - name: Pin ed25519-dalek to the 2.x line
+        run: |
+          cargo generate-lockfile
+          cargo update -p ed25519-dalek@3.0.0 --precise 2.2.0
+
+      - name: Run repeated-operation TTL tests
+        run: cargo test --all-features --test ttl_repeated_operations_tests
+
+      - name: Lint repeated-operation TTL tests
+        run: cargo clippy --test ttl_repeated_operations_tests --all-features -- -D warnings
+
   test:
     name: cargo test
     runs-on: ubuntu-latest
@@ -129,9 +151,18 @@ jobs:
           cargo generate-lockfile
           cargo update -p ed25519-dalek@3.0.0 --precise 2.2.0
 
+      - name: Run deterministic governance timing reference tests
+        run: |
+          mkdir -p target
+          rustc --edition=2021 --test src/governance_transition_tests.rs -o target/governance_transition_tests
+          target/governance_transition_tests
+
       # `--lib` runs the contract tests. The router harness compiles the actual
       # dormant router source without enabling a deployment feature. Other files in tests/ target
       # contracts that are not part of the crate (SwapRouter, RiskEngine,
       # ProtocolGovernor, ...), so they are excluded until they are repaired.
       - name: Run contract test suite
         run: cargo test --all-features --lib --test upgrade_tests --test swap_router_fuzz
+
+      - name: Verify contribution contract checklist
+        run: cargo test --test documentation_contract_checklist

@@ -31,7 +31,7 @@ describe('RebalancerClient history pagination', () => {
     const page: any[] = [];
     jest.spyOn(client as any, 'parseHistory').mockReturnValue(page);
     server.simulateTransaction.mockResolvedValue({
-      result: { status: 'SUCCESS', returnValue: {} },
+      result: { retval: nativeToScVal(0, { type: 'u32' }) },
     });
 
     await expect(client.getHistoryPage(25, 50)).resolves.toBe(page);
@@ -54,7 +54,7 @@ describe('RebalancerClient history pagination', () => {
   it('exposes the total history count for pagination controls', async () => {
     const { client, server } = createClient();
     server.simulateTransaction.mockResolvedValue({
-      result: { status: 'SUCCESS', returnValue: nativeToScVal(123, { type: 'u32' }) },
+      result: { retval: nativeToScVal(123, { type: 'u32' }) },
     });
 
     await expect(client.getHistoryCount()).resolves.toBe(123);

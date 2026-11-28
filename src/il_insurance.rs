@@ -123,6 +123,11 @@ impl ILInsurance {
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
     }
 
+    /// Return whether this contract has been initialized.
+    pub fn is_initialized(env: Env) -> bool {
+        crate::upgrade::is_initialized(&env)
+    }
+
     /// Storage schema version of this contract's stored data.
     pub fn get_storage_version(env: Env) -> u32 {
         crate::upgrade::storage_version(&env)

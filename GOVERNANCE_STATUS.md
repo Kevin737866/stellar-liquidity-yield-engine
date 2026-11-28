@@ -5,8 +5,9 @@
 `src/governance.rs` is an early sketch of a governance and protocol
 fee-sharing system (a governance token, a staking contract, a fee
 distributor, a governor, a voting-escrow lock, and an emergency multisig).
-None of it works today, and the crate does not compile while this file is
-included in the build.
+The crate deliberately excludes this file from `src/lib.rs`; it is not part
+of the compiled or deployed contracts. If re-enabled, it currently does not
+compile or work.
 
 ## Why it doesn't compile
 
@@ -26,10 +27,8 @@ included in the build.
     called as if they were client objects. Cross-contract calls in Soroban
     go through a generated `*Client` type, not the contract struct itself.
 
-Because `src/lib.rs` includes this file unconditionally (`mod governance;`),
-these errors currently break `cargo build`/`cargo test` for the **whole**
-crate, not just governance — see the CI workflow, which is expected to fail
-on this until it's fixed.
+These errors are currently isolated because `src/lib.rs` does not include
+`governance.rs`. The module's embedded tests are also not compiled or run.
 
 ## What else is missing, beyond compiling
 
@@ -66,9 +65,14 @@ economic logic wired in:
    commented out or missing.
 5. Implement real proposal execution (`ProtocolGovernor::execute`) and a real
    reward-accrual formula for staking.
-6. Add contract tests (there are currently only four placeholder
-   `#[test]` functions that check constant values, not behavior) and get the
-   crate compiling and passing under the CI workflow.
+6. Add contract tests and get the governor compiling and passing under the CI
+   workflow. The deterministic tests in
+   [`src/governance_transition_tests.rs`](src/governance_transition_tests.rs)
+   cover the intended timestamp boundaries as a test-only reference model;
+   they do not exercise this disabled contract or establish that it is safe to
+   deploy. Run them with
+   `rustc --edition=2021 --test src/governance_transition_tests.rs -o target/governance_transition_tests`
+   followed by `target/governance_transition_tests`.
 7. Only after the above: update `README.md` to describe governance and fee
    sharing as a shipped feature, and fill in the governance addresses in
    `.env.example`.
@@ -76,3 +80,37 @@ economic logic wired in:
 Until then, treat every function in `src/governance.rs` and the
 corresponding `sdk/src/governance.ts` client as **design scaffolding, not a
 working feature**.
+
+## SDK proposal history pagination
+
+The read-only SDK surface does expose a bounded view of whatever proposal
+history a configured deployment returns: `paginateProposals(proposals, page,
+pageSize)` and `GovernanceSDK.getProposalPage(page, pageSize, maxProposals?)`.
+Pages are 1-based, default to 25 proposals, cap the page size at 100, and clamp
+out-of-range pages to the last page. `getAllProposals()` and all state-filter
+helpers keep their existing signatures, so this is additive. It does not make
+the on-chain governance module deployable; it only keeps the history reader
+usable for keepers and UI callers without probing unbounded IDs per page.
+
+## SDK governance participation summary
+
+The read-only SDK surface also answers "how has this account participated?"
+with `summarizeGovernanceParticipation(account, proposals)` and
+`GovernanceSDK.getParticipationSummary(account, { proposals?, maxProposals? })`.
+The summary reports the proposals examined, how many reached a voting window
+(`Pending` proposals are excluded because they cannot be voted on yet), how
+many the account voted on, the for/against split, the total voting power
+committed, authored proposal count, the voted proposal IDs, and a
+participation rate (percentage with one decimal, 0 when nothing is eligible).
+
+The pure helper accepts the voter maps either as a JS `Map` or a plain object,
+treats a missing `null` map or absent account as "did not vote", and treats a
+malformed weight as a zero-weight vote instead of failing the report. An empty
+account or a non-array history raises a `TypeError`; the SDK method validates
+its arguments before any RPC call, and passes read failures through rather than
+reporting a fabricated summary. Callers that already hold a proposal list (the
+UI's governance panel does) can pass `proposals` to skip the extra RPC sweep.
+
+The UI surfaces this as the `ParticipationSummary` card above the proposal
+list. It is reporting only: it does not change what the (still incomplete)
+governing contracts do.

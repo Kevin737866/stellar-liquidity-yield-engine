@@ -14,6 +14,9 @@
 
 import {
   ContractEventListener,
+  validateTopicPrefixes,
+  matchesTopicPrefix,
+  matchesAnyTopicPrefix,
   type EventSource,
   type GetEventsRequest,
   type GetEventsResponse,
@@ -760,5 +763,211 @@ describe('cursor advancement with a full page', () => {
     await listener.poll();
 
     expect(listener.currentLedger).toBe(501);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Topic prefix filtering
+// ---------------------------------------------------------------------------
+
+describe('topic prefix helpers', () => {
+  it('validates and defensively copies valid prefixes', () => {
+    const input = [['vault', 'deposit'], ['harvest']];
+    const copy = validateTopicPrefixes(input);
+    expect(copy).toEqual([['vault', 'deposit'], ['harvest']]);
+
+    input[0][0] = 'mutated';
+    expect(copy[0][0]).toBe('vault');
+  });
+
+  it('accepts an empty prefix list (pass-all)', () => {
+    expect(validateTopicPrefixes([])).toEqual([]);
+  });
+
+  it('rejects empty prefix arrays and blank or non-string segments', () => {
+    expect(() => validateTopicPrefixes([[]])).toThrow(/non-empty array/);
+    expect(() => validateTopicPrefixes([['']])).toThrow(/non-empty string/);
+    expect(() => validateTopicPrefixes([['vault', '   ']])).toThrow(/non-empty string/);
+    expect(() => validateTopicPrefixes([[123 as unknown as string]])).toThrow(/non-empty string/);
+  });
+
+  it('matches exact, longer, and rejects shorter/mismatched/non-string topics', () => {
+    expect(matchesTopicPrefix(['vault', 'deposit'], ['vault', 'deposit'])).toBe(true);
+    expect(matchesTopicPrefix(['vault', 'deposit', 'GUSER', 42], ['vault', 'deposit'])).toBe(true);
+    expect(matchesTopicPrefix(['vault'], ['vault', 'deposit'])).toBe(false);
+    expect(matchesTopicPrefix(['vault', 'withdraw'], ['vault', 'deposit'])).toBe(false);
+    expect(matchesTopicPrefix(['Vault', 'deposit'], ['vault', 'deposit'])).toBe(false);
+    expect(matchesTopicPrefix([123, 'deposit'], ['123', 'deposit'])).toBe(false);
+    expect(matchesTopicPrefix([], ['deposit'])).toBe(false);
+    expect(matchesTopicPrefix(undefined, ['deposit'])).toBe(false);
+    expect(matchesTopicPrefix(['deposit'], [])).toBe(false);
+  });
+
+  it('matchesAnyTopicPrefix treats empty list as pass-all and non-empty as OR', () => {
+    expect(matchesAnyTopicPrefix(['anything'], [])).toBe(true);
+    expect(matchesAnyTopicPrefix(undefined, [])).toBe(true);
+    expect(matchesAnyTopicPrefix(['harvest', 'v1'], [['deposit'], ['harvest']])).toBe(true);
+    expect(matchesAnyTopicPrefix(['withdraw'], [['deposit'], ['harvest']])).toBe(false);
+  });
+});
+
+describe('ContractEventListener topic prefix filtering', () => {
+  const VAULT_A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
+  const VAULT_B = 'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBD2KM';
+
+  it('passes all topics and omits filter.topics when topicPrefixes is omitted or empty', async () => {
+    const events = [
+      makeRaw(VAULT_A, ['deposit', 'u1']),
+      makeRaw(VAULT_A, ['harvest']),
+    ];
+    const source = stubSource(events, 110);
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      topicPrefixes: [],
+    });
+
+    const seen: unknown[][] = [];
+    listener.onRaw((e) => seen.push(e.topic ?? []));
+    await listener.poll();
+
+    expect(seen).toEqual([['deposit', 'u1'], ['harvest']]);
+    expect(source.lastRequest?.filters?.[0].topics).toBeUndefined();
+  });
+
+  it('pushes topicPrefixes down to RPC filter.topics with trailing ** wildcard', async () => {
+    const source = stubSource([], 110);
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      topicPrefixes: [['vault', 'deposit'], ['harvest']],
+    });
+
+    await listener.poll();
+
+    expect(source.lastRequest?.filters?.[0].topics).toEqual([
+      ['vault', 'deposit', '**'],
+      ['harvest', '**'],
+    ]);
+  });
+
+  it('preserves explicit rpcFilter.topics while still enforcing topicPrefixes at SDK level', async () => {
+    const events = [
+      makeRaw(VAULT_A, ['deposit', 'v1']),
+      makeRaw(VAULT_A, ['withdraw', 'v1']),
+    ];
+    const source = stubSource(events, 110);
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      topicPrefixes: [['deposit']],
+      rpcFilter: { topics: [['*']] },
+    });
+
+    const seen: unknown[][] = [];
+    listener.onRaw((e) => seen.push(e.topic ?? []));
+    await listener.poll();
+
+    expect(source.lastRequest?.filters?.[0].topics).toEqual([['*']]);
+    expect(seen).toEqual([['deposit', 'v1']]);
+  });
+
+  it('filters both onRaw and typed handlers by multi-segment and multiple prefixes', async () => {
+    const events = [
+      makeRaw(VAULT_A, ['deposit', 'pool_1', 'user_1'], 101),
+      makeRaw(VAULT_A, ['deposit', 'pool_2', 'user_2'], 102),
+      makeRaw(VAULT_A, ['harvest', 'pool_1'], 103),
+      makeRaw(VAULT_A, ['withdraw', 'pool_1'], 104),
+      makeRaw(VAULT_A, [], 105),
+    ];
+    const source = stubSource(events, 110);
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      topicPrefixes: [['deposit', 'pool_1'], ['harvest']],
+    });
+
+    const rawSeen: number[] = [];
+    const deposits: number[] = [];
+    const harvests: number[] = [];
+    const withdraws: number[] = [];
+
+    listener.onRaw((e) => rawSeen.push(e.ledger));
+    listener.on('deposit', (e) => deposits.push(e.timestamp));
+    listener.on('harvest', (e) => harvests.push(e.timestamp));
+    listener.on('withdraw', (e) => withdraws.push(e.timestamp));
+
+    await listener.poll();
+
+    expect(rawSeen).toEqual([101, 103]);
+    expect(deposits).toHaveLength(1);
+    expect(harvests).toHaveLength(1);
+    expect(withdraws).toHaveLength(0);
+  });
+
+  it('combines contractAddresses and topicPrefixes with AND semantics', async () => {
+    const events = [
+      makeRaw(VAULT_A, ['deposit', 'u1'], 101),
+      makeRaw(VAULT_B, ['deposit', 'u2'], 102),
+      makeRaw(VAULT_A, ['withdraw', 'u3'], 103),
+    ];
+    const source = stubSource(events, 110);
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      contractAddresses: [VAULT_A],
+      topicPrefixes: [['deposit']],
+    });
+
+    const seen: number[] = [];
+    listener.onRaw((e) => seen.push(e.ledger));
+    await listener.poll();
+
+    expect(seen).toEqual([101]);
+  });
+
+  it('logs topic_filtered skips and still advances the ledger cursor when all events are filtered', async () => {
+    const debugSpy = jest.spyOn(console, 'debug').mockImplementation(() => undefined);
+    try {
+      const events = [makeRaw(VAULT_A, ['withdraw'], 101)];
+      const source = stubSource(events, 115);
+      const listener = new ContractEventListener(source, {
+        startLedger: 100,
+        topicPrefixes: [['deposit']],
+      });
+
+      const seen: number[] = [];
+      listener.onRaw((e) => seen.push(e.ledger));
+      await listener.poll();
+
+      expect(seen).toEqual([]);
+      expect(listener.currentLedger).toBe(116);
+      expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('"reason":"topic_filtered"'));
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it('throws at construction time when topicPrefixes contains an invalid prefix', () => {
+    const source = stubSource([], 110);
+    expect(
+      () => new ContractEventListener(source, { startLedger: 100, topicPrefixes: [[]] }),
+    ).toThrow(/non-empty array/);
+    expect(
+      () => new ContractEventListener(source, { startLedger: 100, topicPrefixes: [['deposit', '']] }),
+    ).toThrow(/non-empty string/);
+  });
+
+  it('defensively copies topicPrefixes so external mutation does not affect filtering', async () => {
+    const prefixes = [['deposit']];
+    const events = [makeRaw(VAULT_A, ['deposit'], 101)];
+    const source = stubSource(events, 110);
+    const listener = new ContractEventListener(source, {
+      startLedger: 100,
+      topicPrefixes: prefixes,
+    });
+
+    prefixes[0][0] = 'withdraw';
+
+    const seen: number[] = [];
+    listener.onRaw((e) => seen.push(e.ledger));
+    await listener.poll();
+
+    expect(seen).toEqual([101]);
   });
 });
