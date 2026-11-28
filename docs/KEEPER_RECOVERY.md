@@ -368,6 +368,34 @@ const checkpoint = await listener.persist();
 `persistOnPoll: false` disables the automatic write when the caller manages
 persistence itself.
 
+## Filtering by topic prefix
+
+`ContractEventListener` supports filtering contract events by leading topic
+segments via `topicPrefixes`:
+
+```ts
+const listener = new ContractEventListener(server, {
+  contractAddresses: [VAULT_A],
+  topicPrefixes: [['deposit', 'pool_1'], ['harvest']],
+  startLedger: 0,
+  store: new FileCheckpointStore('./state/keeper.json'),
+});
+```
+
+- **Matching semantics**: Each entry in `topicPrefixes` is a non-empty array of
+  exact, case-sensitive topic segment strings. An event matches when its
+  `topic` array starts with **any** configured prefix (OR across prefixes).
+  When combined with `contractAddresses`, an event must match both (AND).
+- **Backward compatibility**: Omitting `topicPrefixes` or passing `[]` keeps
+  pass-all behavior.
+- **RPC pushdown + SDK guard**: Unless `rpcFilter.topics` is explicitly set,
+  each prefix is sent to Soroban RPC as `[...prefix, '**']`, and re-checked at
+  the SDK level before dispatching to `onRaw` or typed handlers. Filtered
+  events are logged with `reason: "topic_filtered"` and still allow the ledger
+  cursor to advance normally.
+- **Validation**: Passing an empty prefix (`[[]]`) or a blank/non-string
+  segment throws an `Error` at listener construction time.
+
 ## No gaps while catching up
 
 After a long outage the RPC can have far more events than one page
