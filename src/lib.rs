@@ -13,8 +13,9 @@
 // occur on-chain.
 #![allow(ambiguous_glob_reexports)]
 
-use soroban_sdk::{contract, contracterror, contractimpl, Address, BytesN, Env, Symbol};
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, BytesN, Env, Symbol,
+};
 
 /// Typed failures of the umbrella engine contract.
 ///
@@ -171,7 +172,6 @@ impl StellarLiquidityYieldEngine {
     /// Replace this contract's code in place, keeping its address and storage
     /// (admin only). See [crate::upgrade] and `docs/UPGRADING.md`.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: soroban_sdk::BytesN<32>) {
         Self::require_admin(&env, admin.clone());
         crate::upgrade::update_wasm(&env, &admin, new_wasm_hash);
     }

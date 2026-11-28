@@ -1107,35 +1107,6 @@ export class RebalancerClient extends EventEmitter {
     }
   }
 
-  async isApyFresh(poolId: Address | string): Promise<boolean> {
-    try {
-      const result = await this.server.simulateTransaction(
-        new TransactionBuilder(
-          await this.server.getAccount(
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-          ),
-          {
-            fee: BASE_FEE,
-            networkPassphrase: this.getNetworkPassphrase(),
-          },
-        )
-          .addOperation(this.contract.call("is_apy_fresh", poolId.toString()))
-          .build(),
-      );
-
-      if (result.result?.status !== "SUCCESS") {
-        throw new Error("Failed to check APY freshness");
-      }
-
-      return Boolean(scValToNative(result.result.returnValue));
-    } catch (error: any) {
-      throw new RebalanceError(
-        `Failed to check APY freshness: ${error.message}`,
-        "IS_APY_FRESH_ERROR",
-      );
-    }
-  }
-
   /**
    * Emit a pause event with reason for monitoring and dashboards
    */
