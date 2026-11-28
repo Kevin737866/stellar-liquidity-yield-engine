@@ -392,15 +392,16 @@ fn test_extend_ttl_moves_the_persistent_expiration_boundary() {
         storage.extend_ttl(&key, 100, 200);
     });
 
-    // The old boundary (ledger 64) is now inside the extended lifetime, and the
-    // new last live ledger is 0 + 200 - 1 = 199.
+    // The old boundary (ledger 64) is now inside the extended lifetime. The
+    // host treats the extended live-until ledger as inclusive, so the entry is
+    // readable through ledger 200 and archived from 201 onwards.
     env.ledger().set_sequence_number(64);
     assert_eq!(persistent_probe(&env, &contract_id, &key), Some(11));
 
-    env.ledger().set_sequence_number(199);
+    env.ledger().set_sequence_number(200);
     assert_eq!(persistent_probe(&env, &contract_id, &key), Some(11));
 
-    env.ledger().set_sequence_number(200);
+    env.ledger().set_sequence_number(201);
     assert_persistent_entry_archived(&env, &contract_id, &key);
 }
 

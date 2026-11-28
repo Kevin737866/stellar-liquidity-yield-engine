@@ -150,7 +150,9 @@ class ArbitrageBacktester {
     );
 
     // Profit comparison
-    const holdAnnually = (this.config.currentVaultApy / 100) * (this.config.initialPosition / BigInt(100)) / BigInt(100);
+    const holdAnnually =
+      (BigInt(this.config.currentVaultApy) * this.config.initialPosition) /
+      BigInt(10_000);
     const holdYearly = holdAnnually * BigInt(1000000);
     const outperformance = totalProfit - holdYearly;
 

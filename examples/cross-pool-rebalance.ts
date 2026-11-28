@@ -7,6 +7,7 @@ import {
   RebalanceProposal,
   PoolAllocation
 } from '../sdk/src';
+import { Address } from 'stellar-sdk';
 
 /**
  * Example: Cross-pool rebalancing from low-APY to high-APY pools
@@ -76,9 +77,9 @@ async function analyzeAndRebalance() {
     
     // Define pool allocations
     const allocations: PoolAllocation[] = POOL_CONFIGS.map((pool, index) => ({
-      poolId: pool.address,
-      tokenA: pool.tokenA,
-      tokenB: pool.tokenB,
+      poolId: new Address(pool.address),
+      tokenA: new Address(pool.tokenA),
+      tokenB: new Address(pool.tokenB),
       allocationPercent: Math.floor((100 / POOL_CONFIGS.length) * 100), // Equal allocation
       targetApy: pool.targetAPY,
       currentApy: pool.currentAPY,
@@ -98,7 +99,7 @@ async function analyzeAndRebalance() {
     // 2. Analyze current vault performance
     console.log('\n📈 Analyzing current vault performance...');
     const vaultClients = VAULT_ADDRESSES.map(address => 
-      new VaultClient(address, TESTNET_CONFIG)
+      new VaultClient(new Address(address), TESTNET_CONFIG)
     );
 
     const vaultPerformances = await Promise.all(
@@ -107,7 +108,7 @@ async function analyzeAndRebalance() {
           const [info, metrics, position] = await Promise.all([
             client.getVaultInfo(),
             client.getMetrics(),
-            client.getUserPosition(USER_KEYPAIR.publicKey)
+            client.getUserPosition(new Address(USER_KEYPAIR.publicKey))
           ]);
 
           return {
@@ -164,21 +165,23 @@ async function analyzeAndRebalance() {
       );
 
       return {
-        fromPool: fromVault!.vaultAddress,
-        toPool: bestTarget!.vaultAddress,
-        amountA: fromVault!.userValue / 2n, // Move 50% of liquidity
-        amountB: fromVault!.userValue / 2n,
+        fromPool: new Address(fromVault!.vaultAddress),
+        toPool: new Address(bestTarget!.vaultAddress),
+        amountA: BigInt(fromVault!.userValue) / 2n, // Move 50% of liquidity
+        amountB: BigInt(fromVault!.userValue) / 2n,
         expectedApyImprovement: bestTarget!.currentAPY - fromVault!.currentAPY,
         estimatedGasCost: BigInt(50000),
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        // This example does not model per-pool IL, so nothing is projected.
+        postRebalanceIlBps: 0
       };
     });
 
     console.log('Generated Rebalance Proposals:');
     mockProposals.forEach((proposal, index) => {
       console.log(`\nProposal ${index + 1}:`);
-      console.log(`  From: Vault ${validPerformances.findIndex(p => p?.vaultAddress === proposal.fromPool)}`);
-      console.log(`  To: Vault ${validPerformances.findIndex(p => p?.vaultAddress === proposal.toPool)}`);
+      console.log(`  From: Vault ${validPerformances.findIndex(p => p?.vaultAddress === proposal.fromPool.toString())}`);
+      console.log(`  To: Vault ${validPerformances.findIndex(p => p?.vaultAddress === proposal.toPool.toString())}`);
       console.log(`  Amount: $${(Number(proposal.amountA) / 1000000).toFixed(2)}`);
       console.log(`  Expected APY Improvement: ${(proposal.expectedApyImprovement / 100).toFixed(2)}%`);
       console.log(`  Estimated Gas Cost: ${proposal.estimatedGasCost} stroops`);
@@ -205,8 +208,8 @@ async function analyzeAndRebalance() {
         console.log(`   Gas used: ${result.gasUsed} stroops`);
         
         // Update performance data after rebalance
-        const fromVaultIndex = validPerformances.findIndex(p => p?.vaultAddress === proposal.fromPool);
-        const toVaultIndex = validPerformances.findIndex(p => p?.vaultAddress === proposal.toPool);
+        const fromVaultIndex = validPerformances.findIndex(p => p?.vaultAddress === proposal.fromPool.toString());
+        const toVaultIndex = validPerformances.findIndex(p => p?.vaultAddress === proposal.toPool.toString());
         
         if (fromVaultIndex !== -1 && toVaultIndex !== -1) {
           const fromVault = validPerformances[fromVaultIndex]!;
@@ -272,7 +275,7 @@ export class CrossPoolRebalancer {
   constructor(vaultAddresses: string[], networkConfig: NetworkConfig) {
     this.rebalancerClient = new RebalancerClient(networkConfig);
     this.vaultClients = vaultAddresses.map(address => 
-      new VaultClient(address, networkConfig)
+      new VaultClient(new Address(address), networkConfig)
     );
   }
 
@@ -285,7 +288,7 @@ export class CrossPoolRebalancer {
         const [info, metrics, position] = await Promise.all([
           client.getVaultInfo(),
           client.getMetrics(),
-          client.getUserPosition(userAddress)
+          client.getUserPosition(new Address(userAddress))
         ]);
 
         return {
@@ -397,7 +400,9 @@ export class CrossPoolRebalancer {
           amountB: rebalanceAmount,
           expectedApyImprovement: best.metrics.apy - worst.metrics.apy,
           estimatedGasCost: BigInt(50000),
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          // This example does not model per-pool IL, so nothing is projected.
+          postRebalanceIlBps: 0
         });
       }
     }

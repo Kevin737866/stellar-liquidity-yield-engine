@@ -1,6 +1,6 @@
 import {
     Address,
-    HorizonServer,
+    Horizon,
     TransactionBuilder,
     Keypair,
     Operation,
@@ -187,7 +187,7 @@ class BigIntString {
 }
 
 export interface RewardsSDKConfig {
-    horizonServer: HorizonServer;
+    horizonServer: Horizon.Server;
     networkPassphrase: string;
     rewardDistributor: string;
     swapRouter: string;
@@ -198,7 +198,7 @@ export interface RewardsSDKConfig {
  * Rewards SDK for interacting with multi-reward yield farming
  */
 export class RewardsSDK {
-    private horizonServer: HorizonServer;
+    private horizonServer: Horizon.Server;
     private networkPassphrase: string;
     private rewardDistributor: Address;
     private swapRouter: Address;
@@ -946,7 +946,7 @@ export class RewardsSDK {
         let vaultClient = this.vaultClients.get(vaultKey);
 
         if (!vaultClient) {
-            vaultClient = new VaultClient(vault, this.networkConfig);
+            vaultClient = new VaultClient(new Address(vault), this.networkConfig);
             this.vaultClients.set(vaultKey, vaultClient);
         }
 

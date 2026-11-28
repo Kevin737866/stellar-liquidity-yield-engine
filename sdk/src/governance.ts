@@ -5,6 +5,7 @@
  * Handles proposal creation, voting, fee claiming, and token delegation.
  */
 
+import { simulationReturnValue } from './utils/soroban';
 import { 
   Keypair, 
   SorobanRpc, 
@@ -1223,12 +1224,8 @@ export class GovernanceSDK {
         .build()
     );
 
-    if (
-      simResult.result &&
-      (simResult.result as any).status === 'SUCCESS' &&
-      (simResult.result as any).returnValue
-    ) {
-      return scValToNative((simResult.result as any).returnValue);
+    if (!SorobanRpc.Api.isSimulationError(simResult)) {
+      return scValToNative(simulationReturnValue(simResult));
     }
     return null;
   }

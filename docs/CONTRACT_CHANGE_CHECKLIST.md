@@ -10,9 +10,9 @@ complements the project-wide
 - [ ] Identify every contract feature or WASM artifact affected.
 - [ ] Document the intended success behavior, rejected inputs, unauthorized
       callers, paused-state behavior, and upgrade/migration behavior.
-- [ ] Check whether existing storage keys or serialized values are compatible.
-      Add a versioned migration and document a rollback or recovery plan when
-      they are not.
+- [ ] **Storage compatibility:** check whether existing storage keys or
+      serialized values are compatible. Add a versioned migration and document
+      a rollback or recovery plan when they are not.
 - [ ] Review public entrypoint signatures and SDK bindings for backward
       compatibility.
 

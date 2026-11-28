@@ -23,8 +23,7 @@ fn assert_contains_all(document: &str, required_text: &[&str], document_name: &s
 fn contract_change_checklist_is_linked_and_complete() {
     let contributing = read_repository_file("CONTRIBUTING.md");
     let checklist = read_repository_file("docs/CONTRACT_CHANGE_CHECKLIST.md");
-    let pull_request_template =
-        read_repository_file(".github/PULL_REQUEST_TEMPLATE.md");
+    let pull_request_template = read_repository_file(".github/PULL_REQUEST_TEMPLATE.md");
 
     assert_contains_all(
         &contributing,

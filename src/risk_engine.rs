@@ -1,4 +1,4 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 /// Risk management engine for liquidity arbitrage
 #[contracttype]
@@ -104,12 +104,7 @@ impl RiskEngine {
         Self::require_admin(&env, admin.clone());
 
         let key = Self::breaker_key(&env, &pool_id);
-        let was_tripped = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_optimized()
-            .unwrap_or(false);
+        let was_tripped: bool = env.storage().persistent().get(&key).unwrap_or(false);
 
         env.storage().persistent().set(&key, &false);
 
@@ -202,7 +197,7 @@ impl RiskEngine {
         let volatility_average = (volatility_metrics.volatility_24h as i128
             + volatility_metrics.volatility_7d as i128)
             / 2;
-        adjustment
+        10000 - (volatility_average.min(5000) as u32)
     }
 
     /// Get circuit breaker thresholds for a pool (falling back to standard defaults)
@@ -239,15 +234,9 @@ impl RiskEngine {
 
         // 3. Last 3 rebalances were all losses
         if recent_losses.len() >= 3 {
-            let last_three_loss = recent_losses
-                .get(recent_losses.len() - 3)
-                .unwrap_optimized()
-                && recent_losses
-                    .get(recent_losses.len() - 2)
-                    .unwrap_optimized()
-                && recent_losses
-                    .get(recent_losses.len() - 1)
-                    .unwrap_optimized();
+            let last_three_loss = recent_losses.get(recent_losses.len() - 3).unwrap()
+                && recent_losses.get(recent_losses.len() - 2).unwrap()
+                && recent_losses.get(recent_losses.len() - 1).unwrap();
 
             if last_three_loss {
                 return true;
@@ -271,11 +260,13 @@ impl RiskEngine {
         recent_losses: Vec<bool>,
     ) -> RiskAssessment {
         let il_risk =
-            Self::calculate_impermanent_loss(&env, current_price_ratio, entry_price_ratio);
-        let slippage = Self::estimate_slippage(&env, pool_id.clone(), amount, pool_liquidity);
-        let position_size_multiplier_bps = Self::volatility_adjustment(&env, volatility_metrics);
+            Self::calculate_impermanent_loss(env.clone(), current_price_ratio, entry_price_ratio);
+        let slippage =
+            Self::estimate_slippage(env.clone(), pool_id.clone(), amount, pool_liquidity);
+        let position_size_multiplier_bps =
+            Self::volatility_adjustment(env.clone(), volatility_metrics.clone());
         let circuit_breaker = Self::circuit_breaker_check(
-            &env,
+            env.clone(),
             pool_id.clone(),
             gas_price_surge,
             pool_imbalance,
@@ -292,10 +283,6 @@ impl RiskEngine {
             / 50) as u32;
         let final_score =
             ((combined_risk as u64 + raw_volatility_score as u64) / 2).min(100) as u32;
-
-        // Surface the volatility adjustment in the score so callers can scale
-        // position size when volatility is high.
-        let _ = volatility_adjustment;
 
         RiskAssessment {
             pool_id,
@@ -339,11 +326,7 @@ impl RiskEngine {
         reason: Symbol,
     ) -> u64 {
         let count_key = EmergencyKey::Count;
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&count_key)
-            .unwrap_or_default(&elv, 0);
+        let count: u64 = env.storage().instance().get(&count_key).unwrap_or(0);
 
         // Append at the next sequence index. Existing entries are never touched.
         let event = EmergencyEvent {
@@ -395,30 +378,11 @@ impl RiskEngine {
 mod tests {
     extern crate std;
     use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::{Env, Symbol};
 
     fn il(env: &Env, current: i128, entry: i128) -> u32 {
         RiskEngine::calculate_impermanent_loss(env.clone(), current, entry)
-    }
-
-    #[derive(Clone)]
-    struct Dummy;
-
-    impl Dummy {
-        fn foo() {}
-    }
-
-    fn addr(env: &Env, b: u8) -> Address {
-        let mut bytes = [9u8; 32];
-        bytes[0] = b;
-        Address::from_string(
-            &env,
-            &soroban_sdk::String::from_str(&env, "GFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-        )
-    }
-
-    fn sym(env: &Env, s: &str) -> Symbol {
-        Symbol::new(env, &soroban_sdk::Symbol::short_symbol(s))
     }
 
     fn setup() -> Env {
@@ -560,65 +524,72 @@ mod tests {
     #[test]
     fn test_assess_arbitrage_risk_multiplier_equals_standalone() {
         let env = Env::default();
-        let pool_id = Address::generate(&env);
-        let metrics = make_metrics(1500, 2500);
+        let contract = env.register(RiskEngine, ());
+        env.as_contract(&contract, || {
+            let pool_id = Address::generate(&env);
+            let metrics = make_metrics(1500, 2500);
 
-        let expected_multiplier = RiskEngine::volatility_adjustment(env.clone(), metrics.clone());
-        let assessment = RiskEngine::assess_arbitrage_risk(
-            env.clone(),
-            pool_id,
-            10000,
-            10000,
-            1_000_000,
-            10_000,
-            metrics,
-            false,
-            0,
-            Vec::new(&env),
-        );
-        assert_eq!(
-            assessment.position_size_multiplier_bps, expected_multiplier,
-            "position_size_multiplier_bps must match standalone volatility_adjustment"
-        );
+            let expected_multiplier =
+                RiskEngine::volatility_adjustment(env.clone(), metrics.clone());
+            let assessment = RiskEngine::assess_arbitrage_risk(
+                env.clone(),
+                pool_id,
+                10000,
+                10000,
+                1_000_000,
+                10_000,
+                metrics,
+                false,
+                0,
+                Vec::new(&env),
+            );
+            assert_eq!(
+                assessment.position_size_multiplier_bps, expected_multiplier,
+                "position_size_multiplier_bps must match standalone volatility_adjustment"
+            );
+        });
     }
 
     #[test]
     fn test_position_multiplier_independent_from_il_and_slippage() {
         let env = Env::default();
-        let pool_id = Address::generate(&env);
-        let metrics = make_metrics(2000, 2000); // avg=2000, multiplier = 8000
+        let contract = env.register(RiskEngine, ());
+        env.as_contract(&contract, || {
+            let pool_id = Address::generate(&env);
+            let metrics = make_metrics(2000, 2000); // avg=2000, multiplier = 8000
 
-        // Vary IL (current_price_ratio) and slippage (amount) while keeping volatility fixed
-        let a1 = RiskEngine::assess_arbitrage_risk(
-            env.clone(),
-            pool_id.clone(),
-            10000,
-            10000,
-            1_000_000,
-            10_000,
-            metrics.clone(),
-            false,
-            0,
-            Vec::new(&env),
-        );
-        let a2 = RiskEngine::assess_arbitrage_risk(
-            env.clone(),
-            pool_id.clone(),
-            20000,
-            10000,
-            1_000_000,
-            50_000,
-            metrics.clone(),
-            false,
-            0,
-            Vec::new(&env),
-        );
+            // Vary IL (current_price_ratio) and slippage (amount) while keeping volatility fixed
+            let a1 = RiskEngine::assess_arbitrage_risk(
+                env.clone(),
+                pool_id.clone(),
+                10000,
+                10000,
+                1_000_000,
+                10_000,
+                metrics.clone(),
+                false,
+                0,
+                Vec::new(&env),
+            );
+            let a2 = RiskEngine::assess_arbitrage_risk(
+                env.clone(),
+                pool_id.clone(),
+                20000,
+                10000,
+                1_000_000,
+                50_000,
+                metrics.clone(),
+                false,
+                0,
+                Vec::new(&env),
+            );
 
-        // volatility_score may differ (it blends IL and slippage), multiplier must not
-        assert_eq!(
-            a1.position_size_multiplier_bps, a2.position_size_multiplier_bps,
-            "multiplier must not change when only IL/slippage inputs vary"
-        );
-        assert_eq!(a1.position_size_multiplier_bps, 8000);
+            // volatility_score may differ (it blends IL and slippage), multiplier must not
+            assert_eq!(
+                a1.position_size_multiplier_bps, a2.position_size_multiplier_bps,
+                "multiplier must not change when only IL/slippage inputs vary"
+            );
+            assert_eq!(a1.position_size_multiplier_bps, 8000);
+        });
     }
 }

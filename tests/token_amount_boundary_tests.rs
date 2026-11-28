@@ -9,14 +9,14 @@ use testutils::setup_yield_vault;
 
 /// Deploy a vault with zero fees so boundary share/amount math can be verified
 /// without fee rounding obscuring 1-unit edge cases.
-fn setup_zero_fee_vault(
-    env: &Env,
+fn setup_zero_fee_vault<'a>(
+    env: &'a Env,
 ) -> (
-    YieldVaultClient,
-    TokenClient,
-    TokenClient,
-    StellarAssetClient,
-    StellarAssetClient,
+    YieldVaultClient<'a>,
+    TokenClient<'a>,
+    TokenClient<'a>,
+    StellarAssetClient<'a>,
+    StellarAssetClient<'a>,
     Address,
     Address,
 ) {
@@ -114,7 +114,9 @@ fn test_single_leg_zero_deposit_rejected_when_min_positive() {
         .vault
         .propose_set_min_deposit_amounts(&fixture.admin, &10, &10);
     advance_past_timelock(&env, &fixture.vault);
-    fixture.vault.execute_pending_action(&fixture.admin, &action_id);
+    fixture
+        .vault
+        .execute_pending_action(&fixture.admin, &action_id);
 
     fixture.token_a_admin.mint(&fixture.user, &100);
     fixture.token_b_admin.mint(&fixture.user, &100);
@@ -251,7 +253,9 @@ fn test_configured_min_deposit_exact_boundary() {
         .vault
         .propose_set_min_deposit_amounts(&fixture.admin, &100, &50);
     advance_past_timelock(&env, &fixture.vault);
-    fixture.vault.execute_pending_action(&fixture.admin, &action_id);
+    fixture
+        .vault
+        .execute_pending_action(&fixture.admin, &action_id);
     assert_eq!(fixture.vault.get_min_deposit_amounts(), (100, 50));
 
     fixture.token_a_admin.mint(&fixture.user, &200);

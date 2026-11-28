@@ -1,5 +1,5 @@
 import { RebalancerClient } from './rebalancer';
-import { Address } from 'stellar-sdk';
+import { Account, Address, nativeToScVal } from 'stellar-sdk';
 import { RebalanceError } from './types';
 
 describe('RebalancerClient', () => {
@@ -10,7 +10,7 @@ describe('RebalancerClient', () => {
     contracts: {
       yieldEngine: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
       rewardDistributor: 'DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-      rebalanceEngine: 'EAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      rebalanceEngine: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
       strategyRegistry: 'FAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     },
   };
@@ -21,11 +21,9 @@ describe('RebalancerClient', () => {
   beforeEach(() => {
     client = new RebalancerClient(mockNetworkConfig);
     mockServer = {
-      getAccount: jest.fn().mockResolvedValue({
-        accountId: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF',
-        sequence: '1',
-        subentries: 0,
-    }),
+      getAccount: jest.fn().mockResolvedValue(
+        new Account('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF', '1'),
+      ),
       simulateTransaction: jest.fn(),
       sendTransaction: jest.fn(),
     };
@@ -35,10 +33,7 @@ describe('RebalancerClient', () => {
   describe('isApyFresh', () => {
     it('returns true when pool APY is fresh', async () => {
       mockServer.simulateTransaction.mockResolvedValue({
-        result: {
-          status: 'SUCCESS',
-          returnValue: { value: { boolean: true } },
-        },
+        result: { retval: nativeToScVal(true, { type: 'bool' }) },
       });
 
       const poolId = new Address('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
@@ -50,10 +45,7 @@ describe('RebalancerClient', () => {
 
     it('returns false when pool APY is stale', async () => {
       mockServer.simulateTransaction.mockResolvedValue({
-        result: {
-          status: 'SUCCESS',
-          returnValue: { value: { boolean: false } },
-        },
+        result: { retval: nativeToScVal(false, { type: 'bool' }) },
       });
 
       const poolId = new Address('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
@@ -64,10 +56,8 @@ describe('RebalancerClient', () => {
 
     it('throws RebalanceError when simulation fails', async () => {
       mockServer.simulateTransaction.mockResolvedValue({
-        result: {
-          status: 'ERROR',
-          errorResult: 'Simulation failed',
-        },
+        error: 'Simulation failed',
+        events: [],
       });
 
       const poolId = new Address('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
@@ -78,10 +68,8 @@ describe('RebalancerClient', () => {
 
     it('throws RebalanceError with FRESHNESS_CHECK_ERROR code on failure', async () => {
       mockServer.simulateTransaction.mockResolvedValue({
-        result: {
-          status: 'ERROR',
-          errorResult: 'Simulation failed',
-        },
+        error: 'Simulation failed',
+        events: [],
       });
 
       const poolId = new Address('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
@@ -106,17 +94,14 @@ describe('RebalancerClient', () => {
 
     it('calls the correct contract method with pool ID', async () => {
       mockServer.simulateTransaction.mockResolvedValue({
-        result: {
-          status: 'SUCCESS',
-          returnValue: { value: { boolean: true } },
-        },
+        result: { retval: nativeToScVal(true, { type: 'bool' }) },
       });
 
       const poolId = new Address('GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF');
       await client.isApyFresh(poolId);
 
       const tx = mockServer.simulateTransaction.mock.calls[0][0];
-      expect(tx.operations[0].body.invokeContract.functionName).toBe('is_apy_fresh');
+      expect(tx.operations[0].func.invokeContract().functionName().toString()).toBe('is_apy_fresh');
     });
   });
 });
